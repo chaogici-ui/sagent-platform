@@ -57,10 +57,12 @@ services:
       - "8080:8080"
     environment:
       - VM_URL=http://victoriametrics:8428
-      # 浏览器可达的 Grafana 地址（前端指标浏览 iframe/跳转用，反代/远程部署时改此值）
-      - GRAFANA_PUBLIC_URL=http://localhost:3000
-      # 本机演示形态：注入演示 Agent 种子 + docker 探测 l1-* 容器状态；生产部署留空
-      - SEED_DEMO_AGENTS=1
+      # 浏览器可达的 Grafana 地址（前端指标浏览 iframe/跳转用，反代/远程部署时改此值或 .env 覆盖）
+      - GRAFANA_PUBLIC_URL=${GRAFANA_PUBLIC_URL:-http://localhost:3000}
+      # 浏览器可达的 VM 地址（vmui 跳转用；.env 里设 VM_PUBLIC_URL，不设则前端按访问地址推导）
+      - VM_PUBLIC_URL=${VM_PUBLIC_URL:-}
+      # 本机演示形态：注入演示 Agent 种子 + docker 探测 l1-* 容器状态；生产部署 .env 里置空
+      - SEED_DEMO_AGENTS=${SEED_DEMO_AGENTS:-1}
       - AGENT_CONTAINER_PREFIX=l1-
       - L0_NET=docker_l0-net
       - AGENT_HTTP_PORT=19090

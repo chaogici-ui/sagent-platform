@@ -94,9 +94,10 @@ sleep 5
 HEALTH=$(docker inspect l1-sagent-1 --format '{{.State.Health.Status}}' 2>/dev/null || echo "")
 check "健康检查恢复healthy" '[ "$HEALTH" = "healthy" ]'
 
-AFTER_CRASH=$(( $(date +%s) + 40 ))
 log "等待崩溃后数据回补 (35s)..."
 sleep 35
+# 窗口终点取等待后的实际时间（而不是 before+40 定死），避免回补慢时窗口尾部无数据点的时序偶发
+AFTER_CRASH=$(date +%s)
 DATA_POINTS=$(curl -s "http://localhost:8428/api/v1/query_range?query=node_load1&start=$BEFORE_CRASH&end=$AFTER_CRASH&step=15" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(len(r.get("values",[])) for r in d.get("data",{}).get("result",[])))' 2>/dev/null || echo 0)
 check "崩溃后数据继续上报" "[ \"\${DATA_POINTS:-0}\" -gt 0 ]"
 log "崩溃恢复时间 (目标<10s): 约8s"
@@ -161,6 +162,25 @@ check "对账引擎wild=0" '[ "$WILD" = "0" ]'
 
 PLUGINS=$(curl -s http://localhost:8080/api/catalog/plugins 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
 check "插件目录>=25" "[ \"\${PLUGINS:-0}\" -ge 25 ]"
+
+# 站点配置 API（前端外部地址统一后端下发，红线 2 落点）
+SITE_VM=$(curl -s http://localhost:8080/api/site-config 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("grafana_url",""))' 2>/dev/null || echo "")
+check "site-config下发Grafana地址" '[ -n "$SITE_VM" ]'
+CORS_ECHO=$(curl -s -i -X OPTIONS http://localhost:8080/api/agents -H 'Origin: http://example.test:9999' 2>/dev/null | grep -i 'access-control-allow-origin' | grep -c 'example.test:9999' || echo 0)
+check "CORS按请求Origin回显" "[ \"\${CORS_ECHO:-0}\" -ge 1 ]"
+
+# ====== 9. 红线 lint（CONSTRAINTS.md 静态检查，机器执行红线 2） ======
+log ""
+log "===== 9. 红线 lint（生产化约束） ====="
+check "CONSTRAINTS.md存在"            '[ -f "$ROOT/CONSTRAINTS.md" ]'
+check "Go代码l1-仅配置注册处(默认值)" '[ "$(grep -c "\"l1-" "$ROOT/l0-console/main.go")" = "1" ] && grep -qn "AGENT_CONTAINER_PREFIX" "$ROOT/l0-console/main.go"'
+check "Go代码无写死Grafana端口3000"   '! grep -qn "localhost:3000" "$ROOT/l0-console/"*.go'
+check "Go代码无写死console端口8080"   '! grep -qn "localhost:8080" "$ROOT/l0-console/"*.go'
+check "前端JS零写死http://localhost"  '! grep -qn "http://localhost" "$ROOT/l0-console/static/js/"*.js'
+check "前端走siteCfg下发外部地址"     'grep -qn "function siteCfg" "$ROOT/l0-console/static/js/utils.js"'
+check "Grafana密码走env覆盖"          'grep -qn "GF_SECURITY_ADMIN_PASSWORD=\${GRAFANA_ADMIN_PASSWORD" "$ROOT/deploy/docker/docker-compose.yml"'
+check "演示种子有显式开关变量"        'grep -qn "SEED_DEMO_AGENTS" "$ROOT/l0-console/main.go"'
+check "VM地址双概念分离"              'grep -qn "VM_PUBLIC_URL" "$ROOT/l0-console/main.go" && grep -qn "VM_PUBLIC_URL" "$ROOT/deploy/docker/docker-compose.yml"'
 
 # ====== 总结 ======
 log ""

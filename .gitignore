@@ -11,5 +11,8 @@ l0-console/data/sync_report.json
 .DS_Store
 /tmp/
 
+# 部署环境变量（真实凭据不入库，模板见 deploy/docker/.env.example）
+deploy/docker/.env
+
 # WorkBuddy 会话数据
 .workbuddy/
