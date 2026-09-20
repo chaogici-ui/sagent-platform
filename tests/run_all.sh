@@ -155,6 +155,16 @@ cd "$ROOT/l0-console" || exit 1
 check "L0控制台可编译"            'go build -o /dev/null .'
 check "L0控制台linux交叉编译"     'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .'
 
+# sagent 侧门禁（红线 6 对称覆盖：两个模块都要过编译与测试）
+cd "$ROOT/sagent" || exit 1
+check "SAgent可编译"              'go build -o /dev/null .'
+check "SAgentlinux交叉编译"       'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .'
+check "SAgent单测通过"            'go test ./... > /dev/null'
+
+# 单元测试（含 D8 对账展开 / 配置解析 / 审计与配置版本链）
+cd "$ROOT/l0-console" || exit 1
+check "L0控制台单测通过"          'go test ./... > /dev/null'
+
 # API 测试针对容器化运行的 l0-console（不在宿主机裸起进程）
 AGENTS=$(curl -s http://localhost:8080/api/agents 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else len(d.get("agents",[])))' 2>/dev/null || echo 0)
 check "L0 Agent列表API正常" "[ \"\${AGENTS:-0}\" -ge 3 ]"
