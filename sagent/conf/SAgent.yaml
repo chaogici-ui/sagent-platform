@@ -1,0 +1,15 @@
+server:
+  listen: ":19090"
+
+resource:
+  id: "test.dev.host.local"
+  type: "host"
+  business_system: "test"
+  env: "dev"
+  idc: "local"
+  cluster: "local-cluster"
+
+plugins:
+  host_metrics:
+    enabled: true
+    interval: 15s

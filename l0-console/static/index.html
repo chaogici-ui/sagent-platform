@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SAgent MVP</title>
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <!-- Sidebar -->
+    <nav>
+      <div class="logo">⚡ SAgent MVP</div>
+      <div class="nav-section">📏 能力中心</div>
+      <a data-page="plugins-mart" onclick="goPage('plugins-mart')"
+        >🔌 采集插件</a
+      >
+      <a data-page="metrics-catalog" onclick="goPage('metrics-catalog')"
+        >📏 指标中心</a
+      >
+      <div class="nav-section">🤖 采集管理</div>
+      <a data-page="slo" onclick="goPage('slo')">🏠 SLO 仪表盘</a>
+      <a data-page="agent-list" onclick="goPage('agent-list')">📋 Agent 清单</a>
+      <a data-page="targets" onclick="goPage('targets')">🎯 采集目标</a>
+      <a data-page="versions" onclick="goPage('versions')">🚀 批量升级</a>
+      <a data-page="add" onclick="goPage('add')">🤖 安装部署</a>
+      <div class="nav-section">⚙️ 运营</div>
+      <a data-page="metrics-browse" onclick="goPage('metrics-browse')"
+        >📊 分析大屏</a
+      >
+      <a data-page="audit" onclick="goPage('audit')">📜 审计日志</a>
+      <a data-page="tasks" onclick="goPage('tasks')">📋 任务历史</a>
+      <div class="nav-section">👤 系统</div>
+      <a data-page="tenants" onclick="goPage('tenants')">🏢 租户管理</a>
+    </nav>
+
+    <!-- Main -->
+    <main>
+      <div class="top">
+        <div class="search">
+          <input
+            type="text"
+            id="search-input"
+            placeholder="搜索 Agent ID / IP / 租户…"
+            onkeydown="if (event.key === 'Enter') doSearch();"
+          />
+        </div>
+        <div class="stat-cards" id="stat-cards"></div>
+      </div>
+      <div class="content" id="main-content"></div>
+    </main>
+
+    <!-- Agent detail panel -->
+    <div class="detail-panel" id="detail-panel">
+      <div class="detail-hd">
+        <h3 id="detail-title">Agent 详情</h3>
+        <span class="detail-close" onclick="closeDetail()">✕</span>
+      </div>
+      <div class="detail-tabs">
+        <span
+          class="active"
+          data-dtab="plugins"
+          onclick="switchDetailTab('plugins')"
+          >插件</span
+        >
+        <span data-dtab="config" onclick="switchDetailTab('config')">配置</span>
+        <span data-dtab="metrics" onclick="switchDetailTab('metrics')"
+          >指标</span
+        >
+        <span data-dtab="log" onclick="switchDetailTab('log')">日志</span>
+        <span data-dtab="trouble" onclick="switchDetailTab('trouble')">🩺 排障</span>
+      </div>
+      <div class="detail-section" id="detail-content"></div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <!-- Batch confirm modal -->
+    <div class="modal-overlay" id="batch-modal">
+      <div class="modal">
+        <h3 id="batch-modal-title">确认批量操作</h3>
+        <div
+          id="batch-modal-body"
+          style="font-size: 13px; color: var(--muted); margin-bottom: 12px"
+        ></div>
+        <div class="modal-actions">
+          <button class="btn btn-o" onclick="closeBatchModal()">取消</button>
+          <button
+            class="btn btn-d"
+            id="batch-modal-confirm"
+            onclick="confirmBatch()"
+          >
+            确认执行
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Install Modal -->
+    <div class="modal-overlay" id="add-agent-modal">
+      <div class="modal" style="max-width: 640px">
+        <div id="install-body"></div>
+      </div>
+    </div>
+
+    <script src="js/utils.js?v=5"></script>
+    <script src="js/api.js?v=5"></script>
+    <script src="js/fleet.js?v=5"></script>
+    <script src="js/panel.js?v=5"></script>
+    <script src="js/app.js?v=5"></script>
+    <script>
+      console.log("SAgent MVP v4 loaded @ " + new Date().toLocaleTimeString());
+    </script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+# 运行态产物（目录库由启动引导全量重建：Sync integrations + metrics.json 种子 + 系统插件行）
+l0-console/data/catalog.db
+l0-console/data/catalog.db-wal
+l0-console/data/catalog.db-shm
+l0-console/data/plugins.json
+l0-console/data/plugins/upload/
+l0-console/data/sync_report.json
+
+# 本地临时文件
+*.log
+.DS_Store
+/tmp/
+
+# WorkBuddy 会话数据
+.workbuddy/

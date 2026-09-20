@@ -1,0 +1,12 @@
+[
+  {"name":"sagent_uptime_seconds","unit":"s","note":"SAgent 进程运行时长","expression":"sagent_uptime_seconds","metric_type":"gauge"},
+  {"name":"sagent_goroutines","unit":"none","note":"SAgent 当前 goroutine 数","expression":"sagent_goroutines","metric_type":"gauge"},
+  {"name":"sagent_memory_alloc_bytes","unit":"bytesIEC","note":"SAgent 堆内存占用字节数","expression":"sagent_memory_alloc_bytes","metric_type":"gauge"},
+  {"name":"sagent_memory_sys_bytes","unit":"bytesIEC","note":"SAgent 向系统申请内存字节数","expression":"sagent_memory_sys_bytes","metric_type":"gauge"},
+  {"name":"sagent_gc_pause_ns_total","unit":"ns","note":"SAgent GC 暂停累计纳秒","expression":"sagent_gc_pause_ns_total","metric_type":"counter"},
+  {"name":"sagent_queue_size","unit":"none","note":"SAgent 发送队列当前长度","expression":"sagent_queue_size","metric_type":"gauge"},
+  {"name":"sagent_pending_size","unit":"none","note":"SAgent 待发送数据条数","expression":"sagent_pending_size","metric_type":"gauge"},
+  {"name":"sagent_script_ok","unit":"none","note":"自定义脚本执行成功标志（1=成功）","expression":"sagent_script_ok","metric_type":"gauge"},
+  {"name":"sagent_app_health","unit":"none","note":"SAgent 应用健康状态（1=健康）","expression":"sagent_app_health","metric_type":"gauge"},
+  {"name":"sagent_app_uptime_seconds","unit":"s","note":"SAgent 应用层运行时长","expression":"sagent_app_uptime_seconds","metric_type":"gauge"}
+]

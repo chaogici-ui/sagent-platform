@@ -1,0 +1,26 @@
+# SAgent Core 配置 — Collector Proxy
+server:
+  listen: ":19090"
+
+resource:
+  id: "order.prod.mysql.proxy-01"
+  type: "collector_proxy"
+  business_system: "order"
+  env: "prod"
+  idc: "idc-a"
+  cluster: "docker-cluster"
+
+plugins:
+  host_metrics:
+    enabled: false
+  log_metrics:
+    enabled: false
+  mysql_probe:
+    enabled: true
+    exporter_bin: "plugins/mysql_exporter/mysqld_exporter"
+    # 多目标：通过 --config.my-cnf 配置
+    targets:
+      - dsn: "root:sagent_test@tcp(mysql-1:3306)/"
+        resource_id: "order.prod.mysql.db-01"
+      - dsn: "root:sagent_test@tcp(mysql-2:3306)/"
+        resource_id: "order.prod.mysql.db-02"

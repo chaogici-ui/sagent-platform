@@ -1,0 +1,37 @@
+# SAgent Core 配置 (sagent-1)
+server:
+  listen: ":19090"
+
+resource:
+  id: "order.prod.host.sagent-1"
+  type: "host"
+  business_system: "bomc"
+  env: "prod"
+  idc: "idc-a"
+  cluster: "docker-cluster"
+
+plugins:
+  host_metrics:
+    enabled: true
+    interval: 30s
+  log_metrics:
+    enabled: true
+    bin_path: "plugins/vector/bin/vector"
+    conf_dir: "conf/plugins/vector"
+  custom_scripts:
+    enabled: true
+    scripts:
+      - name: check_queue
+        command: "sh plugins/custom_scripts/check_queue.sh"
+        interval: 15s
+        timeout: 5s
+        resource_id: "order.prod.custom.queue_check"
+        labels:
+          script_type: "shell"
+      - name: app_health
+        command: "sh plugins/custom_scripts/app_health.sh"
+        interval: 20s
+        timeout: 5s
+        resource_id: "order.prod.custom.app_health"
+        labels:
+          script_type: "shell"

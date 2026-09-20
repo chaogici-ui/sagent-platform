@@ -1,0 +1,3 @@
+[
+  {"name":"log_events_total","unit":"","note":"日志事件计数（log_metrics 由日志解析转换产出，按 level/method/status_class 分桶），计数器","expression":"log_events_total","metric_type":"counter"}
+]

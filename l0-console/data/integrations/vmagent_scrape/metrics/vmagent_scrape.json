@@ -1,0 +1,8 @@
+[
+  {"name":"up","unit":"none","note":"抓取目标存活（1=成功），vmagent 探针产出","expression":"up","metric_type":"gauge"},
+  {"name":"scrape_duration_seconds","unit":"s","note":"单次抓取耗时秒，vmagent 探针产出","expression":"scrape_duration_seconds","metric_type":"gauge"},
+  {"name":"scrape_samples_scraped","unit":"none","note":"单次抓取样本数，vmagent 探针产出","expression":"scrape_samples_scraped","metric_type":"gauge"},
+  {"name":"scrape_samples_post_metric_relabeling","unit":"none","note":"relabel 后样本数，vmagent 探针产出","expression":"scrape_samples_post_metric_relabeling","metric_type":"gauge"},
+  {"name":"scrape_series_added","unit":"none","note":"新增序列数，vmagent 探针产出","expression":"scrape_series_added","metric_type":"gauge"},
+  {"name":"scrape_timeout_seconds","unit":"s","note":"抓取超时配置秒","expression":"scrape_timeout_seconds","metric_type":"gauge"}
+]

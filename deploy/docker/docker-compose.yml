@@ -1,0 +1,213 @@
+# SAgent MVP — Docker Compose 环境
+
+networks:
+  l0-net:
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24
+  l1-net:
+    ipam:
+      config:
+        - subnet: 10.20.0.0/24
+
+services:
+  # ==================== L0 中心 ====================
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.93.0
+    container_name: l0-victoriametrics
+    networks:
+      - l0-net
+    ports:
+      - "8428:8428"
+    command:
+      - "--storageDataPath=/storage"
+      - "--retentionPeriod=30d"
+      - "--httpListenAddr=:8428"
+    volumes:
+      - vm-storage:/storage
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: l0-grafana
+    networks:
+      - l0-net
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./configs/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+
+  # ==================== L0 控制台 ====================
+  l0-console:
+    build:
+      context: ../../l0-console
+      dockerfile: Dockerfile
+    container_name: l0-console
+    networks:
+      - l0-net
+    ports:
+      - "8080:8080"
+    environment:
+      - VM_URL=http://victoriametrics:8428
+    volumes:
+      - catalog-data:/home/deploy/l0-console/data
+      # 本机 docker.sock：l0-console 借此探测 l1-* 演示 Agent 的真实容器状态
+      - /Users/gici/.docker/run/docker.sock:/var/run/docker.sock
+    # socket 属 root 组（660），补充 root 组获得读写权
+    group_add:
+      - "0"
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+
+  # ==================== L1 vmagent 汇聚层 ====================
+  vmagent:
+    image: victoriametrics/vmagent:v1.93.0
+    container_name: l1-vmagent
+    networks:
+      l1-net:
+      l0-net:
+    command:
+      - "--promscrape.config=/etc/vmagent/scrape.yml"
+      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write"
+      - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
+      - "--remoteWrite.maxDiskUsagePerURL=2GB"
+    volumes:
+      - ./configs/vmagent:/etc/vmagent:ro
+      - vmagent-buffer:/tmp/vmagent-buffer
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+
+  # ==================== L1 SAgent 采集节点 ====================
+  sagent-1:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-1
+    hostname: sagent-1
+    networks:
+      - l1-net
+    environment:
+      - SAGENT_RESOURCE_ID=order.prod.host.sagent-1
+      - SAGENT_RESOURCE_TYPE=host
+      - SAGENT_BUSINESS_SYSTEM=order
+      - SAGENT_ENV=prod
+      - SAGENT_IDC=idc-a
+      - SAGENT_CLUSTER=docker-cluster
+    volumes:
+      - ./configs/sagent/sagent-1.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+      - sagent-1-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:19090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  sagent-2:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-2
+    hostname: sagent-2
+    networks:
+      - l1-net
+    environment:
+      - SAGENT_RESOURCE_ID=order.prod.host.sagent-2
+      - SAGENT_RESOURCE_TYPE=host
+      - SAGENT_BUSINESS_SYSTEM=order
+      - SAGENT_ENV=prod
+      - SAGENT_IDC=idc-a
+      - SAGENT_CLUSTER=docker-cluster
+    volumes:
+      - ./configs/sagent/sagent-2.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+      - sagent-2-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:19090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ==================== MySQL 测试实例 ====================
+  mysql-1:
+    image: mysql:8.0
+    container_name: l1-mysql-1
+    networks:
+      - l1-net
+    environment:
+      MYSQL_ROOT_PASSWORD: sagent_test
+      MYSQL_DATABASE: testdb
+    volumes:
+      - mysql-1-data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  mysql-2:
+    image: mysql:8.0
+    container_name: l1-mysql-2
+    networks:
+      - l1-net
+    environment:
+      MYSQL_ROOT_PASSWORD: sagent_test
+      MYSQL_DATABASE: testdb
+    volumes:
+      - mysql-2-data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ==================== Collector Proxy（PaaS 远程采集代理） ====================
+  sagent-proxy:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-proxy
+    hostname: sagent-proxy
+    networks:
+      - l1-net
+    environment:
+      - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-01
+      - SAGENT_RESOURCE_TYPE=collector_proxy
+      - SAGENT_BUSINESS_SYSTEM=order
+      - SAGENT_ENV=prod
+      - SAGENT_IDC=idc-a
+      - SAGENT_CLUSTER=docker-cluster
+    volumes:
+      - ./configs/sagent/sagent-proxy.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+      - sagent-proxy-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:19090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  vm-storage:
+  grafana-storage:
+  catalog-data:
+  vmagent-buffer:
+  sagent-1-data:
+  sagent-2-data:
+  sagent-proxy-data:
+  mysql-1-data:
+  mysql-2-data:

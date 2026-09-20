@@ -1,0 +1,41 @@
+# Vector 日志转指标 + 上报到 Core bus.sock
+
+[transforms.log_parser]
+type = "remap"
+inputs = ["sagent_log"]
+source = '''
+parsed, err = parse_apache_log(.message, "common")
+if err != null { parsed = {} }
+
+status = to_string(parsed.status || "0")
+status_class = "other"
+if starts_with(status, "5") { status_class = "5xx" }
+if starts_with(status, "4") { status_class = "4xx" }
+if starts_with(status, "3") { status_class = "3xx" }
+if starts_with(status, "2") { status_class = "2xx" }
+
+level = "info"
+if starts_with(status, "5") { level = "error" }
+if starts_with(status, "4") { level = "warn" }
+
+method = to_string(parsed.method || "-")
+
+. = {
+  "name": "log_events_total",
+  "value": 1.0,
+  "type": "counter",
+  "help": "Total log events by level and status",
+  "labels": {
+    "level": level,
+    "status_class": status_class,
+    "method": method
+  }
+}
+'''
+
+[sinks.bus_socket]
+type = "socket"
+inputs = ["log_parser"]
+path = "run/bus.sock"
+mode = "unix"
+encoding.codec = "json"

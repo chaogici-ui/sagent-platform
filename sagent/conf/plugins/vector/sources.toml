@@ -1,0 +1,11 @@
+# Vector 日志源配置 — MVP 阶段使用 demo_logs 模拟日志
+
+[sources.sagent_log]
+type = "demo_logs"
+format = "apache_common"
+interval = 5
+
+# 内建指标（Vector 自身）
+[sources.internal_metrics]
+type = "internal_metrics"
+scrape_interval_secs = 15

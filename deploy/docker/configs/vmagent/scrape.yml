@@ -1,0 +1,9 @@
+# vmagent scrape 配置
+scrape_configs:
+      - job_name: "sagent"
+        scrape_interval: 15s
+        static_configs:
+              - targets:
+                      - "sagent-1:19090"
+                      - "sagent-2:19090"
+                      - "sagent-proxy:19090"
