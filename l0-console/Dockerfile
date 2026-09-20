@@ -22,6 +22,11 @@ COPY --chown=deploy:deploy data/integrations/ data/integrations/
 # 指标种子（系统内置插件 host_metrics/docker_metrics/custom_scripts 的完整治理字段定义）
 COPY --chown=deploy:deploy data/metrics.json data/metrics.json
 COPY --chown=deploy:deploy data/onboard_config.json data/onboard_config.json
+# pristine 种子副本：data 卷遮蔽镜像文件，entrypoint 每次启动用种子同步到卷（镜像赢/卷赢分离）
+COPY --chown=deploy:deploy data/metrics.json data/onboard_config.json /opt/l0-seed/
+COPY --chown=deploy:deploy data/integrations/ /opt/l0-seed/integrations/
+COPY --chown=deploy:deploy docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 EXPOSE 8080
 ENV VM_URL=http://victoriametrics:8428
-ENTRYPOINT ["./l0-console"]
+ENTRYPOINT ["./docker-entrypoint.sh"]
