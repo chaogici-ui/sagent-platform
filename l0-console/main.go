@@ -454,6 +454,11 @@ func main() {
 				writeJSON(w, map[string]interface{}{"error": "name 和 address 必填"})
 				return
 			}
+			// 目标分派只允许绑定真实 Agent（未分派允许 agent_id 为空）
+			if q.AgentID != "" && !agentExists(store, catDB, q.AgentID) {
+				writeJSON(w, map[string]interface{}{"error": "agent not found: " + q.AgentID})
+				return
+			}
 			id, err := catDB.InsertTarget(&storepkg.TargetRow{Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note})
 			if err != nil {
 				writeJSON(w, map[string]interface{}{"error": err.Error()})
@@ -467,6 +472,11 @@ func main() {
 			var q TargetReq
 			if err := json.NewDecoder(r.Body).Decode(&q); err != nil || q.ID == 0 {
 				writeJSON(w, map[string]interface{}{"error": "id 必填"})
+				return
+			}
+			// 目标分派只允许绑定真实 Agent（未分派允许 agent_id 为空）
+			if q.AgentID != "" && !agentExists(store, catDB, q.AgentID) {
+				writeJSON(w, map[string]interface{}{"error": "agent not found: " + q.AgentID})
 				return
 			}
 			// 找出旧分派，双端同步配置版本
@@ -1427,7 +1437,27 @@ func parseAgentConfigDoc(content string) map[string]interface{} {
 
 // handleAgentConfigRoute GET /api/agents/{id}/config 读取（结构化 parsed 视图）；
 // PUT 结构化更新 host_metrics 配置段（配置轨道：config_version+1，心跳热生效，不涉及 Agent 代码版本）
+// agentExists 校验 Agent 真实存在（内存注册表或持久层任一命中）。
+// 配置轨道/目标分派只允许绑定真实 Agent，杜绝幽灵数据（红线 4 的前提约束）。
+func agentExists(store *AgentStore, catDB *storepkg.DB, id string) bool {
+	if id == "" {
+		return false
+	}
+	if store.Get(id) != nil {
+		return true
+	}
+	if srcRow, _ := catDB.GetAgentSource(id); srcRow != "" {
+		return true
+	}
+	return false
+}
+
 func handleAgentConfigRoute(w http.ResponseWriter, r *http.Request, agentID string, store *AgentStore, catDB *storepkg.DB) {
+	// 健壮性门禁：此前幽灵 Agent PUT 会 200 静默落库，GET 还会触发 nil 解引用 panic——双缺陷一并封堵
+	if !agentExists(store, catDB, agentID) {
+		http.Error(w, "agent not found: "+agentID, http.StatusNotFound)
+		return
+	}
 	ver, content, _ := catDB.GetAgentConfig(agentID)
 	a := store.Get(agentID)
 	src := ""

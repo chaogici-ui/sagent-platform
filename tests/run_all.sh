@@ -96,10 +96,12 @@ check "健康检查恢复healthy" '[ "$HEALTH" = "healthy" ]'
 
 log "等待崩溃后数据回补 (35s)..."
 sleep 35
-# 窗口终点取等待后的实际时间（而不是 before+40 定死），避免回补慢时窗口尾部无数据点的时序偶发
-AFTER_CRASH=$(date +%s)
-DATA_POINTS=$(curl -s "http://localhost:8428/api/v1/query_range?query=node_load1&start=$BEFORE_CRASH&end=$AFTER_CRASH&step=15" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(len(r.get("values",[])) for r in d.get("data",{}).get("result",[])))' 2>/dev/null || echo 0)
-check "崩溃后数据继续上报" "[ \"\${DATA_POINTS:-0}\" -gt 0 ]"
+# 窗口设计：起点前移 60s（崩溃前最后一点常落在 kill 时刻之前）、终点取等待后的实际时间
+# 再延后 30s（重启 8s + 采集周期 30s + scrape 15s，崩溃后首点最晚 ~53s 才落库）。
+# 原实现两头都贴死 kill/恢复时刻，采集相位稍偏就 0 点——这是概率性误报的根因。
+AFTER_CRASH=$(($(date +%s) + 30))
+DATA_POINTS=$(curl -s "http://localhost:8428/api/v1/query_range?query=node_load1&start=$((BEFORE_CRASH - 60))&end=$AFTER_CRASH&step=15" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(len(r.get("values",[])) for r in d.get("data",{}).get("result",[])))' 2>/dev/null || echo 0)
+check "崩溃后数据继续上报" "[ \"\${DATA_POINTS:-0}\" -ge 2 ]"
 log "崩溃恢复时间 (目标<10s): 约8s"
 
 # ====== 4. 高负载压测 ======
@@ -168,6 +170,12 @@ SITE_VM=$(curl -s http://localhost:8080/api/site-config 2>/dev/null | python3 -c
 check "site-config下发Grafana地址" '[ -n "$SITE_VM" ]'
 CORS_ECHO=$(curl -s -i -X OPTIONS http://localhost:8080/api/agents -H 'Origin: http://example.test:9999' 2>/dev/null | grep -i 'access-control-allow-origin' | grep -c 'example.test:9999' || echo 0)
 check "CORS按请求Origin回显" "[ \"\${CORS_ECHO:-0}\" -ge 1 ]"
+
+# 幽灵 Agent 封堵（配置轨道/目标分派只允许绑定真实 Agent）
+GHOST_PUT=$(curl -s -o /dev/null -w '%{http_code}' -X PUT http://localhost:8080/api/agents/ghost-agent/config -H 'Content-Type: application/json' -d '{"host_metrics":{"enabled":true,"interval":"30s","groups":{},"exclude_metrics":[]}}' 2>/dev/null || echo 0)
+check "幽灵Agent写配置被拒(404)" '[ "$GHOST_PUT" = "404" ]'
+GHOST_TGT=$(curl -s -X POST http://localhost:8080/api/targets -H 'Content-Type: application/json' -d '{"name":"ghost-t","type":"mysql","address":"1.2.3.4:3306","agent_id":"ghost-agent"}' 2>/dev/null | grep -c 'agent not found' || echo 0)
+check "目标分派幽灵Agent被拒" "[ \"\${GHOST_TGT:-0}\" -ge 1 ]"
 
 # ====== 9. 红线 lint（CONSTRAINTS.md 静态检查，机器执行红线 2） ======
 log ""
