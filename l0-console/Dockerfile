@@ -21,6 +21,7 @@ COPY --chown=deploy:deploy static/ static/
 COPY --chown=deploy:deploy data/integrations/ data/integrations/
 # 指标种子（系统内置插件 host_metrics/docker_metrics/custom_scripts 的完整治理字段定义）
 COPY --chown=deploy:deploy data/metrics.json data/metrics.json
+COPY --chown=deploy:deploy data/onboard_config.json data/onboard_config.json
 EXPOSE 8080
 ENV VM_URL=http://victoriametrics:8428
 ENTRYPOINT ["./l0-console"]

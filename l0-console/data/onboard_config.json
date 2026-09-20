@@ -1,0 +1,17 @@
+{
+  "agent_types": [
+    {"id": "edge", "name": "📡 边缘采集 Agent", "desc": "部署在主机上，采集 CPU/内存/磁盘/网络、日志指标、运行巡检脚本", "plugins": ["host_metrics", "log_metrics", "custom_scripts"]},
+    {"id": "proxy", "name": "🔗 Collector Proxy", "desc": "部署在 Proxy 节点，远程采集 MySQL/Redis/Kafka 等中间件指标", "plugins": ["mysql_probe", "prometheus_scrape"]},
+    {"id": "custom", "name": "⚙️ 自定义", "desc": "按需选择组件，适用于特殊场景", "plugins": []}
+  ],
+  "manageable_plugins": ["log_metrics", "mysql_probe", "custom_scripts"],
+  "onboard_plugins": [
+    {"name": "MySQL", "probe": "mysql_probe", "port": "3306"},
+    {"name": "Redis", "probe": "redis_probe", "port": "6379"},
+    {"name": "Kafka", "probe": "kafka_exporter", "port": "9092"},
+    {"name": "Elasticsearch", "probe": "elasticsearch_exporter", "port": "9200"},
+    {"name": "ClickHouse", "probe": "clickhouse_exporter", "port": "9363"},
+    {"name": "HTTP 拨测", "probe": "http_response", "port": "443"},
+    {"name": "自定义脚本", "probe": "custom_scripts", "port": ""}
+  ]
+}

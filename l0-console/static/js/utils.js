@@ -18,6 +18,19 @@
         }).catch(fallback);
       }
 
+      // ==== 接入配置（Agent 类型捆绑 / 接入向导插件清单，产品语义由后端下发，前端零写死） ====
+      var _onboardCfg = null;
+      function onboardCfg(cb) {
+        if (_onboardCfg) { cb(_onboardCfg); return; }
+        fetch(API + '/onboard/config').then(function(r){ return r.json(); }).then(function(d) {
+          _onboardCfg = d;
+          cb(_onboardCfg);
+        }).catch(function(){
+          _onboardCfg = { agent_types: [], manageable_plugins: [], onboard_plugins: [] };
+          cb(_onboardCfg);
+        });
+      }
+
       async function refresh() {
         try {
           agents = await (await fetch(API + "/agents")).json();

@@ -5,13 +5,12 @@
         renderInstallView();
       }
       function renderInstallView() {
-        var templates = [
-          {id:'edge', name:'📡 边缘采集 Agent', desc:'部署在主机上，采集 CPU/内存/磁盘/网络、日志指标、运行巡检脚本', plugins:'host_metrics + log_metrics + custom_scripts'},
-          {id:'proxy', name:'🔗 Collector Proxy', desc:'部署在 Proxy 节点，远程采集 MySQL/Redis/Kafka 等中间件指标', plugins:'mysql_probe + prometheus_scrape'},
-          {id:'custom', name:'⚙️ 自定义', desc:'按需选择组件，适用于特殊场景', plugins:'自定义组合'}
-        ];
-        var body = document.getElementById('install-body');
-        if (!body) return;
+        onboardCfg(function(cfg) {
+          var templates = cfg.agent_types.map(function(t){
+            return {id: t.id, name: t.name, desc: t.desc, plugins: t.plugins.join(' + ') || '自定义组合'};
+          });
+          var body = document.getElementById('install-body');
+          if (!body) return;
         var h = '<div style="font-size:15px;font-weight:600;margin-bottom:16px">🤖 安装部署 Agent</div>';
         // Section 1: Profile
         h += '<div style="margin-bottom:16px"><b style="font-size:12px">① 选择部署模板（定义 Agent 角色）</b>';
@@ -48,6 +47,7 @@
         if (recently.length > 0 && list) {
           list.innerHTML = recently.slice(0,5).map(function(a){return '<div style="padding:4px 0">🔹 '+a.name+' <span style="color:var(--muted)">'+a.ip+'</span></div>'}).join('') + '<div style="margin-top:4px"><a href="#" onclick="closeModal(\'add-agent-modal\');goPage(\'agent-list\')" style="color:var(--primary)">查看全部 →</a></div>';
         }
+        });
       }
       function selectInstallTemplate(idx) {
         document.querySelectorAll('.tmpl-card').forEach(function(c,i){c.classList.toggle('active',i===idx)});
@@ -56,12 +56,13 @@
       }
       function genInstallCmd() {
         var idx = parseInt(document.getElementById('install-tmpl').value) || 0;
-        var tmpls = ['edge','proxy','custom'];
         var idc = document.getElementById('install-idc').value || 'default';
         var tags = document.getElementById('install-tags').value || 'default';
         var origin = location.origin;
-        var plugins = {edge:'["host_metrics","log_metrics","custom_scripts"]',proxy:'["mysql_probe","prometheus_scrape"]',custom:'[]'}[tmpls[idx]] || '[]';
-        var body = '{"id":"","type":"'+tmpls[idx]+'","version":"dev","ip":"","plugins":'+plugins+',"labels":{"idc":"'+idc+'","env":"'+tags+'"}}';
+        // Agent 类型捆绑由后端下发（onboard/config），前端不写死插件清单
+        var tpl = (_onboardCfg && _onboardCfg.agent_types || [])[idx] || {};
+        var plugins = JSON.stringify(tpl.plugins || []);
+        var body = '{"id":"","type":"'+(tpl.id||'')+'","version":"dev","ip":"","plugins":'+plugins+',"labels":{"idc":"'+idc+'","env":"'+tags+'"}}';
         var cmd = '# ① 注册：在目标主机执行（Agent 自动出现在本平台清单）\n';
         cmd += 'curl -sS -X POST ' + origin + '/api/agent/register \\\n';
         cmd += '  -H "Content-Type: application/json" -d \'' + body + '\'\n\n';
@@ -1051,15 +1052,8 @@ function mdRender(md) {
       }
       // ---- M1-⑤ 接入向导：选插件 → 填目标 → 分派 Agent → 连通性测试 → 配置下发回执 ----
       function openOnboardWizard(prePlugin) {
-        var plugins = [
-          {name:'MySQL',probe:'mysql_probe',port:'3306'},
-          {name:'Redis',probe:'redis_probe',port:'6379'},
-          {name:'Kafka',probe:'kafka_exporter',port:'9092'},
-          {name:'Elasticsearch',probe:'elasticsearch_exporter',port:'9200'},
-          {name:'ClickHouse',probe:'clickhouse_exporter',port:'9363'},
-          {name:'HTTP 拨测',probe:'http_response',port:'443'},
-          {name:'自定义脚本',probe:'custom_scripts',port:''}
-        ];
+        onboardCfg(function(cfg) {
+        var plugins = cfg.onboard_plugins || [];
         var agentOpts = agents.map(function(a){
           return '<option value="'+a.id+'"'+(a.source==='heartbeat'?' data-hb="1"':'')+'>'+escHtml(a.id)+'（'+(a.type==='proxy'?'Proxy':'Edge')+(a.source==='heartbeat'?' · 心跳':' · 本机')+' · '+a.status+'）</option>';
         }).join('');
@@ -1091,6 +1085,7 @@ function mdRender(md) {
           return h;
         }, true, renderTargets);
         obLoadGroupList();
+        });
       }
       // 接入向导：动态加载 host_metrics 分组清单（治理目录推导，不写死）
       function obLoadGroupList() {
@@ -1575,7 +1570,7 @@ function mdRender(md) {
         if (tab === "plugins") {
           html = '<div style="padding:8px 0">';
           (a.plugins||[]).forEach(function(p) {
-            var m = ["log_metrics","mysql_probe","custom_scripts"].indexOf(p) >= 0;
+            var m = ((_onboardCfg && _onboardCfg.manageable_plugins) || ["log_metrics","mysql_probe","custom_scripts"]).indexOf(p) >= 0;
             html += '<div class="wiz-plugin-row"><div><b>'+p+'</b></div>'+
               (m ? '<div class="plugin-actions" id="pa-'+p+'">加载中...</div>' : '<span class="badge" style="background:#f0f0f0;color:#999">内置</span>')+
               '</div>';

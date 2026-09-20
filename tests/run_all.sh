@@ -189,6 +189,9 @@ check "前端走siteCfg下发外部地址"     'grep -qn "function siteCfg" "$RO
 check "Grafana密码走env覆盖"          'grep -qn "GF_SECURITY_ADMIN_PASSWORD=\${GRAFANA_ADMIN_PASSWORD" "$ROOT/deploy/docker/docker-compose.yml"'
 check "演示种子有显式开关变量"        'grep -qn "SEED_DEMO_AGENTS" "$ROOT/l0-console/main.go"'
 check "VM地址双概念分离"              'grep -qn "VM_PUBLIC_URL" "$ROOT/l0-console/main.go" && grep -qn "VM_PUBLIC_URL" "$ROOT/deploy/docker/docker-compose.yml"'
+check "前端零写死插件捆绑"            '! grep -qn "host_metrics","log_metrics" "$ROOT/l0-console/static/js/panel.js" && ! grep -qn "probe:.\x27mysql_probe" "$ROOT/l0-console/static/js/panel.js"'
+check "接入配置由后端下发"            'grep -qn "onboard/config" "$ROOT/l0-console/main.go" && grep -qn "onboardCfg" "$ROOT/l0-console/static/js/utils.js"'
+check "onboard数据文件在镜像COPY清单" 'grep -qn "onboard_config.json" "$ROOT/l0-console/Dockerfile"'
 
 # ====== 总结 ======
 log ""
