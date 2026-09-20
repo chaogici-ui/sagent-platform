@@ -301,7 +301,20 @@ function renderMetricsBrowse() {
         }
         var cnt = document.getElementById('audit-count');
         if (cnt) cnt.textContent = '显示 '+filtered.length+'/'+entries.length+' 条';
-      }function renderVersions() {
+      }function verCmp(a, b) {
+        // 语义化版本比较：v0.10.0 > v0.9.0（分段数值比较，修字典序 sort 的 v0.10 < v0.9 缺陷）；unknown 恒为最小
+        if (a === b) return 0;
+        if (a === 'unknown') return -1;
+        if (b === 'unknown') return 1;
+        var pa = String(a).replace(/^v/, '').split('.').map(Number);
+        var pb = String(b).replace(/^v/, '').split('.').map(Number);
+        for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+          var x = pa[i] || 0, y = pb[i] || 0;
+          if (x !== y) return x - y;
+        }
+        return 0;
+      }
+      function renderVersions() {
         var total = agents.length||1;
         // Version distribution
         var verMap = {};
@@ -318,7 +331,7 @@ function renderMetricsBrowse() {
         html += '<div style="padding:14px;background:var(--card);border-radius:8px;text-align:center;box-shadow:var(--shadow)"><div style="font-size:24px;font-weight:700">'+total+'</div><div style="font-size:11px;color:var(--muted)">Agent 总数</div></div>';
         html += '<div style="padding:14px;background:var(--card);border-radius:8px;text-align:center;box-shadow:var(--shadow)"><div style="font-size:24px;font-weight:700">'+Object.keys(verMap).length+'</div><div style="font-size:11px;color:var(--muted)">运行版本数</div></div>';
         html += '<div style="padding:14px;background:var(--card);border-radius:8px;text-align:center;box-shadow:var(--shadow)"><div style="font-size:24px;font-weight:700">'+Object.keys(osMap).length+'</div><div style="font-size:11px;color:var(--muted)">操作系统类型</div></div>';
-        var latest = Object.keys(verMap).sort().pop()||'v0.3.0';
+        var latest = Object.keys(verMap).filter(function(v){return v!=='unknown'}).sort(verCmp).pop()||'unknown';
         var onLatest = verMap[latest]||0;
         html += '<div style="padding:14px;background:var(--card);border-radius:8px;text-align:center;box-shadow:var(--shadow)"><div style="font-size:24px;font-weight:700;color:'+(onLatest===total?'var(--success)':'var(--warn)')+'">'+Math.round(onLatest/total*100)+'%</div><div style="font-size:11px;color:var(--muted)">已升级到最新 '+latest+'</div></div>';
         html += '</div>';
@@ -329,7 +342,7 @@ function renderMetricsBrowse() {
         html += '<div class="card"><div class="card-hd">📦 版本分布</div><div class="card-bd">';
         var verColors = {'v0.3.0':'#10b981','v0.3.1':'#2563eb','v0.4.0':'#f59e0b',unknown:'#d1d5db'};
         html += '<table style="font-size:12px;width:100%"><thead><tr><th>版本</th><th style="text-align:right">数量</th><th>占比</th><th>状态</th></tr></thead><tbody>';
-        Object.keys(verMap).sort().reverse().forEach(function(v){
+        Object.keys(verMap).sort(verCmp).reverse().forEach(function(v){
           var pct = Math.round(verMap[v]/total*100);
           var status = v===latest?'<span class="badge b-h">最新</span>':(pct<10?'<span class="badge" style="background:#fef3c7;color:#f59e0b">老旧</span>':'<span class="badge b-r">稳定</span>');
           html += '<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+(verColors[v]||'#d1d5db')+';margin-right:6px"></span><b>'+v+'</b></td><td style="text-align:right">'+verMap[v]+'</td><td><div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:6px;background:var(--bg);border-radius:3px;overflow:hidden"><div style="width:'+pct+'%;height:100%;background:'+(verColors[v]||'#2563eb')+';border-radius:3px"></div></div>'+pct+'%</div></td><td>'+status+'</td></tr>';

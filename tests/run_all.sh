@@ -7,8 +7,15 @@
 # 禁止在 check 参数里写管道（管道会被外层解析，pass 输出被 grep 吞掉 + set -e 误杀脚本）
 set -u
 
+# Go 工具链锚定：本机存在双 go（~/tools/go=1.26.2 与 /opt/homebrew/bin/go=1.26.7），
+# GOCACHE 里的 stdlib 产物绑定编译它的工具链版本，混用即报
+# "compile: version goX does not match go tool version goY"。必须在改动 PATH 前
+# 锚定用户原始 PATH 解析到的 go，下方所有 Go 检查统一用 "$GO_BIN"。
+GO_BIN="$(command -v go 2>/dev/null || echo go)"
 # docker CLI 在 /usr/local/bin（Docker Desktop），非交互 shell 默认 PATH 不含
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+# Go 模块代理兜底：本机直连 proxy.golang.org 间歇超时，未显式配置时用国内镜像
+export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_DIR="$ROOT/deploy/docker"
@@ -152,18 +159,18 @@ check "Grafana可访问" '[ "$GRAFANA_CODE" = "200" ]'
 log ""
 log "===== 8. L0管控台测试 ====="
 cd "$ROOT/l0-console" || exit 1
-check "L0控制台可编译"            'go build -o /dev/null .'
-check "L0控制台linux交叉编译"     'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .'
+check "L0控制台可编译"            '"$GO_BIN" build -o /dev/null .'
+check "L0控制台linux交叉编译"     'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o /dev/null .'
 
 # sagent 侧门禁（红线 6 对称覆盖：两个模块都要过编译与测试）
 cd "$ROOT/sagent" || exit 1
-check "SAgent可编译"              'go build -o /dev/null .'
-check "SAgentlinux交叉编译"       'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .'
-check "SAgent单测通过"            'go test ./... > /dev/null'
+check "SAgent可编译"              '"$GO_BIN" build -o /dev/null .'
+check "SAgentlinux交叉编译"       'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o /dev/null .'
+check "SAgent单测通过"            '"$GO_BIN" test ./... > /dev/null'
 
 # 单元测试（含 D8 对账展开 / 配置解析 / 审计与配置版本链）
 cd "$ROOT/l0-console" || exit 1
-check "L0控制台单测通过"          'go test ./... > /dev/null'
+check "L0控制台单测通过"          '"$GO_BIN" test ./... > /dev/null'
 
 # API 测试针对容器化运行的 l0-console（不在宿主机裸起进程）
 AGENTS=$(curl -s http://localhost:8080/api/agents 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else len(d.get("agents",[])))' 2>/dev/null || echo 0)
@@ -203,6 +210,9 @@ check "前端零写死插件捆绑"            '! grep -qn "host_metrics","log_m
 check "接入配置由后端下发"            'grep -qn "onboard/config" "$ROOT/l0-console/main.go" && grep -qn "onboardCfg" "$ROOT/l0-console/static/js/utils.js"'
 check "onboard数据文件在镜像COPY清单" 'grep -qn "onboard_config.json" "$ROOT/l0-console/Dockerfile"'
 check "data卷遮蔽根治:种子同步entrypoint" 'grep -qn "l0-seed" "$ROOT/l0-console/docker-entrypoint.sh" && grep -qn "docker-entrypoint.sh" "$ROOT/l0-console/Dockerfile" && grep -qn "ENTRYPOINT.*docker-entrypoint" "$ROOT/l0-console/Dockerfile"'
+check "审计operator走env非写死admin"   'grep -qn "cfgAuditOperator" "$ROOT/l0-console/main.go" && ! grep -qn "InsertAudit(ts, \"admin\"" "$ROOT/l0-console/main.go"'
+check "审计operator透传compose"        'grep -qn "AUDIT_OPERATOR" "$ROOT/deploy/docker/docker-compose.yml"'
+check "版本比较用语义化verCmp"         'grep -qn "function verCmp" "$ROOT/l0-console/static/js/panel.js" && ! grep -qn "verMap).sort()" "$ROOT/l0-console/static/js/panel.js"'
 
 # ====== 总结 ======
 log ""

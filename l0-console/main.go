@@ -178,7 +178,7 @@ func addAudit(action, target, scope, result string) {
 	auditMu.Unlock()
 	// M2-⑪ 审计落库：best effort，失败只打日志不阻断业务
 	if auditDB != nil {
-		if err := auditDB.InsertAudit(ts, "admin", action, target, scope, result); err != nil {
+		if err := auditDB.InsertAudit(ts, cfgAuditOperator, action, target, scope, result); err != nil {
 			log.Printf("audit persist: %v", err)
 		}
 	}
@@ -203,6 +203,7 @@ var (
 	cfgGrafanaPublicURL    string // 浏览器可达的 Grafana 地址 GRAFANA_PUBLIC_URL
 	cfgCORSOrigin          string // 允许的 CORS 源           CORS_ORIGIN（空=回显请求 Origin，即同源部署）
 	cfgSeedDemoAgents      bool   // 是否注入演示 Agent 种子   SEED_DEMO_AGENTS=1（生产部署必须留空）
+	cfgAuditOperator       string // 审计记录操作者标识        AUDIT_OPERATOR（默认 admin，生产建议改为真实账号体系标识）
 )
 
 func init() {
@@ -213,6 +214,7 @@ func init() {
 	cfgGrafanaPublicURL = envOr("GRAFANA_PUBLIC_URL", "")
 	cfgCORSOrigin = os.Getenv("CORS_ORIGIN")
 	cfgSeedDemoAgents = os.Getenv("SEED_DEMO_AGENTS") == "1"
+	cfgAuditOperator = envOr("AUDIT_OPERATOR", "admin")
 }
 
 func envOr(key, def string) string {
