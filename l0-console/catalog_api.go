@@ -129,10 +129,8 @@ func handleCatalogSyncReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func vmBaseURL() string {
-	if v := os.Getenv("VM_URL"); v != "" {
-		return strings.TrimRight(v, "/")
-	}
-	return "http://localhost:8428"
+	// 统一走 main.go 的 vmBase()（VM_URL 环境变量驱动），避免多处默认值漂移
+	return vmBase()
 }
 
 // handleVMLabelValues 代理 /api/v1/label/{label}/values?match[]={metric}
@@ -144,12 +142,9 @@ func handleVMLabelValues(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"error": "metric and label required"})
 		return
 	}
-	vmBase := os.Getenv("VM_URL")
-	if vmBase == "" {
-		vmBase = "http://localhost:8428"
-	}
+	vmURL := vmBase()
 	match := fmt.Sprintf(`{__name__=%q}`, metric)
-	u := fmt.Sprintf("%s/api/v1/label/%s/values?match[]=%s", vmBase, url.PathEscape(label), url.QueryEscape(match))
+	u := fmt.Sprintf("%s/api/v1/label/%s/values?match[]=%s", vmURL, url.PathEscape(label), url.QueryEscape(match))
 	resp, err := http.Get(u)
 	if err != nil {
 		writeJSON(w, map[string]interface{}{"error": err.Error()})
@@ -361,12 +356,8 @@ func handleVMQueryRange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"error": "query required"})
 		return
 	}
-	vmBase := os.Getenv("VM_URL")
-	if vmBase == "" {
-		vmBase = "http://localhost:8428"
-	}
 	u := fmt.Sprintf("%s/api/v1/query_range?query=%s&start=%s&end=%s&step=%s",
-		vmBase, url.QueryEscape(query), url.QueryEscape(q.Get("start")),
+		vmBase(), url.QueryEscape(query), url.QueryEscape(q.Get("start")),
 		url.QueryEscape(q.Get("end")), url.QueryEscape(q.Get("step")))
 	resp, err := http.Get(u)
 	if err != nil {

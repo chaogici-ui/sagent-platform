@@ -193,19 +193,22 @@ function renderTasks() {
       }
 
 function renderMetricsBrowse() {
-        var grafanaUrl= 'http://localhost:3000/dashboard/new?orgId=1&editPanel=1';
-        
-        var html = '<div class="card" style="height:calc(100vh - 130px);display:flex;flex-direction:column">';
-        html += '<div class="card-hd">📈 指标浏览 <span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'grafana\')">Grafana</span><span onclick="switchMetricsTab(\'vmui\')">VMUI</span></span></div>';
-        html += '<div class="card-bd" style="flex:1;padding:0;overflow:hidden">';
-        html += '<iframe id="metrics-frame" src="'+grafanaUrl+'" style="width:100%;height:100%;border:0"></iframe>';
-        html += '</div></div>';
-        document.getElementById("main-content").innerHTML = html;
+        siteCfg(function(cfg) {
+          var grafanaUrl = cfg.grafana_url + '/dashboard/new?orgId=1&editPanel=1';
+          var html = '<div class="card" style="height:calc(100vh - 130px);display:flex;flex-direction:column">';
+          html += '<div class="card-hd">📈 指标浏览 <span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'grafana\')">Grafana</span><span onclick="switchMetricsTab(\'vmui\')">VMUI</span></span></div>';
+          html += '<div class="card-bd" style="flex:1;padding:0;overflow:hidden">';
+          html += '<iframe id="metrics-frame" src="'+grafanaUrl+'" style="width:100%;height:100%;border:0"></iframe>';
+          html += '</div></div>';
+          document.getElementById("main-content").innerHTML = html;
+        });
       }
       function switchMetricsTab(t) {
         document.querySelectorAll(".card-hd .tabs span").forEach(function(s){s.classList.toggle("active",s.textContent.toLowerCase().indexOf(t)>=0)});
         var frame = document.getElementById("metrics-frame");
-        if (frame) frame.src = t==='vmui' ? 'http://localhost:8428/vmui/#/' : 'http://localhost:3000/dashboard/new?orgId=1&editPanel=1';
+        if (frame) siteCfg(function(cfg) {
+          frame.src = t==='vmui' ? cfg.vm_url + '/vmui/#/' : cfg.grafana_url + '/dashboard/new?orgId=1&editPanel=1';
+        });
       }
 
       // ===================================================================
@@ -1659,9 +1662,9 @@ function mdRender(md) {
             var cc=function(label){return label.indexOf('CPU')>=0||label.indexOf('内存')>=0||label.indexOf('磁盘')>=0?'color:'+(parseFloat(gg(cards.filter(function(c){return c[0]===label})[0][1]))>80?'var(--error)':'var(--success)')+';':'color:var(--primary);';};
             var out='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">';
             cards.forEach(function(c){out+='<div style="padding:20px;background:var(--bg);border-radius:8px;text-align:center"><div style="font-size:32px;font-weight:700;'+cc(c[0])+'">'+gg(c[1])+' <span style="font-size:14px;font-weight:400">'+c[2]+'</span></div><div style="font-size:12px;color:var(--muted);margin-top:6px">'+c[0]+'</div></div>';});
-            out+='</div><div style="font-size:11px;color:var(--muted)">共 '+all.length+' 条指标 · <a href="http://localhost:3000" target="_blank" style="color:var(--primary)">📊 Grafana →</a></div>';
+            out+='</div><div style="font-size:11px;color:var(--muted)">共 '+all.length+' 条指标 · <a href="'+(_siteCfg?_siteCfg.grafana_url:location.protocol+'//'+location.hostname+':3000')+'" target="_blank" style="color:var(--primary)">📊 Grafana →</a></div>';
             document.getElementById("detail-content").innerHTML=out;
-          }).catch(function(){document.getElementById("detail-content").innerHTML='<div style="text-align:center;padding:40px;color:var(--muted)"><div style="font-size:36px;margin-bottom:8px">📊</div>无法获取指标<br><a href="http://localhost:3000" target="_blank" style="color:var(--primary);font-size:12px">Grafana →</a></div>';});
+          }).catch(function(){document.getElementById("detail-content").innerHTML='<div style="text-align:center;padding:40px;color:var(--muted)"><div style="font-size:36px;margin-bottom:8px">📊</div>无法获取指标<br><a href="'+(_siteCfg?_siteCfg.grafana_url:location.protocol+'//'+location.hostname+':3000')+'" target="_blank" style="color:var(--primary);font-size:12px">Grafana →</a></div>';});
         } else if (tab === "log") {
           html = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:30px">加载中...</div>';
           document.getElementById("detail-content").innerHTML = html;

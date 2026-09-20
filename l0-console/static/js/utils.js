@@ -1,3 +1,23 @@
+      // ==== 站点外部地址（生产化红线：前端禁止写死环境地址，统一从 /api/site-config 获取） ====
+      var _siteCfg = null;
+      function siteCfg(cb) {
+        if (_siteCfg) { cb(_siteCfg); return; }
+        var fallback = function() {
+          _siteCfg = {
+            vm_url: location.protocol + '//' + location.hostname + ':8428',
+            grafana_url: location.protocol + '//' + location.hostname + ':3000'
+          };
+          cb(_siteCfg);
+        };
+        fetch(API + '/site-config').then(function(r){ return r.json(); }).then(function(d) {
+          _siteCfg = {
+            vm_url: d.vm_url || location.protocol + '//' + location.hostname + ':8428',
+            grafana_url: d.grafana_url || location.protocol + '//' + location.hostname + ':3000'
+          };
+          cb(_siteCfg);
+        }).catch(fallback);
+      }
+
       async function refresh() {
         try {
           agents = await (await fetch(API + "/agents")).json();

@@ -44,28 +44,30 @@ type AgentStore struct {
 	agents map[string]*Agent
 }
 
+// NewAgentStore 生产形态从空注册表起步：Agent 由心跳注册（/api/agent/register）产生，
+// 不预置任何演示数据。本机演示环境通过 SEED_DEMO_AGENTS=1 + seedDemoAgentsInMemory 注入。
 func NewAgentStore() *AgentStore {
-	return &AgentStore{
-		agents: map[string]*Agent{
-			"sagent-1": {
-				ID: "sagent-1", Name: "Edge Collector 1", Type: "edge",
-				Status: "unknown", Host: "sagent-1", Port: 19090,
-				Plugins: []string{"host_metrics", "log_metrics", "custom_scripts"},
-				Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"},
-			},
-			"sagent-2": {
-				ID: "sagent-2", Name: "Edge Collector 2", Type: "edge",
-				Status: "unknown", Host: "sagent-2", Port: 19090,
-				Plugins: []string{"host_metrics", "log_metrics", "custom_scripts"},
-				Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"},
-			},
-			"sagent-proxy": {
-				ID: "sagent-proxy", Name: "Collector Proxy", Type: "proxy",
-				Status: "unknown", Host: "sagent-proxy", Port: 19090,
-				Plugins: []string{"mysql_probe"},
-				Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"},
-			},
-		},
+	return &AgentStore{agents: map[string]*Agent{}}
+}
+
+// seedDemoAgentsInMemory 本机演示种子（仅 SEED_DEMO_AGENTS=1 时调用）
+func seedDemoAgentsInMemory(store *AgentStore) {
+	demo := []*Agent{
+		{ID: "sagent-1", Name: "Edge Collector 1", Type: "edge",
+			Status: "unknown", Host: "sagent-1", Port: 19090,
+			Plugins: []string{"host_metrics", "log_metrics", "custom_scripts"},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"}},
+		{ID: "sagent-2", Name: "Edge Collector 2", Type: "edge",
+			Status: "unknown", Host: "sagent-2", Port: 19090,
+			Plugins: []string{"host_metrics", "log_metrics", "custom_scripts"},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"}},
+		{ID: "sagent-proxy", Name: "Collector Proxy", Type: "proxy",
+			Status: "unknown", Host: "sagent-proxy", Port: 19090,
+			Plugins: []string{"mysql_probe"},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"}},
+	}
+	for _, a := range demo {
+		store.agents[a.ID] = a
 	}
 }
 
@@ -116,7 +118,7 @@ func (s *AgentStore) Put(a *Agent) {
 
 // detectVersion 从容器中读取 SAgent 实际版本
 func detectVersion(agentID string) string {
-	containerName := "l1-" + agentID
+	containerName := agentContainerName(agentID)
 	out, err := runCmd(".", "docker", "exec", containerName,
 		"/home/deploy/SAgent/bin/SAgent", "-version")
 	if err != nil {
@@ -191,8 +193,46 @@ func vmBase() string {
 	return "http://localhost:8428"
 }
 
+// ==================== 运行时配置（生产化红线：业务代码禁止写死环境地址/演示数据） ====================
+// 所有环境相关值一律走环境变量，默认值仅服务于本地开发。新配置项必须登记在此。
+var (
+	cfgListenAddr          string // HTTP 监听地址          LISTEN_ADDR（默认 :8080）
+	cfgAgentHTTPPort       string // Agent 容器内 HTTP 端口  AGENT_HTTP_PORT（默认 19090）
+	cfgAgentContainerPre   string // Agent 容器名前缀        AGENT_CONTAINER_PREFIX（默认 l1-）
+	cfgL0Net               string // L0 docker 网络名        L0_NET（默认 docker_l0-net）
+	cfgGrafanaPublicURL    string // 浏览器可达的 Grafana 地址 GRAFANA_PUBLIC_URL
+	cfgCORSOrigin          string // 允许的 CORS 源           CORS_ORIGIN（空=回显请求 Origin，即同源部署）
+	cfgSeedDemoAgents      bool   // 是否注入演示 Agent 种子   SEED_DEMO_AGENTS=1（生产部署必须留空）
+)
+
+func init() {
+	cfgListenAddr = envOr("LISTEN_ADDR", ":8080")
+	cfgAgentHTTPPort = envOr("AGENT_HTTP_PORT", "19090")
+	cfgAgentContainerPre = envOr("AGENT_CONTAINER_PREFIX", "l1-")
+	cfgL0Net = envOr("L0_NET", "docker_l0-net")
+	cfgGrafanaPublicURL = envOr("GRAFANA_PUBLIC_URL", "")
+	cfgCORSOrigin = os.Getenv("CORS_ORIGIN")
+	cfgSeedDemoAgents = os.Getenv("SEED_DEMO_AGENTS") == "1"
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// agentContainerName Agent 的本机演示容器名（前缀可配，生产集群形态下不依赖 docker 探测）
+func agentContainerName(agentID string) string {
+	return cfgAgentContainerPre + agentID
+}
+
 func main() {
 	store := NewAgentStore()
+	if cfgSeedDemoAgents {
+		seedDemoAgentsInMemory(store)
+		fmt.Println("Demo agents seeded (SEED_DEMO_AGENTS=1)")
+	}
 
 	// 插件能力目录库（SQLite）：打开 + 夜莺集成包增量同步
 	catDB, err := storepkg.Open("data/catalog.db")
@@ -219,7 +259,7 @@ func main() {
 	if err := catDB.InitFleet(); err != nil {
 		log.Fatalf("init fleet tables: %v", err)
 	}
-	seedBuiltinAgents(store, catDB)
+	seedBuiltinAgents(store, catDB) // 内部仅处理内存已有的 Agent，空注册表时为 no-op
 	hydrateAgents(store, catDB)
 	// 为尚无版本化配置的 Agent 引导出结构化期望配置（targets 展开 + host_metrics 默认段）
 	for _, a := range store.List() {
@@ -235,6 +275,15 @@ func main() {
 
 	// CORS middleware
 	handler := corsMiddleware(mux)
+
+	// API: 站点配置（前端外部跳转地址统一从后端取，禁止在 JS 里写死环境地址）
+	// vm_url 用 VM_PUBLIC_URL（浏览器可达），与服务端代理用的 VM_URL（docker service name）是两个概念
+	mux.HandleFunc("/api/site-config", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]string{
+			"vm_url":      os.Getenv("VM_PUBLIC_URL"), // 为空时前端按 window.location 推导
+			"grafana_url": cfgGrafanaPublicURL,
+		})
+	})
 
 	// API: Agent 列表
 	mux.HandleFunc("/api/agents", func(w http.ResponseWriter, r *http.Request) {
@@ -945,8 +994,8 @@ func main() {
 	// Serve integration icons
 	mux.Handle("/uploads/integrations/", http.StripPrefix("/uploads/integrations/", http.FileServer(http.Dir("data/integrations"))))
 
-	fmt.Println("L0 Console starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", handler))
+	fmt.Println("L0 Console starting on " + cfgListenAddr)
+	log.Fatal(http.ListenAndServe(cfgListenAddr, handler))
 }
 
 // executeAction 通过 Docker Compose 执行操作
@@ -963,7 +1012,7 @@ func executeAction(agentID, action, version string) map[string]interface{} {
 	switch action {
 	case "start":
 		// 启动 SAgent 进程：删除 stopped 标记文件，supervisor 自动拉起
-		containerName := "l1-" + agentID
+		containerName := agentContainerName(agentID)
 		out, err := runCmd(".", "docker", "exec", containerName, "rm", "-f", "/home/deploy/SAgent/run/stopped")
 		if err != nil {
 			// 如果 exec 失败（容器不存在），尝试 compose up
@@ -980,7 +1029,7 @@ func executeAction(agentID, action, version string) map[string]interface{} {
 
 	case "stop":
 		// 停止 SAgent 进程组：先标记 stopped（防止 supervisor 自动重启）→ SIGTERM 优雅退出 → SIGKILL 兜底
-		containerName := "l1-" + agentID
+		containerName := agentContainerName(agentID)
 		dockerCmd("exec", containerName, "sh", "-c",
 			"touch /home/deploy/SAgent/run/stopped; "+
 				"kill -15 -$(cat /home/deploy/SAgent/run/SAgent.pid 2>/dev/null) 2>/dev/null; "+
@@ -992,7 +1041,7 @@ func executeAction(agentID, action, version string) map[string]interface{} {
 	case "restart":
 		// 重启 SAgent 进程组
 		// touch stopped → SIGTERM 优雅退出 → 等 3s → SIGKILL 兜底 → 删 stopped 标记触发 supervisor 重启
-		containerName := "l1-" + agentID
+		containerName := agentContainerName(agentID)
 		dockerCmd("exec", containerName, "sh", "-c",
 			"touch /home/deploy/SAgent/run/stopped; "+
 				"kill -15 -$(cat /home/deploy/SAgent/run/SAgent.pid 2>/dev/null) 2>/dev/null; "+
@@ -1078,10 +1127,10 @@ func runTestAction(action string) map[string]interface{} {
 	case "test_crash":
 		// 崩溃恢复测试
 		before := time.Now()
-		dockerCmd("exec", "l1-sagent-1", "kill", "1")
+		dockerCmd("exec", agentContainerName("sagent-1"), "kill", "1")
 		time.Sleep(8 * time.Second)
 		after := time.Now()
-		statusOut, _ := dockerCmdOut("inspect", "-f", "{{.State.Health.Status}}", "l1-sagent-1")
+		statusOut, _ := dockerCmdOut("inspect", "-f", "{{.State.Health.Status}}", agentContainerName("sagent-1"))
 		recoveryTime := after.Sub(before).Seconds()
 		result["output"] = fmt.Sprintf("崩溃恢复: %.0fs, 状态=%s", recoveryTime, strings.TrimSpace(statusOut))
 		result["recovery_seconds"] = recoveryTime
@@ -1102,7 +1151,7 @@ func runTestAction(action string) map[string]interface{} {
 			}()
 		}
 		wg.Wait()
-		statusOut, _ := dockerCmdOut("inspect", "-f", "{{.State.Health.Status}}", "l1-sagent-1")
+		statusOut, _ := dockerCmdOut("inspect", "-f", "{{.State.Health.Status}}", agentContainerName("sagent-1"))
 		result["output"] = fmt.Sprintf("高负载压测: 50请求/%.1fs, 状态=%s", time.Since(start).Seconds(), strings.TrimSpace(statusOut))
 		if strings.TrimSpace(statusOut) != "healthy" {
 			result["success"] = false
@@ -1110,16 +1159,16 @@ func runTestAction(action string) map[string]interface{} {
 
 	case "test_config":
 		// 配置变更测试
-		dockerCmd("exec", "l1-sagent-1", "sh", "-c", "echo 'test: 1' >> /tmp/test.txt")
+		dockerCmd("exec", agentContainerName("sagent-1"), "sh", "-c", "echo 'test: 1' >> /tmp/test.txt")
 		time.Sleep(3 * time.Second)
-		statusOut, _ := dockerCmdOut("inspect", "-f", "{{.State.Health.Status}}", "l1-sagent-1")
+		statusOut, _ := dockerCmdOut("inspect", "-f", "{{.State.Health.Status}}", agentContainerName("sagent-1"))
 		result["output"] = fmt.Sprintf("配置变更测试: 状态=%s", strings.TrimSpace(statusOut))
 
 	case "test_network":
 		// 网络中断恢复测试
-		dockerCmd("network", "disconnect", "docker_l0-net", "l1-vmagent")
+		dockerCmd("network", "disconnect", cfgL0Net, agentContainerName("vmagent"))
 		time.Sleep(15 * time.Second)
-		dockerCmd("network", "connect", "docker_l0-net", "l1-vmagent")
+		dockerCmd("network", "connect", cfgL0Net, agentContainerName("vmagent"))
 		time.Sleep(15 * time.Second)
 		upResp, _ := httpGet(vmBase()+"/api/v1/query?query=up")
 		upCount := strings.Count(upResp, `"1"`)
@@ -1268,18 +1317,18 @@ func refreshAgentStatuses(store *AgentStore) {
 			}
 			continue
 		}
-		out, err := runCmd(".", "docker", "inspect", "-f", "{{.State.Status}}", "l1-"+agent.ID)
+		out, err := runCmd(".", "docker", "inspect", "-f", "{{.State.Status}}", agentContainerName(agent.ID))
 		if err != nil {
 			agent.Status = "stopped"
 		} else {
 			status := strings.TrimSpace(out)
 			if status == "running" {
 				// 先检查 stopped 标记文件
-				stoppedOut, _ := runCmd(".", "docker", "exec", "l1-"+agent.ID,
+				stoppedOut, _ := runCmd(".", "docker", "exec", agentContainerName(agent.ID),
 					"cat", "/home/deploy/SAgent/run/stopped")
 				// 再检查 SAgent health
-				healthOut, _ := runCmd(".", "docker", "exec", "l1-"+agent.ID,
-					"wget", "-qO-", "--timeout=2", "http://localhost:19090/health")
+				healthOut, _ := runCmd(".", "docker", "exec", agentContainerName(agent.ID),
+					"wget", "-qO-", "--timeout=2", "http://localhost:"+cfgAgentHTTPPort+"/health")
 				if strings.TrimSpace(healthOut) == `{"status":"healthy"}` {
 					agent.Status = "healthy"
 					// 探测真实版本
@@ -1314,7 +1363,15 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:8080")
+		// CORS_ORIGIN 显式配置优先；未配置时回显请求 Origin（默认同源部署形态，
+		// 前端与 API 同源时浏览器不发预检，此回显仅为兼容前端独立部署的调试场景）
+		origin := cfgCORSOrigin
+		if origin == "" {
+			origin = r.Header.Get("Origin")
+		}
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
@@ -1449,7 +1506,7 @@ func handlePluginStatus(w http.ResponseWriter, r *http.Request, agentID string) 
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	containerName := "l1-" + agentID
+	containerName := agentContainerName(agentID)
 	out, err := runCmd(".", "docker", "exec", containerName,
 		"/home/deploy/SAgent/bin/SAgent", "-ctl", "status")
 	if err != nil {
@@ -1466,9 +1523,8 @@ func handleAgentMetrics(w http.ResponseWriter, r *http.Request, agentID string) 
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	containerName := "l1-" + agentID
-	out, err := runCmd(".", "docker", "exec", containerName,
-		"wget", "-qO-", "--timeout=3", "http://localhost:19090/metrics")
+	out, err := runCmd(".", "docker", "exec", agentContainerName(agentID),
+		"wget", "-qO-", "--timeout=3", "http://localhost:"+cfgAgentHTTPPort+"/metrics")
 	if err != nil {
 		http.Error(w, "failed to fetch metrics: "+err.Error(), 502)
 		return
@@ -1483,7 +1539,7 @@ func handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	containerName := "l1-" + agentID
+	containerName := agentContainerName(agentID)
 	out, err := runCmd(".", "docker", "exec", containerName,
 		"tail", "-50", "/home/deploy/SAgent/logs/SAgent.log")
 	if err != nil {
@@ -1502,7 +1558,7 @@ func executePluginAction(agentID, plugin, action string) map[string]interface{} 
 		"action":   action,
 		"success":  true,
 	}
-	containerName := "l1-" + agentID
+	containerName := agentContainerName(agentID)
 	sagentBin := "/home/deploy/SAgent/bin/SAgent"
 
 	checkResult := func(out string, err error) {
