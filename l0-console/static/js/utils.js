@@ -43,6 +43,7 @@
       // ==== Page routing ====
       function goPage(page) {
         currentPage = page;
+        window._prevView = null; // 正常导航时清空 overlay 返回记忆，防粘性回错页面
         document.querySelectorAll("nav a").forEach(function(a){a.classList.toggle("active",a.dataset.page===page)});
         switch (page) {
           case "plugins-mart": renderPluginsMart(); break;

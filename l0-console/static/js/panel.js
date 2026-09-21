@@ -1544,16 +1544,17 @@ function mdRender(md) {
       }
       // ---- Overlay system (replaces modal) ----
       function renderOverlay(title, contentFn, wide, backFn) {
-        if (backFn) window._prevView = backFn;
-        if (!window._prevView) window._prevView = renderPluginsMart;
+        if (backFn) window._prevView = backFn; // 未传 backFn 时由 closeOverlay 兜底回 currentPage
         var h = '<div class="card"><div class="card-hd">'+title+' <button class="btn btn-o btn-sm" style="float:right" onclick="closeOverlay()">← 返回</button></div><div class="card-bd" style="'+(wide?'max-width:80vw;margin:0 auto':'')+'" id="overlay-body"></div></div>';
         document.getElementById("main-content").innerHTML = h;
         var body = document.getElementById('overlay-body');
         if (body) body.innerHTML = contentFn();
       }
       function closeOverlay() {
-        var fn = window._prevView || renderPluginsMart;
-        fn();
+        if (window._prevView) { window._prevView(); return; }
+        // 无记忆时回当前导航页（currentPage 由 goPage 维护），而非写死的插件页
+        if (typeof currentPage === 'string' && typeof goPage === 'function') { goPage(currentPage); return; }
+        renderPluginsMart();
       }
       // ===================================================================
       //  INTERACTIVE: Detail panel, batch ops, navigation
