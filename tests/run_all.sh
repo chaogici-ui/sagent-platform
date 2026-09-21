@@ -205,14 +205,16 @@ check "前端JS零写死http://localhost"  '! grep -qn "http://localhost" "$ROOT
 check "前端走siteCfg下发外部地址"     'grep -qn "function siteCfg" "$ROOT/l0-console/static/js/utils.js"'
 check "Grafana密码走env覆盖"          'grep -qn "GF_SECURITY_ADMIN_PASSWORD=\${GRAFANA_ADMIN_PASSWORD" "$ROOT/deploy/docker/docker-compose.yml"'
 check "演示种子有显式开关变量"        'grep -qn "SEED_DEMO_AGENTS" "$ROOT/l0-console/main.go"'
-check "VM地址双概念分离"              'grep -qn "VM_PUBLIC_URL" "$ROOT/l0-console/main.go" && grep -qn "VM_PUBLIC_URL" "$ROOT/deploy/docker/docker-compose.yml"'
+check "VM地址双概念分离"              'grep -qn "VM_PUBLIC_URL" "$ROOT/l0-console/"*.go && grep -qn "VM_PUBLIC_URL" "$ROOT/deploy/docker/docker-compose.yml"'
 check "前端零写死插件捆绑"            '! grep -qn "host_metrics","log_metrics" "$ROOT/l0-console/static/js/panel.js" && ! grep -qn "probe:.\x27mysql_probe" "$ROOT/l0-console/static/js/panel.js"'
-check "接入配置由后端下发"            'grep -qn "onboard/config" "$ROOT/l0-console/main.go" && grep -qn "onboardCfg" "$ROOT/l0-console/static/js/utils.js"'
+check "接入配置由后端下发"            'grep -qn "onboard/config" "$ROOT/l0-console/"*.go && grep -qn "onboardCfg" "$ROOT/l0-console/static/js/utils.js"'
 check "onboard数据文件在镜像COPY清单" 'grep -qn "onboard_config.json" "$ROOT/l0-console/Dockerfile"'
 check "data卷遮蔽根治:种子同步entrypoint" 'grep -qn "l0-seed" "$ROOT/l0-console/docker-entrypoint.sh" && grep -qn "docker-entrypoint.sh" "$ROOT/l0-console/Dockerfile" && grep -qn "ENTRYPOINT.*docker-entrypoint" "$ROOT/l0-console/Dockerfile"'
 check "审计operator走env非写死admin"   'grep -qn "cfgAuditOperator" "$ROOT/l0-console/main.go" && ! grep -qn "InsertAudit(ts, \"admin\"" "$ROOT/l0-console/main.go"'
 check "审计operator透传compose"        'grep -qn "AUDIT_OPERATOR" "$ROOT/deploy/docker/docker-compose.yml"'
 check "版本比较用语义化verCmp"         'grep -qn "function verCmp" "$ROOT/l0-console/static/js/panel.js" && ! grep -qn "verMap).sort()" "$ROOT/l0-console/static/js/panel.js"'
+check "死端点清零(JSON文件存储)"       '! grep -qn "data/plugins.json" "$ROOT/l0-console/"*.go && ! grep -qEn "/api/plugins\"|/api/metrics/synced|metrics-by-target" "$ROOT/l0-console/"*.go'
+check "旧JSON插件存储文件已删"         '[ ! -e "$ROOT/l0-console/data/plugins.json" ]'
 
 # ====== 总结 ======
 log ""
