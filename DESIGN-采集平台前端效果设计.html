@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>采集平台前端效果设计 · 界面/交互/场景/用户故事</title>
+<style>
+  :root{
+    --bg:#f5f7f8; --card:#ffffff; --txt:#172c36; --muted:#5c7280;
+    --teal:#087d75; --teal-dk:#0a5f59; --teal-bg:#e6f4f2;
+    --sidebar:#142a34; --sidebar2:#0e1f27;
+    --line:#e3eaee; --warn:#d97706; --warn-bg:#fdf3e3;
+    --danger:#d64545; --danger-bg:#fdeaea;
+    --ok:#1c8a5a; --ok-bg:#e8f6ee;
+    --info:#2563eb; --info-bg:#eaf1fd;
+    --radius:12px;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;background:var(--bg);color:var(--txt);line-height:1.6}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 24px 80px}
+  /* Header */
+  .mast{background:linear-gradient(135deg,var(--sidebar) 0%,var(--sidebar2) 100%);border-radius:var(--radius);padding:34px 40px;color:#e9f2f2;margin-bottom:28px}
+  .mast .kicker{font-size:12.5px;letter-spacing:2px;color:#70d6cc;font-weight:600;text-transform:uppercase}
+  .mast h1{font-size:26px;margin:8px 0 6px;color:#fff}
+  .mast p.sub{color:#a9c0c0;font-size:14px;max-width:760px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+  .chip{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);color:#d7e6e6;border-radius:20px;padding:4px 12px;font-size:12px}
+  h2.sec{font-size:20px;margin:44px 0 6px;display:flex;align-items:center;gap:10px}
+  h2.sec .no{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:30px;background:var(--teal);color:#fff;border-radius:8px;font-size:14px}
+  p.secdesc{color:var(--muted);font-size:14px;margin-bottom:18px}
+  /* Cards */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:24px;margin-bottom:20px;box-shadow:0 1px 2px rgba(23,44,54,.03)}
+  .card h3{font-size:16px;margin-bottom:4px}
+  .card .tagline{color:var(--muted);font-size:13px;margin-bottom:16px}
+  /* Nav shell mock */
+  .shell{display:flex;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--card);min-height:460px}
+  .snav{width:220px;background:linear-gradient(180deg,var(--sidebar) 0%,var(--sidebar2) 100%);color:#cfe0e0;padding:18px 0;flex-shrink:0}
+  .snav .brand{font-weight:700;color:#fff;padding:6px 16px 14px;font-size:15px;letter-spacing:.5px}
+  .snav .brand small{display:block;color:#70d6cc;font-weight:500;font-size:11px;letter-spacing:.5px;margin-top:2px}
+  .snav .grp{font-size:10.5px;letter-spacing:1.5px;color:#6d8a8a;padding:12px 16px 4px;text-transform:uppercase}
+  .snav .it{display:flex;align-items:center;gap:9px;padding:9px 16px;font-size:13px;color:#c6dada;cursor:pointer;position:relative}
+  .snav .it:hover{background:rgba(255,255,255,.05);color:#fff}
+  .snav .it.on{color:#fff;font-weight:600}
+  .snav .it.on::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;background:var(--teal);border-radius:3px}
+  .snav .it.on{background:rgba(8,125,117,.16)}
+  .snav .it .ic{width:16px;text-align:center;opacity:.8}
+  .snav .it .bdg{margin-left:auto;background:var(--warn);color:#fff;font-size:10px;border-radius:10px;padding:1px 7px;font-weight:700}
+  .snav .foot{margin-top:auto;border-top:1px solid rgba(255,255,255,.08);padding:12px 16px;font-size:11px;color:#7d9a9a}
+  .sbody{flex:1;padding:20px;background:#f7f9fa;display:flex;flex-direction:column;gap:14px}
+  .sbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .sbar .crumb{font-size:13px;color:var(--muted)}
+  .sbar .crumb b{color:var(--txt)}
+  .sbar .tenant{background:var(--teal-bg);color:var(--teal-dk);border:1px solid #bfe3dd;border-radius:8px;padding:5px 12px;font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .kpi{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px}
+  .kpi .lbl{font-size:11.5px;color:var(--muted)}
+  .kpi .val{font-size:22px;font-weight:700;margin-top:2px}
+  .kpi .sub{font-size:11px;margin-top:3px}
+  .kpi.g{--ac:var(--ok)} .kpi.y{--ac:var(--warn)} .kpi.r{--ac:var(--danger)} .kpi.b{--ac:var(--info)}
+  .kpi .val{color:var(--ac)}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px;flex:1}
+  .panel h4{font-size:13px;margin-bottom:12px;color:var(--txt)}
+  .twocol{display:grid;grid-template-columns:1.2fr 1fr;gap:14px}
+  /* tables & rows */
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--muted);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line);font-size:11.5px}
+  td{padding:8px;border-bottom:1px solid #f0f4f6}
+  .tag{display:inline-block;font-size:11px;font-weight:600;border-radius:6px;padding:2px 8px}
+  .tag.ok{background:var(--ok-bg);color:var(--ok)}
+  .tag.warn{background:var(--warn-bg);color:var(--warn)}
+  .tag.danger{background:var(--danger-bg);color:var(--danger)}
+  .tag.info{background:var(--info-bg);color:var(--info)}
+  .tag.off{background:#eef1f3;color:#7b8a90}
+  .lg{width:34px;height:34px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:13px;flex-shrink:0}
+  .mono{font-family:var(--mono);font-size:11.5px;background:#f2f5f6;border:1px solid #e6ecee;border-radius:6px;padding:1px 6px;color:#0a5f59}
+  /* flow */
+  .flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}
+  .fnode{background:var(--teal-bg);border:1px solid #bfe3dd;color:var(--teal-dk);border-radius:8px;padding:6px 12px;font-size:12.5px;font-weight:600}
+  .fnode.add{background:var(--warn-bg);border-color:#f2d8a9;color:var(--warn)}
+  .fnode.ctl{background:var(--info-bg);border-color:#c6d9f7;color:#1d4fc4}
+  .arrow{color:var(--muted);font-size:14px}
+  .story{border-left:3px solid var(--teal);padding:6px 0 6px 14px;margin:12px 0}
+  .story b{color:var(--teal-dk)}
+  .story .who{font-size:12px;color:var(--muted);margin-bottom:2px}
+  .story .ac{font-size:13px;margin:3px 0;padding-left:14px;position:relative}
+  .story .ac::before{content:"→";position:absolute;left:0;color:var(--teal)}
+  .story .out{font-size:12px;color:var(--ok);margin-top:3px;padding-left:14px;position:relative}
+  .story .out::before{content:"✓";position:absolute;left:0;color:var(--ok);font-weight:700}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .mini{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .bar{height:12px;background:#eef1f3;border-radius:6px;overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;border-radius:6px}
+  .num{font-family:var(--mono);color:var(--teal-dk);font-weight:600}
+  .note{background:var(--info-bg);border:1px solid #c9dcf8;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#1d3f85;margin-top:10px}
+  .note.warn{background:var(--warn-bg);border-color:#f2d8a9;color:#8a5808}
+  .role{display:inline-flex;align-items:center;gap:6px;background:var(--teal-bg);color:var(--teal-dk);border-radius:16px;padding:3px 10px;font-size:11.5px;font-weight:600;margin-right:6px}
+  .ev{font-family:var(--mono);font-size:12px}
+  .ev .p{display:inline-block;padding:2px 9px;border-radius:6px;margin:2px 3px 2px 0;font-size:11px;font-weight:600}
+  a{color:var(--teal)}
+  @media(max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}.twocol,.grid2{grid-template-columns:1fr}.shell{flex-direction:column}.snav{width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="mast">
+    <div class="kicker">Front-End Experience Design</div>
+    <h1>SAgent 采集平台 · 前端效果设计</h1>
+    <p class="sub">基于《PLAN-架构设计与高可用运维方案.md》已定案架构，定义采集平台控制台的界面形态、交互逻辑、业务场景与用户故事。架构依据：多租户（本期做）、心跳经 L1 汇聚、vmauth 单端口收口、L1 四进程独立、证据链驱动、HA 与容量水位。</p>
+    <div class="chips">
+      <span class="chip">多租户隔离</span><span class="chip">心跳汇聚</span><span class="chip">vmauth 单端口</span>
+      <span class="chip">证据链驱动</span><span class="chip">HA / 容量水位</span><span class="chip">L1 四进程</span><span class="chip">租户仪表板</span>
+    </div>
+  </div>
+
+  <!-- ================= 一、整体信息架构 ================= -->
+  <h2 class="sec"><span class="no">1</span>整体信息架构与导航</h2>
+  <p class="secdesc">平台以"租户视角"为核心隔离边界：用户在一个统一控制台内，通过右上角租户下拉切换归属租户，不同租户看到完全隔离的业务数据；L0 管理员可跨租户查看全局。</p>
+
+  <div class="card">
+    <h3>导航骨架（墨青深色侧栏 + teal 指示条 + 分组 + 计数徽标）</h3>
+    <p class="tagline">左侧深色墨青侧栏保持"专业采集平台"形态，按业务叙事分组；待办/告警用琥珀计数徽标；底部固定当前用户与版本。</p>
+    <div class="shell">
+      <div class="snav">
+        <div class="brand">SAgent 采集平台<small>Collect · Govern · Observe</small></div>
+
+        <div class="grp">监控治理</div>
+        <div class="it on"><span class="ic">◧</span>工作台<span class="bdg">3</span></div>
+        <div class="it"><span class="ic">▤</span>实时总览</div>
+        <div class="it"><span class="ic">◫</span>采集健康</div>
+
+        <div class="grp">采集接入</div>
+        <div class="it"><span class="ic">⊞</span>资源与接入</div>
+        <div class="it"><span class="ic">▦</span>采集能力</div>
+        <div class="it"><span class="ic">⚙</span>策略与模板</div>
+
+        <div class="grp">治理与运维</div>
+        <div class="it"><span class="ic">↻</span>变更中心<span class="bdg">1</span></div>
+        <div class="it"><span class="ic">⇄</span>接管与故障</div>
+        <div class="it"><span class="ic">📊</span>自监控大盘</div>
+        <div class="it"><span class="ic">📡</span>数据订伸出</div>
+
+        <div class="grp">系统</div>
+        <div class="it"><span class="ic">⚙</span>平台设置</div>
+        <div class="it"><span class="ic">👤</span>租户与权限</div>
+
+        <div class="foot">toptea@l0 · v2026.09 · 租户:航企A</div>
+      </div>
+      <div class="sbody">
+        <div class="sbar">
+          <div class="crumb"><b>工作台</b> / 今日采集概览</div>
+          <div class="tenant">⬢ 航企A租户 ▾</div>
+        </div>
+        <div class="kpis">
+          <div class="kpi g"><div class="lbl">SAgent 在线率</div><div class="val">98.4%</div><div class="sub">124 / 126 在线</div></div>
+          <div class="kpi b"><div class="lbl">指标新鲜度</div><div class="val">P99 58s</div><div class="sub">距目标 60s ✓</div></div>
+          <div class="kpi y"><div class="lbl">执行任务</div><div class="val">7</div><div class="sub">1 待批 · 2 进行中</div></div>
+          <div class="kpi g"><div class="lbl">SLO 达成</div><div class="val">99.96%</div><div class="sub">连续 30 天</div></div>
+        </div>
+        <div class="twocol">
+          <div class="panel"><h4>租户隔离数据流</h4>
+            <table><tr><th>层级</th><th>可见范围</th><th>数据来源</th></tr>
+            <tr><td>L0 全局</td><td>所有租户聚合</td><td class="mono">带 tenant_id 的 VM / PG</td></tr>
+            <tr><td>租户</td><td>本租户全部</td><td class="mono">WHERE tenant_id = ?</td></tr>
+            <tr><td>池级</td><td>单资源池已授权</td><td class="mono">tenant × pool</td></tr></table>
+          </div>
+          <div class="panel"><h4>证据链右上角"采集正常？"</h4>
+            <div class="ev">
+              <span class="p" style="background:var(--ok-bg);color:var(--ok)">heartbeat ✓</span>
+              <span class="p" style="background:var(--ok-bg);color:var(--ok)">config ✓</span>
+              <span class="p" style="background:var(--ok-bg);color:var(--ok)">source ✓</span>
+              <span class="p" style="background:var(--ok-bg);color:var(--ok)">transport ✓</span>
+              <span class="p" style="background:var(--ok-bg);color:var(--ok)">central ✓</span>
+              <span class="p" style="background:#f2f5f6;color:#7b8a90">60s</span>
+            </div>
+            <p style="font-size:12px;color:var(--muted);margin-top:8px">"已应用 ≠ 已入库"——每段证据独立标态与有效期，未达标逐段可下钻归因。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 二、多租户场景 ================= -->
+  <h2 class="sec"><span class="no">2</span>多租户隔离（本期核心）</h2>
+  <p class="secdesc">架构定案：全链路加 tenant_id。前端体现三件事——租户级数据隔离、跨租户身份切换、L0 管理员全局视角。</p>
+
+  <div class="grid2">
+    <div class="mini">
+      <h3>业务场景</h3>
+      <div class="story">
+        <div class="who">租户运维 <b>航企A</b> 登录</div>
+        <div class="out">只看到航企A的 SAgent、指标、任务、权限、审计</div>
+        <div class="out">右上角可切换到其在多租户名下"已获授权"的其它租户（如 A 集团下属 B 航司）</div>
+        <div class="out">切换即换 token（BOMC7.0 JWT 含 tenant_id），前端整页刷新隔离，URL 携带租户态</div>
+      </div>
+      <div class="note">架构依据：决策 D3「多租户本期做」——DB 表带 tenant_id，API 强制租户过滤（防跨租户注入被拒），前端菜单与数据随 token 权限渲染。</div>
+    </div>
+    <div class="mini">
+      <h3>交互与校验点</h3>
+      <div class="story">
+        <div class="who">L0 管理员</div>
+        <div class="ac">进入"租户与权限"，创建租户、分配用户、映射角色→功能</div>
+        <div class="ac">设置每个租户的可见资源池范围</div>
+        <div class="ac">审计日志中按 tenant_id 检索各租户操作</div>
+        <div class="ac">测试跨租户查询（用 A 的 token 查 B 的数据）→ 界面明确弹出"权限拒绝"</div>
+      </div>
+      <div class="note warn">安全演示用例：admin 尝试跨租户取数，系统拒绝并记录审计。这条是"安全合规"验收的关键交互。</div>
+    </div>
+  </div>
+
+  <!-- ================= 三、资源与接入 ================= -->
+  <h2 class="sec"><span class="no">3</span>资源与接入（标准化 · 三步向导）</h2>
+  <p class="secdesc">主机/PaaS 接入统一为可视化三步：选目标 → 选能力 → 预演影响。vmauth 收口保证目标机 curl 不暴露采集数据。</p>
+
+  <div class="card">
+    <h3>接入向导（分步）</h3>
+    <div class="flow">
+      <span class="fnode">① 选资源对象</span><span class="arrow">→</span>
+      <span class="fnode">② 选采集能力</span><span class="arrow">→</span>
+      <span class="fnode">③ 预演影响 & 提交</span>
+    </div>
+    <div class="grid2" style="margin-top:14px">
+      <div>
+        <table>
+          <tr><th>步骤</th><th>界面交互</th><th>后端依据</th></tr>
+          <tr><td>① 选对象</td><td>资源目录勾选多台主机/中间件，自动获得资源唯一编码</td><td class="mono">catalog / resource_id</td></tr>
+          <tr><td>② 选能力</td><td>host_metrics · mysql · redis · OTel · 脚本等；填连接与采集间隔</td><td class="mono">onboard/abilities</td></tr>
+          <tr><td>③ 预演影响</td><td>展示将在一批 L1 分发的包、资源/端口占用、匹配版本，diff 后确认</td><td class="mono">version_match</td></tr>
+        </table>
+      </div>
+      <div class="mini">
+        <h3>目标主机安全（vmauth 单端口）</h3>
+        <div class="flow" style="flex-direction:column;align-items:flex-start">
+          <span class="fnode ctl">目标主机：vmauth 单端口 :9443</span>
+          <div class="ev"><span class="p" style="background:var(--ok-bg);color:var(--ok)">/node-metrics ✓</span><span class="p" style="background:var(--ok-bg);color:var(--ok)">/mysql-metrics ✓</span><span class="p" style="background:var(--ok-bg);color:var(--ok)">/redis-metrics ✓</span></div>
+          <span class="fnode add">未带 auth_key 的 curl/扫描 → 401，返回空</span>
+        </div>
+        <div class="note">架构 D4：对外只暴露 1 个受鉴权端口，按 path 路由各 Exporter；覆盖远程 PaaS。前端在"详情"展示端口收敛校验结果。</div>
+      </div>
+    </div>
+    <div class="story">
+      <div class="who">接入后的界面反馈（闭环确认）</div>
+      <div class="flow">
+        <span class="fnode">SAgent 注册+心跳</span><span class="arrow">→</span>
+        <span class="fnode">Exporter 启动</span><span class="arrow">→</span>
+        <span class="fnode">vmauth 收口</span><span class="arrow">→</span>
+        <span class="fnode">vmagent 经 vmauth scrape</span><span class="arrow">→</span>
+        <span class="fnode">remote write 入库</span><span class="arrow">→</span>
+        <span class="fnode add">证据链全绿 + 指标可查</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 四、采集健康与证据链 ================= -->
+  <h2 class="sec"><span class="no">4</span>采集健康 · 证据链与断采管控</h2>
+  <p class="secdesc">不满足于"online 绿点"。每个采集目标呈现五段证据链与新鲜度，断采自动匹配固化处置场景，自动处置失败转人工一键处置。</p>
+
+  <div class="card">
+    <h3>单目标证据链面板</h3>
+    <table>
+      <tr><th>证据</th><th>定义</th><th>状态示例</th><th>来源（架构）</th></tr>
+      <tr><td>heartbeat</td><td>SAgent→Gateway→L0 心跳是否在阈值内</td><td><span class="tag ok">近 58s</span></td><td class="mono">心跳汇聚</td></tr>
+      <tr><td>config</td><td>配置版本是否已应用生效</td><td><span class="tag ok">v7 已生效</span></td><td class="mono">config_version+1</td></tr>
+      <tr><td>source</td><td>Exporter 进程是否存活、端口/路径可达</td><td><span class="tag ok">mysql ok</span></td><td class="mono">vmauth / plugin</td></tr>
+      <tr><td>transport</td><td>vmagent 抓取与 remote write 是否成功</td><td><span class="tag warn">重试 2 次</span></td><td class="mono">vmagent buffer</td></tr>
+      <tr><td>central</td><td>数据是否成功入库 vmstorage（新鲜度）</td><td><span class="tag ok">P99 58s</span></td><td class="mono">自监控 VM</td></tr>
+    </table>
+    <div class="note">任何一段标黄/标红，点击即"逐段归因"下钻到具体 hop（vmauth/vmagent/storage），对应场景十八的自动归因与一键处置。</div>
+  </div>
+
+  <div class="grid2">
+    <div class="mini">
+      <h3>断采场景与固化处置（前端看到的动作）</h3>
+      <table>
+        <tr><th>断采</th><th>自动处置</th><th>界面反馈</th></tr>
+        <tr><td>Exporter 进程崩</td><td>Core 自动拉起</td><td><span class="tag ok">已自愈</span></td></tr>
+        <tr><td>Core 心跳超时</td><td>标记 OFFLINE，指数重连</td><td><span class="tag warn">重连中</span></td></tr>
+        <tr><td>新鲜度超阈值</td><td>逐层归因</td><td><span class="tag danger">归因中</span></td></tr>
+        <tr><td>断网</td><td>本地缓冲+循环重连</td><td><span class="tag warn">失联自治</span></td></tr>
+        <tr><td>vmstorage 不可用</td><td>vmagent 本地缓冲</td><td><span class="tag warn">缓冲补推</span></td></tr>
+      </table>
+    </div>
+    <div class="mini">
+      <h3>人工兜底：一键处置</h3>
+      <div class="story">
+        <div class="who">运维收到升级告警</div>
+        <div class="ac">打开断采事件，查看检测方式、影响范围、证据链</div>
+        <div class="ac">一键拖动处置动作（重启 Exporter / 回滚版本 / 重启链路组件）</div>
+        <div class="ac">执行后界面进入"恢复验证"→证据链重新点亮，事件闭环</div>
+      </div>
+      <div class="note warn">接管准则：组件故障接管需连续 N 检测周期确认，界面显示"确认中·避免瞬时抖动漂移"。</div>
+    </div>
+  </div>
+
+  <!-- ================= 五、变更中心与接管 ================= -->
+  <h2 class="sec"><span class="no">5</span>变更中心 · 版本升级与 Exporter 漂移</h2>
+  <p class="secdesc">对应场景十三/十四 + 架构 3.1-C（故障漂移）。面向批量灰度、就近取包、失败自动回滚、Exporter 归属迁移。</p>
+
+  <div class="card">
+    <h3>版本升级（L1 四进程 + Package Cache 就近取包）</h3>
+    <div class="flow">
+      <span class="fnode">L0 上传新版</span><span class="arrow">→</span>
+      <span class="fnode">同步各 L1 Cache(就近)</span><span class="arrow">→</span>
+      <span class="fnode">灰度批次 10% / 观察 / 继续</span><span class="arrow">→</span>
+      <span class="fnode">SAgent 升级失败自动回滚</span>
+    </div>
+    <div class="grid2" style="margin-top:14px">
+      <div>
+        <table>
+          <tr><th>界面元素</th><th>交互</th></tr>
+          <tr><td>批量进度条</td><td>分池分策略展示灰度水位，可暂停/继续/终止</td></tr>
+          <tr><td>版本兼容矩阵</td><td>所选 新版本 × 目标 host exporter 版本 匹配，不匹配禁止升级</td></tr>
+          <tr><td>就近取包状态</td><td>每台 L1 Cache 显示同步进度与校验和（风险A红线）</td></tr>
+          <tr><td>回滚面板</td><td>升级失败自动 rollback，界面显示回滚后版本与数据补建状态</td></tr>
+        </table>
+      </div>
+      <div class="mini">
+        <h3>Exporter 故障漂移（前方可视）</h3>
+        <div class="story">
+          <div class="who">mysql-A exporter 探活失败（连续 N 周期）</div>
+          <div class="ac">界面标记 Exporter 降级，展示主备关系</div>
+          <div class="ac">L0 决策归属迁移 → control 通道下发新配置到健康 L1</div>
+          <div class="ac">迁移完成，界面展示"采集归属已切换"与幂等确认</div>
+          <div class="out">ui 全程可观察：谁接管了、是否重复拉起</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 六、自监控大盘与容量 ================= -->
+  <h2 class="sec"><span class="no">6</span>自监控大盘与全局容量水位</h2>
+  <p class="secdesc">架构可观测/可监控：自监控应用独立采集，L0 仅渲染呈现。提供 L0→租户→池→主机多级下钻与 GREEN/YELLOW/RED 容量水位。</p>
+
+  <div class="grid2">
+    <div class="mini">
+      <h3>双层面板下钻</h3>
+      <table>
+        <tr><th>面板</th><th>观测内容</th><th>数据</th></tr>
+        <tr><td>全网总览</td><td>全局在线率、各租户健康度、断采事件、容量总水位</td><td class="mono">独立自监控 VM</td></tr>
+        <tr><td>Gateway 池级</td><td>连接数趋势、心跳合并比、队列长度、CPU/内存</td><td class="mono">Gateway 指标</td></tr>
+        <tr><td>租户下钻</td><td>本租户 SAgent 在线、插件状态、SLO</td><td class="mono">按 tenant_id</td></tr>
+        <tr><td>Agent/主机级</td><td>插件列表、资源占用、Endpoint 清单</td><td class="mono">Core 指标</td></tr>
+      </table>
+    </div>
+    <div class="mini">
+      <h3>容量水位卡（GREEN/YELLOW/RED）</h3>
+      <table>
+        <tr><th>维度</th><th>YELLOW</th><th>RED</th><th>水位</th></tr>
+        <tr><td>单 Gateway 连接数</td><td>&gt;7,000</td><td>&gt;9,000</td><td><div class="bar"><i style="width:64%;background:var(--info)"></i></div></td></tr>
+        <tr><td>缓冲磁盘</td><td>&gt;60%</td><td>&gt;80%</td><td><div class="bar"><i style="width:52%;background:var(--ok)"></i></div></td></tr>
+        <tr><td>心跳处理 P99</td><td>&gt;700ms</td><td>&gt;1s</td><td><div class="bar"><i style="width:44%;background:var(--ok)"></i></div></td></tr>
+        <tr><td>远程采集目标</td><td>&gt;35</td><td>&gt;43</td><td><div class="bar"><i style="width:78%;background:var(--warn)"></i></div></td></tr>
+      </table>
+      <div class="note">容量恶化链路：超阈值 → 自监控告警 → 运维查看看板 → 判断恶化程度 → 评估扩容（新增 Gateway/扩盘/扩 VMAgent）→ 观察水位回落。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>租户仪表板管理（L0 渲染 · 自监控独立）</h3>
+    <p class="tagline">租户运维可拖拽自定义采集总览，各租户仪表板完全隔离；底层健康数据来自独立自监控应用。</p>
+    <div class="story">
+      <div class="who">租户运维 <b>航企A</b></div>
+      <div class="ac">进入仪表板管理，创建/编辑/排序面板布局</div>
+      <div class="ac">勾选关注维度：SAgent 在线率 · 插件状态 · 断采事件 · SLO 达成率</div>
+      <div class="ac">保存后仅本租户可见，其它租户不可见</div>
+    </div>
+  </div>
+
+  <!-- ================= 七、用户故事总览 ================= -->
+  <h2 class="sec"><span class="no">7</span>用户故事与角色</h2>
+  <p class="secdesc">三个核心角色：L0 平台管理员（跨租户全局治理）、租户运维（本租户采集运维）、只读观察者/第三方订阅（数据消费）。</p>
+
+  <div class="card">
+    <table>
+      <tr><th>角色</th><th>用户故事（As a … I want to … So that …）</th></tr>
+      <tr><td><span class="role">L0 管理员</span></td><td>作为平台管理员，我想要在统一控制台创建/停用租户并分配资源池与角色，以便隔离各租户的采集数据与权限。作为管理员，我想要查看全网告警与容量水位，以便在 Gateway 连接数逼近 9k 前主动扩容，避免采集降级。</td></tr>
+      <tr><td><span class="role">租户运维</span></td><td>作为租户运维，我想要用三步向导把一台新主机纳入采集，以便秒级看到它进入证据链并采集到指标。作为租户运维，我想要在某 Exporter 故障时看到"逐段归因 + 一键处置 + 恢复验证"，以便快速恢复采集而不是靠猜。作为租户运维，我想要在版本升级时看到灰度进度与自动回滚，以便批量升级不中断采集。作为租户运维，我想要自定义本租户仪表板，以便我团队关键指标一屏可得。</td></tr>
+      <tr><td><span class="role">只读观察者</span></td><td>作为只读用户，我想要按四维授权（指标×租户×形态×时间）订阅部分指标，以便安全地消费开放数据而不越权。</td></tr>
+      <tr><td><span class="role">安全合规者</span></td><td>作为审计员，我想要按操作人/时间/目标/类型检索审计日志（保留 180 天、只追加不可改），以便追溯任何变更来源，验证跨租户越权被拒绝。</td></tr>
+    </table>
+  </div>
+
+  <h2 class="sec"><span class="no">8</span>端到端演示主线（价值兑现）</h2>
+  <p class="secdesc">一条贯穿"接入 → 健康 → 灰度 → 故障 → 订阅"的演示流，对齐需求说明的采集时效 / 断采管控 / 安全合规 / 系统可靠性四大价值维度。</p>
+
+  <div class="card">
+    <table>
+      <tr><th>#</th><th>演示场景</th><th>前端动线</th><th>验收价值</th></tr>
+      <tr><td>1</td><td>多租户接入</td><td>L0 管理员建租户 → 租户运维切换租户 → 三步向导接入一台 MySQL</td><td>租户隔离 + 采集时效（秒级进证据链）</td></tr>
+      <tr><td>2</td><td>端口收敛验证</td><td>在目标机 curl 各原生端口 → 展示被 vmauth 拒绝（401）；到详情看单端口收敛</td><td>安全合规</td></tr>
+      <tr><td>3</td><td>配置热改</td><td>改采集频率 → 新版本 config → 心跳热生效 → 证据链 config 段翻转</td><td>采集时效（热加载不重启）</td></tr>
+      <tr><td>4</td><td>断采自愈</td><td>kill 一个 Exporter → 自动拉起绿；kill 一个 Gateway → 故障漂移接管 → 界面展示切换归属</td><td>断采管控 + 系统可靠性</td></tr>
+      <tr><td>5</td><td>灰度升级回滚</td><td>SAgent 本体升级 10% → 某版本不兼容自动 rollback → 界面显示回滚与包缓存</td><td>系统可靠性（HA 演练）</td></tr>
+      <tr><td>6</td><td>数据订阅</td><td>租户勾选"开放指标" → 配置 Kafka topic + 四维授权 → 第三方凭证书消费</td><td>安全合规 + 数据对外</td></tr>
+      <tr><td>7</td><td>审计追溯</td><td>跨租户越权尝试被拒 → 审计日志检索到该条拒绝记录</td><td>安全合规</td></tr>
+      <tr><td>8</td><td>容量扩容</td><td>自监控水位 78% → YELLOW 预警 → 看板下钻 → 新增一台 Gateway → 水位回落</td><td>系统可靠性 + 可监控</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>价值交付路径对照</h3>
+    <table>
+      <tr><th>现网 → 新系统</th><th>采集时效</th><th>断采管控</th><th>安全合规</th><th>系统可靠性</th></tr>
+      <tr>
+        <td><b>目标</b></td>
+        <td>60s（可达 15/30s）</td>
+        <td>自动处置+人工兜底</td>
+        <td>租户隔离 + 防越权 + 审计</td>
+        <td>连续采集比 + HA 演练</td>
+      </tr>
+      <tr>
+        <td><b>验收方式</b></td>
+        <td>链路压测连续 24h 取 P99</td>
+        <td>故障注入 + 7 天误报率统计</td>
+        <td>代码审查 + 密钥轮换演示</td>
+        <td>杀实例/杀主节点验证切换</td>
+      </tr>
+    </table>
+    <div class="note">以上全部从前端可操作、可演示，且均对应对接已定案架构：多租户 D3、vmauth D4、L1 四进程 D5、PG D1、故障漂移 3.1-C。</div>
+  </div>
+
+  <div class="card" style="text-align:center;background:linear-gradient(135deg,var(--sidebar),var(--sidebar2));color:#d7e6e6;border:none">
+    <p style="font-size:14px">本设计为<b style="color:#70d6cc">前端体验层</b>的目标形态</p>
+    <p style="font-size:12.5px;color:#a9c0c0;margin-top:6px">
+      下一步：据此推进前端 UI 实施(适配 8080 真实 API) · 多租户改造 · 证据链渲染 · 断采处置交互。
+      核心原则：真实数据驱动、证据分离(已应用≠已入库)、租户强隔离、HA 全程可见。
+    </p>
+  </div>
+
+</div>
+</body>
+</html>
