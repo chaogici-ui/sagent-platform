@@ -28,6 +28,7 @@ var metricKeyRe = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 
 func registerReconRoute(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recon", handleRecon)
+	mux.HandleFunc("/api/vm/cardinality", handleVMCardinality) // 高基数治理切片（数据治理页）
 }
 
 // InvalidateReconCache 目标/Agent 增删改后调用，强制下轮对账重算
@@ -222,6 +223,43 @@ func runRecon() map[string]interface{} {
 		"config_expanded": expandedAgents,
 	}
 	return out
+}
+
+// handleVMCardinality 高基数治理切片（数据治理页）：VM 自带 TSDB 状态接口，
+// 返回按指标名聚合的 series 数 TopN——高基数指标的判定依据，不造数。
+// VM 不可达时返回 503 + 说明（前端显示不可判，不显示空清单冒充"无高基数"）。
+func handleVMCardinality(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	u := vmBaseURL() + "/api/v1/status/tsdb?limit=10"
+	resp, err := http.Get(u)
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]interface{}{"error": "VM 不可达: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	var d struct {
+		Status string `json:"status"`
+		Data   struct {
+			TotalSeries             int `json:"totalSeries"`
+			SeriesCountByMetricName []struct {
+				Name  string `json:"name"`
+				Value int    `json:"value"`
+			} `json:"seriesCountByMetricName"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil || d.Status != "success" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]interface{}{"error": "VM TSDB 状态解析失败"})
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"total_series": d.Data.TotalSeries,
+		"top_metrics":  d.Data.SeriesCountByMetricName,
+	})
 }
 
 // expandCatalogKnown 目录注册口径：全部指标 name + expression 均视为已知

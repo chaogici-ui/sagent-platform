@@ -113,11 +113,15 @@ function renderTasks() {
         var anomaly = vis.filter(function(a){return a.status==='stopped'}); // 明确维护态（需人工恢复）
         var unknownA = vis.filter(function(a){return a.status==='offline'||a.status==='created'});
         var html = '';
-        // ① 结论条（对账结果回来后填一句人话）+ 证据链概要（共享 buildEvidenceChainHTML，与工作台同源）
+        // 页头：主问题（IA 规范——每页只回答一个问题，页头副标题即主问题）
+        html += '<div class="card"><div class="card-bd" style="padding-bottom:10px"><span style="font-size:16px;font-weight:700">◫ 采集健康</span>'
+          + '<span style="font-size:12px;color:var(--muted);margin-left:10px">采得全不全、断在哪一环？</span></div></div>';
+        // ① 结论条（对账结果回来后填一句人话）+ 覆盖率条形（分母=可核对目标）+ 证据链概要（共享 buildEvidenceChainHTML，与工作台同源）
         html += '<div class="card"><div class="card-bd" style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">';
         html += '<div id="recon-verdict" style="font-size:14px;font-weight:600">⏳ 对账引擎计算中...</div>';
         html += '<div id="recon-meta" style="font-size:11px;color:var(--muted);margin-left:auto"></div>';
-        html += '<div id="recon-evid" style="flex:1 1 100%;margin-top:10px"></div>';
+        html += '<div id="recon-cover" style="flex:1 1 100%;margin-top:2px"></div>';
+        html += '<div id="recon-evid" style="flex:1 1 100%;margin-top:4px"></div>';
         html += '</div></div>';
         // ② 三张问题卡（点击定位到清单）
         html += '<div class="slo-grid" style="margin-top:16px">';
@@ -126,8 +130,11 @@ function renderTasks() {
         html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-anomaly\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" style="color:'+(anomaly.length>0?'var(--warning,#b45309)':'var(--success)')+'">'+anomaly.length+'</div><div class="slo-label">维护态 Agent'+(unknownA.length>0?' <span style="color:var(--muted);font-weight:400">· 另 '+unknownA.length+' 状态未知</span>':'')+'</div></div>';
         html += '</div>';
         // ③-1 断采清单
-        html += '<div class="card" style="margin-top:16px" id="recon-stale"><div class="card-hd">📡 断采目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">目录声明应采 × VM 实际在报（近 10min 无数据）</span></div>';
+        html += '<div class="card" style="margin-top:16px" id="recon-stale"><div class="card-hd">📡 断采目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">目录声明应采 × VM 实际在报（近 10min 无数据）· 状态按承载 Agent 心跳区分失败/未知</span></div>';
         html += '<div class="card-bd" id="recon-stale-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
+        // 修复草案（只读预览）：模板产出，不是 evidence；复核与转变更只发生在变更中心（裁决 2）
+        html += '<div class="card" style="margin-top:16px" id="recon-draft"><div class="card-hd">🩹 修复草案 <span style="font-weight:400;font-size:11px;color:var(--muted)">只读预览 · 模板建议不是 evidence · 复核与转变更只在变更中心</span></div>';
+        html += '<div class="card-bd" id="recon-draft-body" style="text-align:center;color:var(--muted);padding:14px">等对账结果...</div></div>';
         // 对账：野指标
         html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span></div>';
         html += '<div class="card-bd" id="recon-wild-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
@@ -223,18 +230,31 @@ function renderTasks() {
           }
           var st = d.summary.stale||0, wild = d.summary.wild||0;
           var vmOk = !!d.summary.vm_reachable;
+          var chk = d.summary.checked||0;
+          // 覆盖率条形（IA 规范样式要点）：.bar 分母 = 可核对目标（eligible）；
+          // checked=0 显示「不适用」文案，绝不画 100% 的空条
+          var cover = document.getElementById('recon-cover');
+          if (cover) {
+            if (chk > 0 && vmOk) {
+              var pct = Math.round((chk - st) / chk * 100);
+              var barColor = pct >= 90 ? 'var(--success)' : (pct >= 60 ? 'var(--warning,#b45309)' : 'var(--error)');
+              cover.innerHTML = '<div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted)">'
+                + '<span style="white-space:nowrap">覆盖率 ' + pct + '%（可核验 ' + (chk - st) + '/' + chk + '）</span>'
+                + '<div style="flex:1;height:7px;border-radius:4px;background:var(--border,#e3eaee);overflow:hidden"><div style="width:' + pct + '%;height:100%;background:' + barColor + '"></div></div></div>';
+            } else {
+              cover.innerHTML = '<div style="font-size:11px;color:var(--muted)">覆盖率 —（' + (vmOk ? '无可核对目标，不适用' : 'VM 不可达，不可判') + '）</div>';
+            }
+          }
           // VM 不可达时断采/野指标不可判（全量误报"断采"、空清单误读"无野指标"），显示 —
           var el1 = document.getElementById('slo-stale');
           if (el1) { el1.textContent = vmOk ? st : '—'; el1.style.color = (vmOk&&st>0)?'var(--error)':'var(--success)'; }
           var el4 = document.getElementById('slo-wild');
           if (el4) { el4.textContent = vmOk ? wild : '—'; el4.style.color = (vmOk&&wild>0)?'var(--warning,#b45309)':'var(--success)'; }
           if (meta) {
-            // 覆盖率口径（P1）：分母 = 可核对目标（checked = 声明目标中插件可解析且有合法探针指标的子集），
-            // 在报率 = (checked - stale) / checked；checked=0 时显示"—"（不适用），绝不伪造 100%。
-            var chk = d.summary.checked||0, decl = d.summary.targets||0, inrate = (chk - st) + '/' + chk;
-            var rateTxt = chk>0 ? '在报率 '+Math.round((chk-st)/chk*100)+'%（'+inrate+'）' : '在报率 —（无可核对目标）';
-            var skipTxt = decl>chk ? ' · 声明 '+decl+'（'+(decl-chk)+' 缺插件口径未核对）' : ' · 声明 '+decl;
-            meta.textContent = '对账时间 '+(d.generated_at||'')+' · '+rateTxt+skipTxt+' · VM '+(vmOk?'可达':'不可达');
+            // 分母口径（P1）：checked = 声明目标中插件可解析且有合法探针指标的子集（eligible）
+            var decl = d.summary.targets||0, chkN = d.summary.checked||0;
+            var skipTxt = decl>chkN ? ' · 声明 '+decl+'（'+(decl-chkN)+' 缺插件口径未核对）' : ' · 声明 '+decl;
+            meta.textContent = '对账时间 '+(d.generated_at||'')+skipTxt+' · VM '+(vmOk?'可达':'不可达');
           }
           // ① 一句人话结论
           if (v) {
@@ -273,16 +293,51 @@ function renderTasks() {
               sb.style.color='var(--muted)';
             }
             else {
-              var h = '<table style="text-align:left"><thead><tr><th>目标</th><th>地址</th><th>插件</th><th>分派 Agent</th><th>探测指标</th><th>操作</th></tr></thead><tbody>';
+              // 四值状态推导（IA 规范）：承载 Agent 心跳在线 → 失败（明确：人活着、数据没来）；
+              // 心跳过期/未知 → 未知（证据过期，未证实失败，amber）。绝不把未知当失败报警。
+              var nowS = Math.floor(Date.now()/1000);
+              function staleState(t) {
+                if (!t.agent_id) return '<span class="badge" style="background:#fff5df;color:#946011">未知 · 无承载 Agent</span>';
+                var ag = agents.filter(function(a){return a.id===t.agent_id})[0];
+                if (!ag) return '<span class="badge" style="background:#fff5df;color:#946011">未知 · 承载不存在</span>';
+                var online = (ag.status==='healthy'||ag.status==='running') || (ag.last_seen && (nowS-ag.last_seen)<=120);
+                return online
+                  ? '<span class="badge" style="background:#fff0ee;color:#ae3c38">失败 · Agent 在线无数据</span>'
+                  : '<span class="badge" style="background:#fff5df;color:#946011">未知 · 心跳过期</span>';
+              }
+              var h = '<table style="text-align:left"><thead><tr><th>目标</th><th>地址</th><th>插件</th><th>分派 Agent</th><th>状态</th><th>探测指标</th><th>操作</th></tr></thead><tbody>';
               d.stale.forEach(function(t){
                 var rid = tgRes[t.id], act;
                 if (!rid) act = '<span style="color:var(--muted)">—</span>';
-                else if (resNames[rid]) act = '<a href="javascript:void(0)" onclick="openResourceDrawer(\''+rid+'\')" style="color:var(--primary)">打开资源</a>';
-                else act = '<span style="color:var(--muted)">资源已删除</span>';
-                h += '<tr><td>'+escHtml(t.name)+'</td><td><code>'+escHtml(t.address)+'</code></td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(t.plugin)+'</span></td><td>'+(t.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+t.agent_id+'\')" style="color:var(--primary)">'+escHtml(t.agent_id)+'</a>':'-')+'</td><td style="font-size:10px;color:var(--muted)">'+escHtml((t.probe_keys||[]).slice(0,2).join(', '))+'</td><td>'+act+'</td></tr>';
+                else if (resNames[rid]) act = '<a href="javascript:void(0)" onclick="openResourceDrawer(\''+rid+'\')" style="color:var(--primary)">打开对象</a>';
+                else act = '<span style="color:var(--muted)">对象已删除</span>';
+                h += '<tr><td>'+escHtml(t.name)+'</td><td><code>'+escHtml(t.address)+'</code></td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(t.plugin)+'</span></td><td>'+(t.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+t.agent_id+'\')" style="color:var(--primary)">'+escHtml(t.agent_id)+'</a>':'-')+'</td><td>'+staleState(t)+'</td><td style="font-size:10px;color:var(--muted)">'+escHtml((t.probe_keys||[]).slice(0,2).join(', '))+'</td><td>'+act+'</td></tr>';
               });
               h += '</tbody></table>';
               sb.innerHTML = h; sb.style.color='';
+            }
+          }
+          // 修复草案填充（模板产出，只读）：断采目标 → 按状态给模板建议；复核动作跳变更中心（规则 3）
+          var db = document.getElementById('recon-draft-body');
+          if (db) {
+            var staleList = (d.stale || []).slice(0, 3);
+            if (!vmOk) { db.innerHTML = '— VM 不可达，本轮无法生成草案'; }
+            else if (!staleList.length) { db.innerHTML = '✅ 当前无断采目标，无需生成草案'; }
+            else {
+              db.style.textAlign = 'left';
+              db.innerHTML = staleList.map(function (t) {
+                var ag = agents.filter(function (a) { return a.id === t.agent_id })[0];
+                var nowS2 = Math.floor(Date.now() / 1000);
+                var online = ag && ((ag.status === 'healthy' || ag.status === 'running') || (ag.last_seen && (nowS2 - ag.last_seen) <= 120));
+                var suggest = online
+                  ? '承载 Agent 在线但 ' + escHtml(t.plugin) + ' 无数据上报 → 建议检查目标 ' + escHtml(t.address) + ' 连通性与采集进程状态'
+                  : '承载 Agent 心跳过期 → 建议先恢复网络/心跳，恢复后采集通常自动继续（未证实失败，先核实再动手）';
+                return '<div style="display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--border,#eee);font-size:12.5px">'
+                  + '<b style="white-space:nowrap">' + escHtml(t.name) + '</b>'
+                  + '<span style="flex:1;color:var(--muted)">' + suggest + '</span>'
+                  + '<a href="javascript:void(0)" onclick="goPage(\'changes\')" style="color:var(--primary);white-space:nowrap">去变更中心复核 →</a></div>';
+              }).join('')
+                + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">草案 = 模板建议，不是 evidence；本页不可执行任何修复动作，复核与转变更只在变更中心（规则 3）。</div>';
             }
           }
           // 野指标清单 + 处理建议
@@ -306,7 +361,7 @@ function renderMetricsBrowse() {
         siteCfg(function(cfg) {
           var vmuiUrl = cfg.vm_url + '/vmui/';
           var html = '<div class="card" style="height:calc(100vh - 130px);display:flex;flex-direction:column">';
-          html += '<div class="card-hd">📈 指标大屏 <span style="font-weight:400;font-size:11px;color:var(--muted)">数据长什么样？控制台只做导航壳</span><span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span></div>';
+          html += '<div class="card-hd">📈 指标大屏 <span style="font-weight:400;font-size:11px;color:var(--muted)">数据长什么样？控制台只做导航壳，不自建图表</span><span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span><button class="btn btn-o btn-sm" style="float:right" onclick="openGrafanaNew()">↗ 在新窗口打开 Grafana</button></div>';
           html += '<div class="card-bd" style="flex:1;padding:0;overflow:hidden">';
           html += '<iframe id="metrics-frame" src="'+vmuiUrl+'" style="width:100%;height:100%;border:0"></iframe>';
           html += '</div></div>';
@@ -319,6 +374,9 @@ function renderMetricsBrowse() {
         if (frame) siteCfg(function(cfg) {
           frame.src = t==='grafana' ? cfg.grafana_url + '/' : cfg.vm_url + '/vmui/';
         });
+      }
+      function openGrafanaNew() {
+        siteCfg(function(cfg) { if (cfg.grafana_url) window.open(cfg.grafana_url + '/', '_blank'); });
       }
 
       // ===================================================================
@@ -354,7 +412,7 @@ function renderMetricsBrowse() {
       //  PAGE: Audit (Operation Log)
       // ===================================================================
             function renderAudit() {
-        var html = '<div class="card"><div class="card-hd">📜 审计日志 <span style="font-weight:400;font-size:11px;color:var(--muted)">全平台操作记录</span></div><div class="card-bd">';
+        var html = '<div class="card"><div class="card-hd">📜 审计日志 <span style="font-weight:400;font-size:11px;color:var(--muted)">谁在何时做了什么？· 本页是合规原始留痕，不做聚合、不提供改写；过程视图见变更中心</span></div><div class="card-bd">';
         html += '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">';
         html += '<input placeholder="搜索操作人/目标/结果..." oninput="auditFilter()" style="width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px" id="audit-search">';
         html += '<select onchange="auditFilter()" id="audit-action" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部操作</option></select>';
@@ -2140,7 +2198,7 @@ function mdRender(md) {
       // ===================================================================
       function renderSettings() {
         siteCfg(function(cfg) {
-          var html = '<div class="card"><div class="card-hd">⚙️ 平台参数</div><div class="card-bd">';
+          var html = '<div class="card"><div class="card-hd">⚙️ 平台设置 <span style="font-weight:400;font-size:11px;color:var(--muted)">平台怎么配？· 所有配置改动写审计日志，执行配置展示生效值与来源 env</span></div><div class="card-bd">';
           html += '<table><thead><tr><th style="width:220px">参数</th><th>值</th><th style="width:280px">来源</th></tr></thead><tbody>';
           html += '<tr><td>指标查询地址（浏览器可达）</td><td><code>' + (cfg.vm_url || '-') + '</code></td><td>环境变量 <code>VM_PUBLIC_URL</code>，未配置时按访问地址推导</td></tr>';
           html += '<tr><td>Grafana 地址</td><td><code>' + (cfg.grafana_url || '-') + '</code></td><td>环境变量 <code>GRAFANA_PUBLIC_URL</code></td></tr>';

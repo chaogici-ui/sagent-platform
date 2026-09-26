@@ -19,8 +19,9 @@ function renderHealthOverview() {
     var summary = (d.recon && d.recon.summary) || {};
     var h = '';
 
-    h += '<div class="card"><div class="card-hd">🩺 采集总览'
-      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">　' + (d.recon && d.recon.generated_at ? '对账时间 ' + ovEsc(d.recon.generated_at) : '') + '</span>'
+    h += '<div class="card"><div class="card-hd">◧ 工作台'
+      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">　现在最要紧的事是什么？'
+      + (d.recon && d.recon.generated_at ? ' · 对账时间 ' + ovEsc(d.recon.generated_at) : '') + '</span>'
       + '<button class="btn btn-o btn-sm" style="float:right" onclick="renderHealthOverview()">↻ 刷新</button></div><div class="card-bd">';
 
     // 证据链概要（共享实现见 buildEvidenceChainHTML，与采集健康页同源，口径唯一）
@@ -115,15 +116,16 @@ function renderPlatformHealth() {
   });
 }
 
-// 证据链概要条（前端效果设计·第4节：已应用 ≠ 已入库，五段全绿才叫「采集正常」）。
-// 共享实现：工作台(overview)与采集健康(slo)同源复用，口径唯一。
-// 数据全部来自真实后端（resFetchAll 的 d：agents/recon/collect-stats），缺失即标「未知」，绝不硬编码填绿。
-//   E1 heartbeat ← Agent 心跳在线占比（d.agents 的 last_seen 距当前 ≤ HEARTBEAT_TTL 算在线）
-//   E2 config    ← 台账目标中在线 Agent 覆盖占比（Agent 已装上就位才算配置实际生效）
-//   E3 source    ← 台账应采目标中非断采占比（recon.summary.targets - stale）
-//   E4 transport ← VM 可达（recon.summary.vm_reachable），指标链路 upstream 通不通
-//   E5 central   ← collect-stats 有真实入库采样 且 transport 通过（数据确已落库）
-// 逐段归因：缺口节点可点击下钻——Agent 侧(heartbeat/config)→资源页"问题"筛选；数据侧(source/transport/central)→采集健康对账。
+// 证据链概要条（IA 设计稿·采集健康页语义核心：六环证据链，每环独立状态）。
+// 共享实现：工作台(overview)与采集健康(slo)同源复用，口径唯一（裁决 3）。
+// 数据全部来自真实后端，缺失即标「未知」，绝不硬编码填绿（unknown ≠ failed）。
+//   E1 对象连接  ← Agent 心跳在线占比（last_seen 距当前 ≤ HEARTBEAT_TTL）
+//   E2 配置版本  ← Agent 生效配置与期望配置一致（cfg_effective == cfg_desired）
+//   E3 源采集    ← 台账应采目标中非断采占比（recon.summary）
+//   E4 区域抓取  ← collect-stats 有真实采集采样（抓取端在出数）
+//   E5 区域传输  ← VM 可达（recon vm_reachable，链路 upstream 通不通）
+//   E6 中央入库  ← 抓取有采样 且 传输通（数据确已落库）
+// 逐环归因：缺口环可点击下钻——Agent 侧→资源页"问题"筛选；数据侧→采集健康对账。
 globalThis.buildEvidenceChainHTML = function (d) {
   var esc = (typeof ovEsc === 'function') ? ovEsc : function (s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -141,15 +143,27 @@ globalThis.buildEvidenceChainHTML = function (d) {
   var e3Ok = targetsN ? ((targetsN - staleN) / targetsN >= 0.6) : null;
   var vmOk = sm.vm_reachable === true;
   var statsN = Object.keys(d.stats || {}).length;
-  var e5Ok = (statsN > 0) && vmOk;
-  var e2Ok = targetsN ? (alive >= targetsN * 0.6) : null;
-
+  var e4Ok = statsN > 0 ? true : null; // 无采样证据时标未知，不硬编码
+  // 配置版本环：生效配置与期望配置一致（revisions 对齐）；字段缺失时降级为未知
+  var cfgOk = 0, cfgBad = 0, cfgKnown = 0;
+  agentsArr.forEach(function (a) {
+    if (a.cfg_desired !== undefined && a.cfg_effective !== undefined && a.cfg_desired !== null && a.cfg_effective !== null) {
+      cfgKnown++;
+      if (String(a.cfg_desired) === String(a.cfg_effective)) cfgOk++; else cfgBad++;
+    }
+  });
+  var e2Ok = cfgKnown ? (cfgBad === 0) : null;
+  var e2Detail = cfgKnown
+    ? (cfgBad ? cfgOk + '/' + cfgKnown + ' 配置对齐' : cfgKnown + ' 个配置全部对齐')
+    : '配置版本证据待接入';
+  var e5Ok = statsN > 0 && vmOk;
   var chain = [
-    { k: 'heartbeat', label: 'Agent 心跳', ok: e1Ok, detail: agentsArr.length ? alive + ' / ' + agentsArr.length + ' 在线(≤' + HEARTBEAT_TTL + 's)' : '无 Agent' },
-    { k: 'config', label: '配置生效', ok: e2Ok, detail: '台账目标 ' + targetsN + ' · 在线 ' + alive },
-    { k: 'source', label: '源采集', ok: e3Ok, detail: '应采 ' + targetsN + ' · 断采 ' + staleN },
-    { k: 'transport', label: '链路贯通', ok: vmOk, detail: vmOk ? 'VM 可达' : 'VM 无响应' },
-    { k: 'central', label: '中央入库', ok: e5Ok, detail: e5Ok ? '稳定采集中' : '待确认采样' }
+    { k: 'heartbeat', label: '① 对象连接', ok: e1Ok, detail: agentsArr.length ? alive + ' / ' + agentsArr.length + ' 在线(≤' + HEARTBEAT_TTL + 's)' : '无 Agent' },
+    { k: 'config', label: '② 配置版本', ok: e2Ok, detail: e2Detail },
+    { k: 'source', label: '③ 源采集', ok: e3Ok, detail: '应采 ' + targetsN + ' · 断采 ' + staleN },
+    { k: 'scrape', label: '④ 区域抓取', ok: e4Ok, detail: e4Ok ? statsN + ' 个目标有采集采样' : '采样证据待接入' },
+    { k: 'transport', label: '⑤ 区域传输', ok: vmOk, detail: vmOk ? 'VM 可达' : 'VM 无响应' },
+    { k: 'central', label: '⑥ 中央入库', ok: e5Ok, detail: e5Ok ? '稳定采集中' : '待确认采样' }
   ];
   var h = '<div class="ev-chain">';
   chain.forEach(function (c) {
@@ -157,7 +171,7 @@ globalThis.buildEvidenceChainHTML = function (d) {
     var ic = c.ok === true ? '✓' : (c.ok === false ? '✕' : '·');
     // 只有有缺口的节点可点（全绿节点点击无意义，也不误导）。
     // 归因目标：Agent 侧(heartbeat/config)→资源页"问题"筛选；
-    // 数据侧(source/transport/central)→若在采集健康页由 __sloDrill 就地定位问题卡，否则跳 slo 页。
+    // 数据侧(source/scrape/transport/central)→若在采集健康页由 __sloDrill 就地定位问题卡，否则跳 slo 页。
     var jt = null;
     if (c.ok === false) {
       if (c.k === 'heartbeat' || c.k === 'config') {
@@ -165,7 +179,7 @@ globalThis.buildEvidenceChainHTML = function (d) {
       } else {
         // 数据侧缺口：优先就地钻取（本页存在对应问题卡时），否则回退跳采集健康页
         var drillFn = 'window.__sloDrill';
-        var kindArg = c.k === 'source' ? "'stale'" : (c.k === 'transport' ? "'transport'" : "'wild'");
+        var kindArg = c.k === 'source' ? "'stale'" : (c.k === 'transport' ? "'transport'" : (c.k === 'scrape' ? "'stale'" : "'wild'"));
         jt = "if(" + drillFn + ")" + drillFn + "(" + kindArg + "); else goPage('slo')";
       }
     }
@@ -173,12 +187,12 @@ globalThis.buildEvidenceChainHTML = function (d) {
     h += '<div class="ev-node ' + st + '"' + click + ' title="' + esc(c.detail) + (jt ? ' · 点击逐段归因' : '') + '">'
       + '<span class="ev-ic">' + ic + '</span><span class="ev-lb">' + esc(c.label) + '</span><span class="ev-dt">' + esc(c.detail) + '</span></div>';
   });
-  var gateOk = e1Ok !== false && e2Ok !== false && e3Ok !== false && vmOk && e5Ok !== false;
-  h += '<div class="ev-node ev-gate" title="已应用 ≠ 已入库，五段全绿方为正常">' + (gateOk ? '采集正常 ✓' : '有缺口，逐段归因 →') + '</div></div>';
+  var gateOk = e1Ok !== false && e2Ok !== false && e3Ok !== false && e4Ok !== false && vmOk && e5Ok !== false;
+  h += '<div class="ev-node ev-gate" title="已应用 ≠ 已入库，六环全绿方为正常">' + (gateOk ? '采集正常 ✓' : '有缺口，逐环归因 →') + '</div></div>';
   if (!gateOk) {
     h += '<div style="margin-top:-6px;margin-bottom:14px;font-size:11.5px;color:var(--muted)">'
-      + '🔼 红色/缺口节点可点击，快速下钻归因：Agent 侧问题→资源页"问题"，数据侧问题→采集健康对账。'
-      + ' <span style="color:var(--warn)">"已应用 ≠ 已入库"</span>，请逐段核验。</div>';
+      + '🔼 红色/缺口环可点击，快速下钻归因：Agent 侧问题→资源页"问题"，数据侧问题→采集健康对账。'
+      + ' <span style="color:var(--warn)">"已应用 ≠ 已入库"</span>，请逐环核验；灰点环=证据缺失（未知，不是失败）。</div>';
   }
   return h;
 };

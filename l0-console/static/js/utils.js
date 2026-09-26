@@ -54,10 +54,14 @@
           var recon = await (await fetch(API + "/recon")).json();
           var flows = await (await fetch(API + "/onboard/flows")).json();
           var stale = (recon && recon.summary && recon.summary.stale) || 0;
+          var wild = (recon && recon.summary && recon.summary.wild) || 0;
+          // IA 设计稿（规则 4）：待办徽章数一处计算两处消费——工作台待办与「采集健康」badge 同源。
+          // 采集健康 badge = 断采 + 野指标 + 维护态 Agent（unknown 不计入：未证实失败，不催人动手）
+          var maintained = agents.filter(function (a) { return a.status === "stopped" && window.tenantVisible(a); }).length;
           var pending = (flows && flows.flows ? flows.flows : []).filter(function (f) {
             return f.status === 'running' || f.status === 'blocked' || f.status === 'stalled' || f.status === 'failed';
           }).length;
-          var map = { slo: stale, "onboard-center": pending };
+          var map = { slo: stale + wild + maintained, "onboard-center": pending };
           Object.keys(map).forEach(function (page) {
             var n = map[page];
             var a = document.querySelector('nav a[data-page="' + page + '"]');
@@ -94,7 +98,7 @@
           case "targets": renderTargets(); break;
           case "metrics-browse": renderMetricsBrowse(); break;
           case "data-gov": renderDataGov(); break;          // 数据治理（platform.js，野指标治理切片）
-          case "platform-health": renderPlatformHealth(); break; // 平台健康（platform.js，/api/health 组件化自检）
+          case "platform-health": renderPlatformHealthPage(); break; // 平台健康（platform.js，/api/health 组件化自检）
           case "slo": renderSLO(); break;
           case "audit": renderAudit(); break;
           case "tasks": renderTasks(); break;      // 读落库审计（/api/tasks → ListAudit），重启不丢

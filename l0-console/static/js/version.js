@@ -36,7 +36,7 @@
       if (d.error) { toast(d.error, 'err'); return; }
       _versions = d.versions || [];
       _statusOptions = d.status_options || [];
-      var html = uploadCard() + '<div class="card"><div class="card-hd">🧬 版本与兼容性</div><div class="card-bd">';
+      var html = uploadCard() + '<div class="card"><div class="card-hd">🧬 版本与兼容 <span style="font-weight:400;font-size:11px;color:var(--muted)">用哪个版本、装不装得上？· 本页只读定义侧，升级/回退决策走变更中心</span></div><div class="card-bd">';
       html += '<div style="margin-bottom:8px;color:var(--muted);font-size:12px">兼容判据：'
         + '架构 + 最低内核 + 包内组件要求。装机/升级时平台按目标机实测环境自动选定版本；'
         + '无兼容版本会拦住并说明差哪一项。</div>';
