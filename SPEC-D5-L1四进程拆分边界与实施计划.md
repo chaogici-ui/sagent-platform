@@ -14,14 +14,15 @@
 
 **红线（继承 D5-L1PC）**：安装就近取包 → 缓存失效回源 L0 → 仍不一致拒绝安装，不降级用旧包。
 
-**红线（网络域）**：L0↔L1 互通的进程只有两个角色——控制面出口 `L1 Controller`（唯一双挂 l0-net + l1-net）、数据面出口 `VMAgent`（l1-net 抓 vmauth、l0-net 写 VMStorage）。Gateway / PackageCache / AnsibleRunner / SAgent / vmauth 一律只挂 l1-net。Gateway 白名单只收 SAgent 通道（`/api/agent/*` + 证据回报 + 任务回执），`/api/l1/task/pull` 属 L1 内部通道，只经 Controller。
+**红线（网络域）**：~~L0↔L1 互通的进程只有两个角色——控制面出口 `L1 Controller`（唯一双挂 l0-net + l1-net）、数据面出口 `VMAgent`（l1-net 抓 vmauth、l0-net 写 VMStorage）。Gateway / PackageCache / AnsibleRunner / SAgent / vmauth 一律只挂 l1-net。~~
+**【2026-09-26 随容器整合（SPEC-L1HA L1HA-1）改写】**四控制面进程合一为 `l1-collector` 容器后，该容器双挂 l0-net + l1-net（controller 出网必需），**"Gateway 不持 L0 可达"的网络域隔离在演示拓扑不再成立**——与真实采集机形态一致（四进程同主机同网络，Gateway 本就可达 L0）。隔离改由**进程级白名单承接**：Gateway 白名单只收 SAgent 通道（`/api/agent/*` + 证据回报 + 任务回执），`/api/l1/task/pull` 属 L1 内部通道只经 Controller；`TestGatewayRejectsL1InternalTaskPull` 等进程级单测不受影响。历史实证"l1-gateway 内解析不到 l0-console"为多容器时期的验证手段，已随合并失效，由白名单单测 + 合并后端到端中继验证替代。
 
 ## 二、增量拆分与验证门禁（各自独立交付）
 
 | 子项 | 内容 | 验证门禁 |
 |------|------|----------|
 | **IN1 Package Cache 独立进程**（✅ 已交付） | `l0-console -package-cache` daemon 模式：仅起 package-cache API（status/sync/resolve），不加 DB/console；l0-console 安装路径可用 `L1_PACKAGE_CACHE_URL` 走 HTTP resolve（缺省仍进程内 `resolveInstallBinary`，红线语义一致） | 单测 + 容器运行态：daemon status/sync/resolve + 篡改自愈 + 就近取包通路（均已验：见交付清单 D5-IN1 段） |
-| IN2 Gateway 汇聚中继（✅ 已交付） | 心跳/指令汇聚通道进程；SAgent 控制通道改指 L1 Gateway（网络域收敛末环，随 G2 退役收口）。**上游已收敛为 L1 Controller**（`L1_CONTROLLER_URL`），Gateway 只挂 l1-net、不持有 L0 可达 | 单测 `TestGatewayRejectsL1InternalTaskPull` + 容器运行态：`l1-gateway` 内解析不到 `l0-console`、可解析 `l1-controller` |
+| IN2 Gateway 汇聚中继（✅ 已交付） | 心跳/指令汇聚通道进程；SAgent 控制通道改指 L1 Gateway（网络域收敛末环，随 G2 退役收口）。**上游已收敛为 L1 Controller**（`L1_CONTROLLER_URL`）。~~Gateway 只挂 l1-net、不持有 L0 可达~~（网络域隔离已随容器整合失效，改由白名单承接，见上方红线改写） | 单测 `TestGatewayRejectsL1InternalTaskPull` + 容器运行态：~~`l1-gateway` 内解析不到 `l0-console`、可解析 `l1-controller`~~（多容器时期实证，合并后失效）；合并后实证：SAgent 心跳经别名 `l1-gateway`→`l1-collector` 内 gateway 进程中继 200 |
 | IN3 Controller 分流中枢（✅ 已交付） | 任务拉取 + 分流到 Ansible/Gateway（`-controller` 独立进程 + L0 侧 L1 任务源三接口）。**控制面唯一出口**：双挂 l0-net + l1-net，挂中继入口承接 Gateway 汇聚的 SAgent 通道与 Runner 的任务拉取 | 单测 `TestControllerRelayIsControlPlaneEgress` + 容器运行态：SAgent 心跳经 gateway→controller→L0 落库、Runner 拉任务经 controller 得 200 |
 | IN4 Ansible Runner 独立 + tar.gz 打包（✅ 已交付） | playbook 执行端（`-ansible-runner` 独立进程）+ 四进程 tar.gz 部署脚本（`scripts/build-l1-bundle.sh`） | 依赖 IN1-3 + 采集机部署目标 |
 | **IN5 安装执行端搬迁**（📋 已立项，见 `SPEC-D5-IN5-安装执行端搬迁边界与分阶段计划.md`） | 把 `tryAnsibleExecutor` 接管的 **11 个 ansible 步骤原子**从「L0 进程内执行」搬到 L1 Runner：L0 投递任务 + 回执对账桥驱动步骤终态；Runner 退化为纯执行端（不碰 L0 DB/状态机）。**最后**再把目标机 `sagent-host` 搬 l1-net | 分 4 阶段（B2 绑定与回执桥 → B3 install → B4 其余 9 atom → B5 主机搬迁与收口），每阶段独立门禁 |
