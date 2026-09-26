@@ -356,7 +356,7 @@ function obNextStepBar(f, evs) {
     text = '<b>无需操作</b>——接入已完成，数据已在采集。采集实况见「资源与指标」页对应主机。';
   } else if (st === 'canceled') {
     cls = 'wait'; icon = '⏹';
-    text = '<b>流水线已取消</b>——如需重新接入，在资源页对该主机点「接入」。';
+    text = '<b>流水线已取消</b>——如需重新接入，在接入中心对该对象点「接入」。';
   } else if (st === 'failed') {
     cls = 'fail'; icon = '✕';
     var nm = firstFail ? obEscape(firstFail.title || firstFail.step) : '失败环节';
@@ -511,7 +511,7 @@ function renderOnboardCenter() {
 window.renderChanges = function () {
   var el = document.getElementById('main-content');
   el.innerHTML = '<div class="card"><div class="card-hd">📋 变更中心'
-    + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">接入流水线 + 审计 + 任务历史 · 统一变更时间线</span>'
+    + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">谁动了它、怎么走过来的？统一变更时间线（过程聚合视图，合规原始留痕见审计日志）</span>'
     + '<button class="btn btn-p btn-sm" style="float:right" onclick="openOnboardNew()">➕ 新接入</button></div>'
     + '<div class="card-bd" id="ch-body"><div style="text-align:center;color:var(--muted);padding:20px">⏳ 汇总变更流水线与审计…</div></div></div>';
   Promise.all([
@@ -1592,7 +1592,7 @@ function obOnbConclusion(f, evs, byStep) {
     sub = '流程在失败环节停止，未继续执行后续步骤。下方日志已标出报错位置与内容，可在原地重试该步。';
   } else if (f.status === 'cancelled' || f.status === 'canceled') {
     cls = 'wait'; icon = '–'; tt = '接入已取消';
-    sub = '本次接入已取消，目标机上未做进一步改动。如需重新接入，在资源页对该主机点「接入」。';
+    sub = '本次接入已取消，目标机上未做进一步改动。如需重新接入，在接入中心对该对象点「接入」。';
   } else if (ws.kind === 'pick_version') {
     cls = 'wait'; icon = '!'; tt = '等你选定 SAgent 版本 · 选定后自动装机';
     sub = '这不是故障：主机探路已完成并给出兼容版本清单，请在下方「版本选定」中点选一个版本，之后剩余环节会自动跑完，无需再手工干预。';
@@ -2113,7 +2113,7 @@ function obSvcConclusion(f, evs, byStep) {
     cls = 'ok'; icon = '✓';
     if (p.action === 'stop') {
       tt = '已停止 · 采集中断（平台标维护态）';
-      sub = 'SAgent 已按守护协议停稳，不会被 3 秒拉回；心跳消失是维护态的预期表现，不算失联。需要恢复时在资源页点「启动」即可。';
+      sub = 'SAgent 已按守护协议停稳，不会被 3 秒拉回；心跳消失是维护态的预期表现，不算失联。需要恢复时在接入中心点「启动」即可。';
     } else {
       tt = '已启动 · 采集已恢复';
       sub = 'SAgent 已存活并上报心跳，心跳与数据自行回来。本次操作全程有据可查（预检实测 + 执行自证）。';
@@ -2123,7 +2123,7 @@ function obSvcConclusion(f, evs, byStep) {
     sub = '流程在失败环节停止，未继续执行后续步骤。下方日志已标出报错位置与内容，可在原地重试该步。';
   } else if (f.status === 'cancelled' || f.status === 'canceled') {
     cls = 'wait'; icon = '–'; tt = act + '已取消 · 目标机未做进一步改动';
-    sub = '本次启停已取消。如需重新执行，在资源页对该主机点「启动」或「停用」。';
+    sub = '本次启停已取消。如需重新执行，在接入中心对该对象点「启动」或「停用」。';
   } else if (f.status === 'blocked') {
     cls = 'wait'; icon = '!'; tt = '旧版启停闸门（已移除）· 当时卡在这里没往下走';
     sub = '这是闸门移除前落库的历史记录：那时启停要人工点头，而界面并没有确认入口，流程卡在半路、执行环节从未运行。现在启停改为「核对通过即自动放行」，不再需要人工确认。';
@@ -2161,7 +2161,7 @@ function obSvcImpact(f, byStep) {
     }
     h += '<div style="margin-top:6px;color:var(--success)">✓ 核对通过，已自动放行到执行环节（启停不设人工确认）</div>';
     h += '</div>';
-    h += '<div style="font-size:11px;color:var(--muted);margin-top:6px">为什么不用你点头：启停是可逆轻动作（停→启随时可回），动作与目标在资源页点按钮时就已选定并留痕审计，平台核对预检实测通过后直接执行。</div>';
+    h += '<div style="font-size:11px;color:var(--muted);margin-top:6px">为什么不用你点头：启停是可逆轻动作（停→启随时可回），动作与目标在接入中心点按钮时就已选定并留痕审计，平台核对预检实测通过后直接执行。</div>';
   } else if (st === 'fail') {
     h += '<div style="font-size:12px;color:var(--error)">✕ ' + obEscape(e.summary || '核对未通过，启停已就地拦住（未触碰目标机）') + '</div>';
   } else if (st === 'blocked') {

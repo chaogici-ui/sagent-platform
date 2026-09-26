@@ -275,7 +275,7 @@ function renderMetricsBrowse() {
         siteCfg(function(cfg) {
           var vmuiUrl = cfg.vm_url + '/vmui/';
           var html = '<div class="card" style="height:calc(100vh - 130px);display:flex;flex-direction:column">';
-          html += '<div class="card-hd">📈 指标浏览 <span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span></div>';
+          html += '<div class="card-hd">📈 指标大屏 <span style="font-weight:400;font-size:11px;color:var(--muted)">数据长什么样？控制台只做导航壳</span><span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span></div>';
           html += '<div class="card-bd" style="flex:1;padding:0;overflow:hidden">';
           html += '<iframe id="metrics-frame" src="'+vmuiUrl+'" style="width:100%;height:100%;border:0"></iframe>';
           html += '</div></div>';
@@ -1099,9 +1099,10 @@ function mdRender(md) {
         return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="100%" preserveAspectRatio="none" style="display:block">'+gridY+paths+'</svg>';
       }
       function renderTargets() {
-        var html = '<div class="card"><div class="card-hd">🎯 采集目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">远程采集的目标实例清单（目录库持久化）</span>'
-          + '<button class="btn btn-o btn-sm" style="float:right" onclick="targetEdit()">➕ 新增目标</button>'
-          + '<button class="btn btn-p btn-sm" style="float:right;margin-right:6px" onclick="openOnboardWizard()">🚀 接入向导</button></div><div class="card-bd">';
+        // 2026-09-26 IA 改造：采集目标降为只读矩阵（IA 规则 3——目标 CRUD 收口进接入中心）。
+        // 保留：测试（连通性探测，不改配置）、接入过程下钻、所属资源/Agent 下钻。
+        var html = '<div class="card"><div class="card-hd">🎯 采集目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">每台采什么、分派给谁？只读矩阵 · 新增/修改/删除请走接入中心</span>'
+          + '<button class="btn btn-o btn-sm" style="float:right" onclick="goPage(\'resources\')">去接入中心接入 →</button></div><div class="card-bd">';
         html += '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">';
         html += '<input placeholder="搜索目标..." oninput="targetFilter()" style="width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px" id="target-search">';
         html += '<select onchange="targetFilter()" id="target-type" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部类型</option><option value="mysql">MySQL</option><option value="redis">Redis</option><option value="kafka">Kafka</option><option value="elasticsearch">Elasticsearch</option><option value="clickhouse">ClickHouse</option><option value="http">HTTP</option></select>';
@@ -1128,7 +1129,7 @@ function mdRender(md) {
         });
         var tbody = document.getElementById('target-tbody');
         if (!tbody) return;
-        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">无匹配目标，点击右上角「新增目标」开始接入</td></tr>'; return; }
+        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">尚无采集目标——先到「接入中心」完成接入 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">去接入中心 →</a></td></tr>'; return; }
         tbody.innerHTML = filtered.map(function(tg){
           var res = tg.last_test_result||'';
           var resCell = !tg.resource_id ? '<span style="color:var(--muted)">—</span>'
@@ -1140,7 +1141,7 @@ function mdRender(md) {
             : '<span class="badge b-h" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>')
             : '<span class="badge b-o">未测试</span>';
           var traceBtn = tg.flow_id ? ' <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="openOnboardFlow('+tg.flow_id+')" title="回到产生这个目标的接入流水线，看它是怎么走过来的">🧭 接入过程</button>' : '';
-          return '<tr><td>'+escHtml(tg.name)+'</td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(tg.type)+'</span></td><td><code>'+escHtml(tg.address)+'</code></td><td>'+resCell+'</td><td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+tg.agent_id+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td><td>'+(tg.plugin?'<span class="badge" style="background:#f0f0f0;color:#666">'+escHtml(tg.plugin)+'</span>':'-')+'</td><td>'+st+'</td><td style="white-space:nowrap"><button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetTest('+tg.id+')">测试</button> <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetEdit('+tg.id+')">编辑</button> <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px;color:var(--error)" onclick="targetDelete('+tg.id+',\''+escHtml(tg.name)+'\')">删除</button>'+traceBtn+'</td></tr>';
+          return '<tr><td>'+escHtml(tg.name)+'</td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(tg.type)+'</span></td><td><code>'+escHtml(tg.address)+'</code></td><td>'+resCell+'</td><td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+tg.agent_id+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td><td>'+(tg.plugin?'<span class="badge" style="background:#f0f0f0;color:#666">'+escHtml(tg.plugin)+'</span>':'-')+'</td><td>'+st+'</td><td style="white-space:nowrap"><button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetTest('+tg.id+')">测试</button>'+traceBtn+'</td></tr>';
         }).join('');
       }
       function targetFilter() { targetRender(); }

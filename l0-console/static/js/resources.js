@@ -211,10 +211,10 @@
       else nBad++;
     });
 
-    var h = '<div class="card"><div class="card-hd">🖥 资源与接入'
-      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">　一台机器一行 · 采集实况来自 VM 实测</span>';
+    var h = '<div class="card"><div class="card-hd">🖥 接入中心'
+      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">　管哪些对象、归谁、接没接上？一台机器一行 · 采集实况来自 VM 实测</span>';
     if (_resData.err) h += '<span class="ob-warn" style="margin-left:8px;font-weight:400">⚠ ' + rEsc(_resData.err) + '</span>';
-    h += '<button class="btn btn-p btn-sm" style="float:right" onclick="openOnboardNew()">+ 接入新资源</button></div><div class="card-bd">';
+    h += '<button class="btn btn-p btn-sm" style="float:right" onclick="openOnboardNew()">+ 接入新对象</button></div><div class="card-bd">';
 
     h += '<div class="res-filters" style="margin-bottom:10px">'
       + resFilterBtn('all', '全部', nAll)
@@ -616,7 +616,7 @@
     // 且**预选本机 Agent**：原来这里调 targetEdit() 不带上下文，建出来的目标落在"未分派"，
     // 本机清单里根本看不到它，等于白填一遍表单（2026-09-24 用户追问后修正）
     h += '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">'
-      + (tgs.length ? '<button class="btn btn-o btn-sm" onclick="goPage(\'targets\')">采集目标页管理</button>'
+      + (tgs.length ? '<button class="btn btn-o btn-sm" onclick="goPage(\'targets\')">采集目标页查看</button>'
                     : (r.agent ? '<button class="btn btn-p btn-sm" onclick="resNewTarget(\'' + rEsc(r.agent.id) + '\')">➕ 新增采集目标</button>' : ''))
       + (r.agent ? '<button class="btn btn-o btn-sm" onclick="resOpenAgentDetail(\'' + rEsc(r.agent.id) + '\')">改采集配置 / 频率</button>' : '')
       + '</div></div>';
@@ -744,7 +744,8 @@
 
   // 能力与策略合页（采集策略 / 采集插件 / 指标目录），低频治理字段留在各自页内
   window.renderCapabilities = function () {
-    var h = '<div class="card"><div class="card-hd">🔌 采集能力与策略'
+    var h = '<div class="card"><div class="card-hd">🔌 插件与策略'
+      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">　用什么采、怎么采？</span>'
       + '<span class="tabs" style="margin-left:12px"><span class="active" data-tab="policy" onclick="capTab(\'policy\')">采集策略</span>'
       + '<span data-tab="plugins" onclick="capTab(\'plugins\')">采集插件</span>'
       + '<span data-tab="metrics" onclick="capTab(\'metrics\')">指标目录</span></span></div>'

@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SAgent 采集平台 · IA 与页面设计规范（整合版）</title>
+<style>
+:root{
+  --doc-bg:#141a1e; --doc-panel:#1c2429; --doc-line:#2e3a41; --doc-ink:#d8e2e4; --doc-muted:#8aa0a6;
+  --teal:#087d75; --teal-bright:#2ab5a8; --teal-soft:#e9f5f2;
+  --amber:#946011; --amber-bright:#e8a94a; --red:#ae3c38; --red-bright:#e07b76;
+  --blue:#345e95; --blue-bright:#7aa7d8; --green:#1c8a5a; --green-bright:#5cc292;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--doc-bg);color:var(--doc-ink);font-family:-apple-system,BlinkMacMacFont,"Segoe UI","PingFang SC",sans-serif;font-size:14px;line-height:1.7;padding:0 0 80px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px}
+h1{font-size:24px;padding:44px 0 6px;letter-spacing:.5px}
+h1 small{display:block;font-size:13px;color:var(--doc-muted);font-weight:400;margin-top:6px}
+h2{font-size:19px;margin:52px 0 6px;padding-top:18px;border-top:1px solid var(--doc-line);color:var(--teal-bright)}
+h2 .no{color:var(--doc-muted);font-weight:400;margin-right:8px}
+h3{font-size:15px;margin:22px 0 8px;color:var(--doc-ink)}
+p.lead{color:var(--doc-muted);margin-bottom:14px}
+.card{background:var(--doc-panel);border:1px solid var(--doc-line);border-radius:10px;padding:18px 20px;margin:14px 0}
+.tag{display:inline-block;padding:1px 9px;border-radius:10px;font-size:11px;font-weight:600;margin-right:6px;vertical-align:2px}
+.tag.existing{background:rgba(28,138,90,.18);color:var(--green-bright)}
+.tag.rename{background:rgba(58,94,149,.25);color:var(--blue-bright)}
+.tag.new{background:rgba(148,96,17,.28);color:var(--amber-bright)}
+.tag.move{background:rgba(138,160,166,.2);color:var(--doc-muted)}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+th{color:var(--doc-muted);text-align:left;font-weight:600;padding:7px 10px;border-bottom:1px solid var(--doc-line);white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid rgba(46,58,65,.55);vertical-align:top}
+tr:last-child td{border-bottom:none}
+code{background:rgba(8,125,117,.15);color:var(--teal-bright);padding:1px 6px;border-radius:4px;font-size:12px;font-family:"SF Mono",Menlo,monospace}
+
+/* 菜单树 */
+.menu-tree{font-size:13.5px}
+.menu-group{margin:14px 0;padding:12px 16px;background:rgba(8,125,117,.08);border-left:3px solid var(--teal);border-radius:0 8px 8px 0}
+.menu-group b{color:var(--teal-bright);font-size:14px}
+.menu-group .q{color:var(--doc-muted);font-size:12px;margin-left:10px}
+.menu-item{margin:9px 0 0 6px;padding-left:14px;border-left:1px dashed var(--doc-line)}
+.menu-item .name{font-weight:600}
+.menu-item .sub{display:block;color:var(--doc-muted);font-size:12.5px;margin-top:2px;padding-left:2px}
+.menu-item .sub i{font-style:normal;color:var(--teal-bright)}
+
+/* 动线 */
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:10px 0}
+.flow .node{background:var(--doc-panel);border:1px solid var(--doc-line);border-radius:8px;padding:6px 12px;font-size:12.5px;white-space:nowrap}
+.flow .node b{color:var(--teal-bright)}
+.flow .node.auto{border-style:dashed;color:var(--doc-muted)}
+.flow .arrow{color:var(--teal-bright);font-size:15px}
+.flow-note{color:var(--doc-muted);font-size:12.5px;margin:4px 0 0 2px}
+
+/* 线框（产品浅色主题预览） */
+.wf{background:#f5f7f8;border-radius:10px;padding:14px;margin:14px 0;border:1px solid var(--doc-line)}
+.wf-head{background:#142a34;color:#d7e6e6;border-radius:6px;padding:8px 12px;font-size:12px;display:flex;justify-content:space-between;margin-bottom:10px}
+.wf-head .t{font-weight:700}
+.wf-head .s{color:#7d9a9a}
+.wf-body{display:grid;gap:8px}
+.wf .box{background:#fff;border:1px solid #e3eaee;border-radius:8px;padding:9px 12px;font-size:12px;color:#172c36}
+.wf .box .bh{font-weight:700;font-size:12px;margin-bottom:4px;color:#0a5f59}
+.wf .row{display:flex;gap:8px}
+.wf .col{flex:1}
+.wf .muted{color:#5c7280}
+.wf .chip{display:inline-block;background:#e9f5f2;color:#0a5f59;border-radius:9px;padding:0 8px;font-size:10.5px;margin:1px 2px 1px 0}
+.wf .chip.warn{background:#fff5df;color:#946011}
+.wf .chip.err{background:#fff0ee;color:#ae3c38}
+.wf .chip.gray{background:#eef1f3;color:#5c7280}
+.wf .bar{height:7px;border-radius:4px;background:#e3eaee;margin:3px 0;overflow:hidden}
+.wf .bar i{display:block;height:100%;border-radius:4px}
+.wf .kv{display:flex;gap:10px;font-size:11.5px;color:#5c7280;margin-top:3px;flex-wrap:wrap}
+.wf .btn{display:inline-block;background:#087d75;color:#fff;border-radius:6px;padding:2px 10px;font-size:11px;margin-right:6px}
+.wf .btn.o{background:#fff;color:#087d75;border:1px solid #087d75}
+
+/* 页面卡 */
+.page-card{border:1px solid var(--doc-line);border-radius:12px;margin:22px 0;overflow:hidden}
+.pc-hd{background:rgba(8,125,117,.12);padding:13px 20px;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px}
+.pc-hd .name{font-size:16px;font-weight:700}
+.pc-hd .question{color:var(--doc-muted);font-size:13px}
+.pc-bd{padding:14px 20px 18px}
+.pc-sec{margin:12px 0}
+.pc-sec b.lab{display:inline-block;font-size:12px;color:var(--teal-bright);letter-spacing:1px;margin-bottom:5px}
+.pc-sec ol{margin:4px 0 0 20px}
+.pc-sec ol li{margin:3px 0;font-size:13px}
+.pc-sec ol li .who{display:inline-block;font-size:10.5px;border-radius:8px;padding:0 7px;margin-right:5px;vertical-align:1px}
+.who.human{background:rgba(148,96,17,.25);color:var(--amber-bright)}
+.who.auto{background:rgba(28,138,90,.18);color:var(--green-bright)}
+.who.sys{background:rgba(58,94,149,.25);color:var(--blue-bright)}
+.note{background:rgba(148,96,17,.1);border-left:3px solid var(--amber-bright);padding:9px 14px;border-radius:0 8px 8px 0;font-size:12.5px;color:var(--doc-ink);margin:12px 0}
+.note b{color:var(--amber-bright)}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:860px){.two-col{grid-template-columns:1fr}}
+.footer{color:var(--doc-muted);font-size:12px;text-align:center;margin-top:60px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>SAgent 采集平台 · IA 与页面设计规范（整合版）<small>2026-09-26 · 融合来源：平台化设计原型（2026-09-22）语义层 + 7 条 IA 原则 + 真前端现状（9 页 4 组）· 目标态 12 页 5 组</small></h1>
+
+<div class="note"><b>设计观一句话：</b>采集平台的菜单不是功能清单，是一条「接入 → 采集配置 → 运维观测」的闭环叙事；每个页面用一句话主问题验收，写不出主问题的页面就是设计有问题的页面。所有子功能以<b>操作</b>（谁在什么页面上做什么）定义，不做功能点堆砌。</div>
+
+<!-- ============ PART 1 原则 ============ -->
+<h2><span class="no">01</span>设计原则（菜单由这些推导）</h2>
+<table>
+<tr><th style="width:46px">#</th><th>原则</th><th>对本设计的约束</th></tr>
+<tr><td>1</td><td>每页只回答一个问题</td><td>页头副标题 = 主问题，12 页各一句，见每张页面卡页头</td></tr>
+<tr><td>2</td><td>「总览」全站只出现一次</td><td>工作台是唯一总览；「实时总览」改名「采集目标」并降为只读</td></tr>
+<tr><td>3</td><td>一个对象只有一个可写入口</td><td>对象写操作只在接入中心；修复复核只在变更中心；其余位置只读+下钻</td></tr>
+<tr><td>4</td><td>数据同源，下钻代替复制</td><td>对账引擎判决卡留在采集健康，数据治理页只放治理切片，互相下钻</td></tr>
+<tr><td>5</td><td>变更必留痕，审计只读</td><td>变更中心 = 过程聚合；审计日志 = 合规原始记录；分工写进两页页头</td></tr>
+<tr><td>6</td><td>菜单两层封顶，全站 ≤12 页</td><td>5 组 12 页，每组 2~3 项</td></tr>
+<tr><td>7</td><td>按闭环叙事分组</td><td>分组 = 用户心里的追问顺序：现在怎么样 → 要接什么 → 拿什么采 → 数据如何 → 平台活着吗</td></tr>
+</table>
+
+<!-- ============ PART 2 菜单 ============ -->
+<h2><span class="no">02</span>第一部分：菜单与子功能菜单</h2>
+
+<h3>2.1 目标菜单树（5 组 · 12 页）</h3>
+<div class="card menu-tree">
+
+<div class="menu-group"><b>① 总览健康</b><span class="q">—— 现在怎么样？</span>
+  <div class="menu-item"><span class="name">工作台</span> <span class="tag existing">已有</span><span class="q">主问题：现在最要紧的事是什么？</span>
+    <span class="sub"><i>结论卡</i>（自动一句话）· <i>待办队列</i>（未复核草案 / 待批准变更 / 受阻任务）· <i>健康证据链概要</i>（下钻采集健康）</span></div>
+  <div class="menu-item"><span class="name">采集健康</span> <span class="tag existing">已有·改造</span><span class="q">主问题：采得全不全、断在哪一环？</span>
+    <span class="sub"><i>SLO 结论条</i> · <i>断采清单</i>（四值状态）· <i>证据链归因</i>（六环下钻）· <i>修复草案生成</i>（只读预览→跳变更中心）</span></div>
+</div>
+
+<div class="menu-group"><b>② 接入</b><span class="q">—— 要接什么、谁动了它？</span>
+  <div class="menu-item"><span class="name">接入中心</span> <span class="tag rename">原「资源与接入」改名</span><span class="q">主问题：管哪些对象、归谁、接没接上？</span>
+    <span class="sub"><i>对象台账</i>（唯一可写入口；本机 Agent 与远程对象同一本台账）· <i>接入向导</i>（两条路径：本机装 Agent / 远程采集）· <i>卸载 / 启停发起</i>（执行走变更中心）· <i>租户归属调整</i></span></div>
+  <div class="menu-item"><span class="name">采集目标</span> <span class="tag rename">实时总览改名·降只读</span><span class="q">主问题：每台采什么、分派给谁？</span>
+    <span class="sub"><i>目标×插件×承载 只读矩阵</i>（远程目标显示承载采集机与池）· <i>行下钻</i>（跳接入中心修改）· <i>变更中/漂移标记</i>（关联变更单号或漂移记录）</span></div>
+  <div class="menu-item"><span class="name">变更中心</span> <span class="tag move">从「系统」组移入</span><span class="q">主问题：谁动了它、怎么走过来的？</span>
+    <span class="sub"><i>变更流水线时间线</i>（四段式）· <i>修复草案复核</i>（全站唯一复核入口）· <i>预演 / 批准 / 执行 / 验收</i></span></div>
+</div>
+
+<div class="menu-group"><b>③ 采集能力</b><span class="q">—— 拿什么采？</span>
+  <div class="menu-item"><span class="name">插件与策略</span> <span class="tag rename">采集策略改名</span><span class="q">主问题：用什么采、怎么采？</span>
+    <span class="sub"><i>插件市场</i>（安装走变更中心）· <i>采集策略</i>（间隔/标签/路由，配置版本不可变）· <i>策略预演</i>（三问卡片）</span></div>
+  <div class="menu-item"><span class="name">版本与兼容</span> <span class="tag move">从「系统」组移入</span><span class="q">主问题：用哪个版本、装不装得上？</span>
+    <span class="sub"><i>版本清单</i> · <i>兼容矩阵</i> · <i>自动选版规则</i>（对应 PLAN-SAgent版本兼容矩阵，定义侧先行）</span></div>
+</div>
+
+<div class="menu-group"><b>④ 数据观测</b><span class="q">—— 数据长什么样、干不干净？</span>
+  <div class="menu-item"><span class="name">指标大屏</span> <span class="tag rename">分析大屏改名</span><span class="q">主问题：数据长什么样？</span>
+    <span class="sub"><i>Grafana 嵌入</i>（导航壳）· <i>指标浏览</i>（只读跳转）</span></div>
+  <div class="menu-item"><span class="name">数据治理</span> <span class="tag new">新建</span><span class="q">主问题：数据干不干净？</span>
+    <span class="sub"><i>野指标对账清单</i>（recon 切片，判决卡在采集健康）· <i>高基数治理</i>（关闭 series / 丢弃率）· <i>治理建议</i>（确认后走变更中心）</span></div>
+</div>
+
+<div class="menu-group"><b>⑤ 平台</b><span class="q">—— 平台自己活着吗？</span>
+  <div class="menu-item"><span class="name">平台设置</span> <span class="tag existing">已有</span><span class="q">主问题：平台怎么配？</span>
+    <span class="sub"><i>租户与 Token</i>（D3）· <i>网络域与端点</i> · <i>集成</i>（webhook 按 env 启用）——所有配置改动写审计</span></div>
+  <div class="menu-item"><span class="name">审计日志</span> <span class="tag existing">已有</span><span class="q">主问题：谁在何时做了什么？</span>
+    <span class="sub"><i>只读原始留痕</i>（合规记录，不聚合不加戏）</span></div>
+  <div class="menu-item"><span class="name">平台健康</span> <span class="tag new">新建·可先做设置内卡片</span><span class="q">主问题：平台自己活得好不好？</span>
+    <span class="sub"><i>L0 组件逐项状态</i>（console/PG/VM/vmalert/grafana）· <i>L1 采集机池状态</i>（L1HA 角色矩阵）· <i>对账引擎心跳</i>（全自动，无人值守）</span></div>
+</div>
+</div>
+
+<h3>2.2 现状 → 目标迁移清单（现 9 页，成本很低）</h3>
+<table>
+<tr><th>现状菜单</th><th>目标</th><th>动作</th><th>后端依赖</th></tr>
+<tr><td>监控治理 · 工作台</td><td>① 工作台</td><td>保留，补待办队列</td><td>alerts + l1_tasks 已有</td></tr>
+<tr><td>监控治理 · 实时总览</td><td>② 采集目标</td><td><b>改名 + 降只读</b>（CRUD 移入接入中心抽屉）</td><td>无</td></tr>
+<tr><td>监控治理 · 采集健康</td><td>① 采集健康</td><td>保留，语义改造（见 3.2）</td><td>recon / alerts 已有</td></tr>
+<tr><td>采集接入 · 资源与接入</td><td>③ 接入中心</td><td><b>改名</b>（避让后续「资源管理」业务模块），收口唯一写入口</td><td>无</td></tr>
+<tr><td>采集接入 · 采集策略</td><td>⑥ 插件与策略</td><td><b>改名</b>，补预演三问</td><td>配置 reporter 已有</td></tr>
+<tr><td>数据观测 · 分析大屏</td><td>⑧ 指标大屏</td><td><b>改名</b>，明确 Grafana 壳定位</td><td>无</td></tr>
+<tr><td>（无）</td><td>⑨ 数据治理</td><td><b>新建页</b></td><td>recon 野指标对账已有，只差独立入口</td></tr>
+<tr><td>系统 · 版本与兼容</td><td>⑦ 版本与兼容</td><td><b>移组</b></td><td>PLAN 待立项，先做定义侧</td></tr>
+<tr><td>系统 · 变更中心</td><td>⑤ 变更中心</td><td><b>移组</b> + 扩修复复核语义</td><td>l1_tasks / recon 已有</td></tr>
+<tr><td>系统 · 审计日志</td><td>⑪ 审计日志</td><td>移组，保持只读</td><td>无</td></tr>
+<tr><td>系统 · 平台设置</td><td>⑩ 平台设置</td><td>保留</td><td>无</td></tr>
+<tr><td>（平台健康条）</td><td>⑫ 平台健康</td><td><b>新建页</b>（可先做设置内卡片过渡）</td><td>health 接口已有</td></tr>
+</table>
+
+<h3>2.3 三条操作动线（菜单是按这个组织的，不是按技术模块）</h3>
+
+<div class="card">
+<b>动线 A · 接入模式</b> —— 一台新机器 / 一批远程对象从登记到出数
+<div class="flow">
+<span class="node"><b>接入中心</b>登记</span><span class="arrow">→</span>
+<span class="node"><b>接入向导</b>本机装 Agent / 远程采集</span><span class="arrow">→</span>
+<span class="node auto">Agent 安装或远程插件下发 · 心跳自动上报</span><span class="arrow">→</span>
+<span class="node auto">状态翻转 · 变更中心留痕</span><span class="arrow">→</span>
+<span class="node"><b>采集目标</b>核对分派</span><span class="arrow">→</span>
+<span class="node auto">工作台待办清零</span>
+</div>
+<div class="flow-note">人工只碰两个页面：接入中心（登记+向导）、采集目标（核对）。其余全自动。</div>
+</div>
+
+<div class="card">
+<b>动线 B · 采集配置模式</b> —— 改一次采集策略的全过程
+<div class="flow">
+<span class="node"><b>插件与策略</b>选插件定策略</span><span class="arrow">→</span>
+<span class="node"><b>策略预演</b>三问卡片</span><span class="arrow">→</span>
+<span class="node"><b>变更中心</b>批准→灰度执行</span><span class="arrow">→</span>
+<span class="node auto">独立验收（recon）</span><span class="arrow">→</span>
+<span class="node"><b>采集健康</b>看验收结论</span>
+</div>
+<div class="flow-note">预演先回答三个问题：影响哪些目标？成本区间多少？如何验收？——不回答不进变更中心。</div>
+</div>
+
+<div class="card">
+<b>动线 C · 运维模式</b> —— 从发现断采到闭环
+<div class="flow">
+<span class="node"><b>采集健康</b>发现异常</span><span class="arrow">→</span>
+<span class="node"><b>证据链</b>定位断在哪一环</span><span class="arrow">→</span>
+<span class="node auto">修复草案自动生成</span><span class="arrow">→</span>
+<span class="node"><b>变更中心</b>人工复核→转变更</span><span class="arrow">→</span>
+<span class="node auto">执行+验收</span><span class="arrow">→</span>
+<span class="node auto">回写健康页</span>
+</div>
+<div class="flow-note">草案只是建议（模板输出不是 evidence），复核和转变更的动作只发生在变更中心——规则 3。</div>
+</div>
+
+<!-- ============ PART 3 页面卡 ============ -->
+<h2><span class="no">03</span>第二部分：逐页设计卡（界面效果 · 操作流程 · 状态 · 样式）</h2>
+<p class="lead">线框图按产品真实浅色主题渲染（墨青 teal 令牌体系），样式要点全部引用真前端已存在的 CSS 变量。每页标注「现状 / 数据源」。</p>
+
+<!-- 1 工作台 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">① 工作台</span><span class="question">主问题：现在最要紧的事是什么？</span></div>
+<div class="pc-bd">
+<span class="tag existing">已有·补待办</span><span class="tag move">数据源：recon 结论 + alerts + l1_tasks</span>
+<div class="pc-sec"><b class="lab">界面效果</b>
+<div class="wf">
+<div class="wf-head"><span class="t">工作台</span><span class="s">现在最要紧的事是什么？</span></div>
+<div class="wf-body">
+<div class="box" style="border-left:4px solid #1c8a5a"><div class="bh">✅ 平台健康：已核对 24 个目标全部在报，VM 无野指标，Agent 无异常</div><div class="kv"><span>对账引擎 · 2 分钟前</span><span>覆盖率 24/24</span></div></div>
+<div class="row">
+<div class="box col"><div class="bh">待办（3）</div>
+<span class="chip warn">1 份修复草案待复核</span> <span class="chip warn">1 笔变更待批准</span> <span class="chip err">1 个任务受阻</span>
+<div class="kv"><span>点击跳对应页处理，本页不处理</span></div></div>
+<div class="box col"><div class="bh">健康证据链概要</div>
+<span class="chip">对象连接 12/12</span><span class="chip">配置 12/12</span><span class="chip">源采集 11/12</span><span class="chip warn">传输 11/12</span><span class="chip">入库 11/12</span>
+<div class="kv"><span class="muted">与采集健康同 API 同口径，点击整条下钻 →</span></div></div>
+</div>
+</div>
+</div></div>
+<div class="pc-sec"><b class="lab">操作流程</b>
+<ol>
+<li><span class="who auto">自动</span>打开即出结论卡与待办数，4s 自动刷新；无必做操作。</li>
+<li><span class="who human">人工</span>唯一交互是下钻：待办条目 → 对应页面处理；证据链概要 → 采集健康整页。</li>
+<li><span class="who sys">系统</span>待办清零时显示「没有等待你的事」，不显示空表格。</li>
+</ol></div>
+<div class="pc-sec"><b class="lab">样式要点</b>
+<ol>
+<li>结论卡：<code>--teal-soft</code> 底 + 4px 左边框（健康 <code>--success</code> / 异常 <code>--warn</code> / 不可用 <code>--error</code> 三色切换）。</li>
+<li>待办徽章数 = 左侧导航「采集健康」badge 数据源（一处计算，两处消费——规则 4）。</li>
+</ol></div>
+</div></div>
+
+<!-- 2 采集健康 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">② 采集健康</span><span class="question">主问题：采得全不全、断在哪一环？</span></div>
+<div class="pc-bd">
+<span class="tag existing">已有·语义改造</span><span class="tag move">数据源：recon + agents/heartbeat + config-reporter + scrape 链</span>
+<div class="pc-sec"><b class="lab">界面效果</b>
+<div class="wf">
+<div class="wf-head"><span class="t">采集健康</span><span class="s">采得全不全、断在哪一环？</span></div>
+<div class="wf-body">
+<div class="box"><div class="bh">SLO 结论条</div>
+<b>覆盖率 22/24 可核验</b>（checked/eligible，未知保留在分母，0 目标显示「不适用」而非 100%）
+<div class="bar"><i style="width:91%;background:#1c8a5a"></i></div></div>
+<div class="box"><div class="bh">断采清单</div>
+<div class="kv"><span>gz-edge-01</span><span class="chip warn">未知 · 证据 22:18 过期</span><span class="muted">心跳在、配置在、源采集停 → 定位「源采集」环</span></div>
+<div class="kv"><span>bj-orders-02</span><span class="chip err">失败 · 抓取超时</span><span class="muted">定位「区域抓取」环</span></div></div>
+<div class="box"><div class="bh">六环证据链（点击任一环 → 下钻该环明细）</div>
+<span class="chip">① 对象连接</span><span class="chip">② 配置版本</span><span class="chip err">③ 源采集</span><span class="chip">④ 区域抓取</span><span class="chip warn">⑤ 区域传输</span><span class="chip">⑥ 中央入库</span>
+<div class="kv"><span class="muted">每环显示：状态 · 证据时间 · 证据有效至（validUntil）；过期证据自动降级为「未知」</span></div></div>
+<div class="box"><div class="bh">修复草案（只读预览）</div>
+<div class="kv"><span>针对 gz-edge-01 源采集中断 → 建议重启采集插件</span><span class="btn o">查看草案</span><span class="btn">去变更中心复核 →</span></div>
+<div class="kv muted">草案 = 模板建议，标注「不是 evidence」；本页不可执行任何修复动作</div></div>
+</div>
+</div></div>
+<div class="pc-sec"><b class="lab">操作流程（运维动线）</b>
+<ol>
+<li><span class="who auto">自动</span>recon 周期对账 → 结论条 + 断采清单刷新；心跳 TTL=120s，证据到期自动转「未知」。</li>
+<li><span class="who human">人工</span>异常行 → 点证据链定位到具体环（就地滚动 + 高亮，沿用 <code>__sloDrill</code>）。</li>
+<li><span class="who auto">自动</span>对已定位异常可一键生成修复草案（模板产出）。</li>
+<li><span class="who human">人工</span>点「去变更中心复核」——草案的复核与转变更只发生在变更中心；验收结论自动回写本页。</li>
+</ol></div>
+<div class="pc-sec"><b class="lab">状态规范（本页语义核心）</b>
+<table>
+<tr><th>状态</th><th>含义</th><th>色</th></tr>
+<tr><td>健康</td><td>全部六环有新鲜证据</td><td><code>--success</code></td></tr>
+<tr><td>失败</td><td>某环有明确失败证据</td><td><code>--red</code></td></tr>
+<tr><td><b>未知</b></td><td><b>证据缺失或过期——不是失败也不是健康，禁止计入异常数，保留在覆盖率分母</b></td><td><code>--amber</code></td></tr>
+</table></div>
+<div class="pc-sec"><b class="lab">样式要点</b>
+<ol>
+<li>证据环 chip 链：正常 <code>--teal-soft</code>、异常 <code>--red-soft</code>、未知 <code>--amber-soft</code>；点击下钻沿用现有高亮动效（2.2s 橙色描边淡出）。</li>
+<li>覆盖率条形：<code>.bar</code> 分母 = eligible 目标数；空态文案「未声明采集目标」+ 引导按钮跳资源中心，绝不显示「100% 健康」。</li>
+</ol></div>
+</div></div>
+
+<!-- 3 接入中心 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">③ 接入中心</span><span class="question">主问题：管哪些对象、归谁、接没接上？</span></div>
+<div class="pc-bd">
+<span class="tag rename">原「资源与接入」改名（避让「资源管理」业务模块）</span><span class="tag move">数据源：PG 目录库接入表 + agents 心跳</span>
+<div class="pc-sec"><b class="lab">界面效果</b>
+<div class="wf">
+<div class="wf-head"><span class="t">接入中心</span><span class="s">管哪些对象、归谁、接没接上？</span><span><span class="btn">＋ 接入对象</span></span></div>
+<div class="wf-body">
+<div class="box"><div class="kv"><span>搜索</span><span>租户 ▾</span><span>接入方式 ▾（本机 Agent / 远程采集）</span><span>接入状态 ▾</span><span style="margin-left:auto">共 18 个对象 · 已接入 16 · 未接入 2</span></div></div>
+<div class="box"><div class="kv"><b>bj-gateway-01</b><span>192.0.2.11 · 北京一区</span><span class="chip">本机 Agent · 心跳 8s 前</span><span class="chip gray">租户 A</span>
+<span style="margin-left:auto"><span class="btn o">详情</span><span class="btn o">启停</span></span></div>
+<div class="kv"><b>mysql-1:3306</b><span>10.0.8.21 · 北京一区</span><span class="chip">远程采集 · 承载 proxy-02（池 A）</span><span class="chip gray">租户 A</span>
+<span style="margin-left:auto"><span class="btn o">详情</span></span></div>
+<div class="kv"><b>gz-edge-02</b><span>203.0.113.32 · 广州一区</span><span class="chip warn">未接入</span><span class="chip gray">租户 A</span>
+<span style="margin-left:auto"><span class="btn o">详情</span><span class="btn">接入</span></span></div></div>
+<div class="box muted">行内「接入 / 卸载 / 启停」只发起提案，执行一律在变更中心走预演→批准→执行；本页不直接对 Agent 下发任何命令</div>
+</div>
+</div></div>
+<div class="pc-sec"><b class="lab">操作流程（接入动线，本页是起点与终点）</b>
+<ol>
+<li><span class="who human">人工</span>「＋接入对象」或行内「接入」→ 打开接入向导，<b>第一问先选路径：本机装 Agent / 远程采集</b>（远程采集界面见下方专项设计）。</li>
+<li><span class="who human">人工</span>向导内完成：登记信息 → 选方式 → <b>预演影响</b>（目标数/理论频次区间，标注「非实测不承诺 CPU/带宽」）→ 生成安装命令或远程采集配置提案。</li>
+<li><span class="who auto">自动</span>本机路径：执行侧装 Agent → 心跳经 l1-gateway 上报 → 状态翻转「已接入」。远程路径：配置下发到承载采集机 → 探活通过 → 状态翻转。</li>
+<li><span class="who sys">系统</span>全过程在变更中心留痕（预演→批准→执行→验收），审计日志记原始操作。</li>
+</ol></div>
+<div class="pc-sec"><b class="lab">状态规范</b>
+<ol>
+<li>对象三态：<b>未接入</b>（<code>--amber-soft</code>）/ <b>已接入</b>（<code>--teal-soft</code>）/ <b>心跳过期或探活失败</b>（<code>--red-soft</code>，本机 TTL 120s、采集机短心跳 TTL 30s）。</li>
+<li>本机对象与远程对象同一本台账、同一个写入口；差异只在「接入方式」列——不拆两个页面（规则 4：同一对象一个入口）。</li>
+<li>空台账：显示「还没有对象」+ 一颗「接入第一个对象」主按钮，不显示空表格。</li>
+</ol></div>
+</div></div>
+
+<!-- 专项：远程采集配置界面 -->
+<h3>专项 · 远程采集配置界面与效果（接入向导 · remote 路径）</h3>
+<p class="lead">能力边界来自《SPEC-远程采集集中部署与漂移提速》（2026-09-24 立项稿）：<b>两步分离</b>（选采集机池 ↔ 配被监控对象，互不混淆）、<b>选池不选机</b>（平台推荐 + 可改选，展示每台当前承载数）、<b>池内自动漂移</b>（单归属、先新后旧、短心跳 10s / 检测 ~40s / 端到端 ≤45s、预热接管）、<b>池内健康 &lt;2 不迁移只告警</b>。远程插件现状：MySQL / Redis / Kafka / Elasticsearch / ClickHouse / HTTP 拨测。</p>
+
+<div class="pc-sec"><b class="lab">界面效果 ①——两步分离的配置向导</b>
+<div class="wf">
+<div class="wf-head"><span class="t">接入向导 · 远程采集</span><span class="s">第 2 步 / 共 6 步：选承载池 → 配被监控对象</span></div>
+<div class="wf-body">
+<div class="box"><div class="kv"><span class="chip">① 选对象 ✅</span><span class="chip warn">② 选承载池</span><span class="chip gray">③ 配参数</span><span class="chip gray">④ 预检</span><span class="chip gray">⑤ 预演</span><span class="chip gray">⑥ 完成</span></div></div>
+<div class="box"><div class="bh">第一步 · 选采集机池（选池不选机）</div>
+<div class="kv"><b>北京一区 · 采集机池 A</b><span class="chip">健康成员 3/3</span><span class="chip">池内总承载 12 个对象</span><span class="btn o">选择此池</span></div>
+<div class="kv muted">平台推荐：<b>proxy-02</b>（池内承载最少 3 个）——默认自动挑，可改选任意健康成员；每台承载负载可见</div></div>
+<div class="box"><div class="bh">第二步 · 配被监控对象（一次可配多条，每条落一个采集目标）</div>
+<table style="font-size:11px;color:#172c36">
+<tr><th>地址</th><th>端口</th><th>账号</th><th>口令</th><th>间隔</th><th>探活</th></tr>
+<tr><td>10.0.8.21</td><td>3306</td><td>monitor</td><td>•••••••• <span class="muted">（掩码，不回显明文）</span></td><td>30s</td><td><span class="chip">✅ 22ms</span></td></tr>
+<tr><td>10.0.8.22</td><td>3306</td><td>monitor</td><td>••••••••</td><td>30s</td><td><span class="chip err">✕ 连接拒绝</span></td></tr>
+</table>
+<div class="kv"><span class="btn o">＋ 添加一条</span><span class="muted">参数字段由插件 params.yaml 驱动（MySQL：address/port/mode/username/password/interval/extra_labels）</span></div></div>
+<div class="box" style="border-left:4px solid #ae3c38"><div class="bh">预检结果（进入预演前强制通过）</div>
+<div class="kv"><span class="chip">preflight_host ✅ 承载机就绪</span><span class="chip">preflight_remote ✅ 10.0.8.21 连通</span><span class="chip err">preflight_remote ✕ 10.0.8.22 拒连</span></div>
+<div class="kv muted">拒绝条目阻断预演，可剔除或修正后重试——不让故障配置进入变更</div></div>
+</div>
+</div></div>
+
+<div class="pc-sec"><b class="lab">界面效果 ②——运行态与漂移（采集目标 + 采集健康协同）</b>
+<div class="wf">
+<div class="wf-head"><span class="t">采集目标（运行态切片）</span><span class="s">远程对象的承载与漂移一目了然</span></div>
+<div class="wf-body">
+<div class="box"><div class="bh">远程目标行（矩阵只读）</div>
+<table style="font-size:11px;color:#172c36">
+<tr><th>目标</th><th>插件</th><th>承载采集机</th><th>池</th><th>状态</th></tr>
+<tr><td>10.0.8.21:3306</td><td>mysql_exporter</td><td>proxy-02</td><td>池 A</td><td><span class="chip">稳定</span></td></tr>
+<tr style="background:#fff5df"><td>10.0.9.31:6379</td><td>redis_exporter</td><td><s>proxy-02</s> → proxy-03</td><td>池 A</td><td><span class="chip warn">已漂移 · 14:32:07 · 端到端 38s</span></td></tr>
+</table>
+<div class="kv muted">漂移行标注「从 → 到 + 完成时刻 + 端到端耗时」，点击下钻漂移记录（relocations 表，先新后旧：新端接管确认后才停旧端）</div></div>
+<div class="box"><div class="bh">采集机池健康（采集健康页 · 池切片）</div>
+<div class="kv"><span>池 A：</span><span class="chip">健康 3/3 · 承载 12</span><span>池 B：</span><span class="chip warn">健康 1/3 · 承载 4</span></div>
+<div class="kv"><span class="chip err">池 B 健康成员 &lt;2 → 已停止漂移，仅告警（避免故障池内互迁）</span></div>
+<div class="kv muted">预热接管：候选采集机已预载目标配置与插件包（不启动采集进程）；确认故障后只发一条「启动」指令，接管压到秒级</div></div>
+</div>
+</div></div>
+
+<div class="pc-sec"><b class="lab">操作流程（远程采集接入，端到端）</b>
+<ol>
+<li><span class="who human">人工</span>接入中心「＋接入对象」→ 选「远程采集」路径 → 选插件（MySQL/Redis/Kafka/ES/ClickHouse/HTTP 拨测）。</li>
+<li><span class="who human">人工</span><b>两步分离</b>：① 选采集机池（默认池内自动推荐一台承载最少者，可改选）；② 配被监控对象（多条批量，探活实时反馈）。</li>
+<li><span class="who auto">自动</span>预检双闸：preflight_host（承载机就绪）+ preflight_remote（目标连通）——未通过不得进预演。</li>
+<li><span class="who human">人工</span>预演（影响目标数 + 采集频次 + 验收方式）→ 变更中心批准 → 执行：配置下发承载机 → 插件启动 → verify_probe → 观察采集窗口。</li>
+<li><span class="who auto">自动</span>运行态：承载机失效 → 池内短心跳（10s）判故障 → 自动漂移到池内健康成员（单归属、先新后旧、预热接管秒级启动、端到端 ≤45s）→ 漂移记录留痕 + 工作台待办。</li>
+</ol></div>
+<div class="pc-sec"><b class="lab">状态与样式要点</b>
+<ol>
+<li>探活 chip 三态即时反馈：<code>--teal-soft</code> 连通（带延迟数）/ <code>--red-soft</code> 拒连 / <code>--amber-soft</code> 超时重试中。</li>
+<li>漂移行：删除线旧承载 + amber 左边框 + 端到端耗时徽章；数据源与 HA-3 归属迁移记录卡同源（<code>relocations</code> 表）。</li>
+<li>池健康 <code>&lt;2</code> 保护态用 <code>--error</code> chip 置顶展示，明确「已停止漂移、仅告警」的语义（不静默）。</li>
+<li>口令等敏感字段全程掩码，编辑时不回显明文。</li>
+</ol></div>
+
+<!-- 4 采集目标 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">④ 采集目标</span><span class="question">主问题：每台采什么、分派给谁？</span></div>
+<div class="pc-bd">
+<span class="tag rename">实时总览改名·降只读</span><span class="tag move">数据源：目录库 targets × policies × agents 联查（同源）</span>
+<div class="pc-sec"><b class="lab">界面效果</b>
+<div class="wf">
+<div class="wf-head"><span class="t">采集目标</span><span class="s">每台采什么、分派给谁？</span></div>
+<div class="wf-body">
+<div class="box"><div class="bh">目标 × 插件 × Agent 矩阵（只读）</div>
+<table style="font-size:11px;color:#172c36">
+<tr><th>目标</th><th>插件/策略</th><th>间隔</th><th>分派 Agent</th><th>状态</th></tr>
+<tr><td>bj-gateway-01:9100</td><td>host_metrics</td><td>30s</td><td>l1-collector-01</td><td><span class="chip">稳定</span></td></tr>
+<tr style="background:#fff5df"><td>gz-payment-01:9100</td><td>host_metrics rev-0042→0043</td><td>30s→15s</td><td>l1-collector-02</td><td><span class="chip warn">变更中 CHG-0249</span></td></tr>
+</table></div>
+<div class="box muted">发现分派不符？点击行 → 跳资源中心对应抽屉修改（本页无写操作）</div>
+</div>
+</div></div>
+<div class="pc-sec"><b class="lab">操作流程</b>
+<ol>
+<li><span class="who auto">自动</span>4s 刷新矩阵；变更中的目标行挂变更单号、amber 左边框。</li>
+<li><span class="who human">人工</span>唯一动作是「看 + 跳」：核对分派 → 点行下钻资源中心修改。规则 3：目标 CRUD 只在资源中心。</li>
+</ol></div>
+<div class="pc-sec"><b class="lab">样式要点</b>变更中行 <code>--amber-soft</code> 底色 + 单号徽章；矩阵列头 sticky；空态「尚无采集目标，先在接入中心完成接入」。</div>
+</div></div>
+
+<!-- 5 变更中心 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑤ 变更中心</span><span class="question">主问题：谁动了它、怎么走过来的？</span></div>
+<div class="pc-bd">
+<span class="tag move">系统组移入</span><span class="tag existing">已有·扩语义</span><span class="tag move">数据源：l1_tasks + 变更单表</span>
+<div class="pc-sec"><b class="lab">界面效果</b>
+<div class="wf">
+<div class="wf-head"><span class="t">变更中心</span><span class="s">谁动了它、怎么走过来的？</span></div>
+<div class="wf-body">
+<div class="box"><div class="bh">CHG-0249 · 北京一区 · 采样间隔 30s→15s <span class="chip warn">验收中</span></div>
+<div class="kv"><span class="chip">① 预演 ✅</span><span class="chip">② 人工批准 ✅ A-249</span><span class="chip">③ 执行 ✅ applied</span><span class="chip warn">④ 独立验收 ⏳ 等待 2 个采集窗口样本</span></div>
+<div class="kv muted">applied ≠ verified：本机切换成功不等于验收通过，验收由中央对账独立完成</div>
+<div class="kv"><b>步骤证据</b><span class="chip gray">config_apply · rev-0043 · 22:24</span><span class="chip gray">central_ingest · 等待样本</span></div></div>
+<div class="box" style="border-left:4px solid #946011"><div class="bh">修复草案复核（全站唯一复核入口）</div>
+<div class="kv"><b>01 事实</b><span class="muted">gz-edge-01 源采集中断 26 分钟，心跳正常</span></div>
+<div class="kv"><b>02 推断·待验证</b><span class="muted">插件可能因 OOM 退出（推断，未证实）</span></div>
+<div class="kv"><b>03 缺失证据</b><span class="muted">无插件进程日志（需登机核实）</span></div>
+<div class="kv"><span class="btn">确认无误 · 转为变更单</span><span class="btn o">驳回</span><span class="muted">模板输出不是 evidence，人工勾选确认后才可转变更</span></div></div>
+</div>
+</div></div>
+<div class="pc-sec"><b class="lab">操作流程</b>
+<ol>
+<li><span class="who sys">系统</span>提案来源三类：接入向导 / 策略预演 / 修复草案——全部先进预演。</li>
+<li><span class="who human">人工</span>预演确认（影响目标数 + diff + 成本区间）→ <b>人工批准</b>（记录批准人，写审计）。</li>
+<li><span class="who auto">自动</span>灰度执行：首批 1 个目标，批次可配；执行端回执 applied。</li>
+<li><span class="who auto">自动</span>中央独立验收（recon 独立查询命中样本）→ verified 才算终态。</li>
+<li><span class="who human">人工</span>取消 = cancel_requested，等执行端回执后才翻 canceled；partial（副作用未知）禁止自动重跑。</li>
+</ol></div>
+<div class="pc-sec"><b class="lab">样式要点</b>
+<ol>
+<li>四段式进度条 chip：<code>--teal-soft</code>（完成）/ <code>--amber-soft</code>(进行) / <code>--red-soft</code>(受阻)。</li>
+<li>与审计日志分工写在页头副标题下：「本页是过程聚合视图，合规原始记录见审计日志」（规则 5）。</li>
+</ol></div>
+</div></div>
+
+<!-- 6 插件与策略 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑥ 插件与策略</span><span class="question">主问题：用什么采、怎么采？</span></div>
+<div class="pc-bd">
+<span class="tag rename">采集策略改名</span><span class="tag move">数据源：插件清单 + 策略表（配置版本不可变）</span>
+<div class="pc-sec"><b class="lab">界面效果</b>
+<div class="wf">
+<div class="wf-head"><span class="t">插件与策略</span><span class="s">用什么采、怎么采？</span></div>
+<div class="wf-body">
+<div class="row">
+<div class="box col"><div class="bh">插件市场</div>
+<span class="chip">host_metrics v2 · 已装 12 目标</span><span class="chip">log_to_metrics v1 · 已装 2</span><span class="chip gray">mysql_exporter · 未装</span>
+<div class="kv muted">安装 = 生成变更提案，不在本页直接装</div></div>
+<div class="box col"><div class="bh">采集策略</div>
+<div class="kv"><span>主机基础观测</span><span class="chip">30s · rev-0043</span></div>
+<div class="kv muted">配置版本不可变；回退 = 创建新 revision 指回旧内容，绝不倒退版本号</div></div>
+</div>
+<div class="box"><div class="bh">策略预演（三问卡片，回答不全不放行）</div>
+<div class="kv"><b>01 影响哪些目标？</b><span>12 个目标 · diff：间隔 30s→15s</span></div>
+<div class="kv"><b>02 成本区间？</b><span>理论频次 2→4 samples/min/目标（<b>非实测，不承诺 CPU/带宽</b>）</span></div>
+<div class="kv"><b>03 如何验收？</b><span>等待 ≥2 个采集窗口，recon 命中样本数对比</span></div>
+<div class="kv"><span class="btn">预演通过 · 转为变更提案</span></div></div>
+</div>
+</div></div>
+<div class="pc-sec"><b class="lab">操作流程（采集配置动线）</b>
+<ol>
+<li><span class="who human">人工</span>选插件 → 定策略参数（间隔/标签/路由）。</li>
+<li><span class="who auto">自动</span>点预演 → 生成三问卡片（影响目标数 / 成本区间 / 验收方式）。</li>
+<li><span class="who human">人工</span>预演通过 → 转变更提案 → 变更中心批准执行（灰度）。</li>
+</ol></div>
+</div></div>
+
+<!-- 7 版本与兼容 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑦ 版本与兼容</span><span class="question">主问题：用哪个版本、装不装得上？</span></div>
+<div class="pc-bd">
+<span class="tag move">系统组移入</span><span class="tag existing">已有·定义侧</span><span class="tag move">数据源：sa_versions（PLAN 待立项，先做定义侧展示）</span>
+<div class="pc-sec"><b class="lab">界面效果与流程</b>
+<div class="wf"><div class="wf-body">
+<div class="box"><div class="bh">版本清单 × 兼容矩阵</div>
+<div class="kv"><span>SAgent v1.4</span><span class="chip">兼容 L0 ≥ rev-2209</span><span class="chip warn">v1.2 以下停止维护</span></div>
+<div class="kv muted">自动选版规则展示为只读决策表：目标 OS × 已装版本 × 灰度通道 → 推荐版本（pick_version 语义）</div></div>
+</div></div>
+<ol>
+<li><span class="who sys">系统</span>接入向导内自动选版（本页是决策定义处）；本页自身只读。</li>
+<li><span class="who human">人工</span>升级/回退决策 → 变更中心执行。</li>
+</ol></div>
+</div></div>
+
+<!-- 8 指标大屏 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑧ 指标大屏</span><span class="question">主问题：数据长什么样？</span></div>
+<div class="pc-bd">
+<span class="tag rename">分析大屏改名</span><span class="tag move">数据源：Grafana（subUrl 嵌入）</span>
+<div class="pc-sec"><b class="lab">界面效果与流程</b>
+<div class="wf"><div class="wf-body">
+<div class="box"><div class="kv"><span>租户 ▾</span><span>时间范围 ▾</span><span>看板 ▾</span><span class="btn o">在新窗口打开 Grafana</span></div></div>
+<div class="box" style="min-height:90px;display:flex;align-items:center;justify-content:center" class="muted"><span class="muted">Grafana iframe 嵌入区（控制台只做导航壳，不自建图表）</span></div>
+</div></div>
+<ol><li><span class="who human">人工</span>选租户/时间范围 → 嵌入加载；租户隔离随 URL 参数透传（D3）。</li></ol>
+<div class="note"><b>边界：</b>控制台不复制 Grafana 的任何图表能力，避免双处维护同一张图（规则 4 的极端情况：整页外包）。</div>
+</div></div>
+
+<!-- 9 数据治理 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑨ 数据治理</span><span class="question">主问题：数据干不干净？</span></div>
+<div class="pc-bd">
+<span class="tag new">新建</span><span class="tag move">数据源：recon 野指标对账（后端已有，就差独立入口）</span>
+<div class="pc-sec"><b class="lab">界面效果与流程</b>
+<div class="wf"><div class="wf-body">
+<div class="box"><div class="bh">野指标对账清单（治理切片）</div>
+<div class="kv"><span class="chip err">野指标 3 条</span><span>node_disk_io_now · 无归属目标 · 建议下线</span></div>
+<div class="kv muted">判决卡与实时断采归因在采集健康页；本页只放治理动作切片——同 API 同口径，互相下钻（规则 4）</div></div>
+<div class="box"><div class="bh">高基数治理</div>
+<div class="kv"><span class="chip warn">高基数 series 2 组</span><span>建议关闭 label ×· 影响丢弃率约 0.3%</span><span class="btn">生成治理变更提案</span></div></div>
+</div></div>
+<ol><li><span class="who auto">自动</span>recon 产出野指标清单；<span class="who human">人工</span>确认治理建议 → 走变更中心执行，本页不直接改采集配置。</li></ol>
+</div></div>
+
+<!-- 10 平台设置 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑩ 平台设置</span><span class="question">主问题：平台怎么配？</span></div>
+<div class="pc-bd">
+<span class="tag existing">已有</span><span class="tag move">数据源：cfg* 块登记（零硬编码环境值红线）</span>
+<div class="pc-sec"><b class="lab">内容与流程</b>
+<ol>
+<li>租户与 Token（D3：X-Tenant-Token 哈希、API/资源级隔离）。</li>
+<li>网络域与端点（l1-gateway 白名单 3+2 路径、VIP 段预留登记）。</li>
+<li>集成（告警 webhook，按 env 显式启用——演示数据显式开关红线同源）。</li>
+</ol>
+<div class="note"><b>规则：</b>所有配置改动必须写审计日志；涉及执行配置的（executor、灰度开关）展示当前生效值与来源 env 名。</div>
+</div></div>
+
+<!-- 11 审计日志 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑪ 审计日志</span><span class="question">主问题：谁在何时做了什么？</span></div>
+<div class="pc-bd">
+<span class="tag existing">已有</span><span class="tag move">定位：合规原始记录，只读</span>
+<div class="pc-sec"><b class="lab">边界（写进页头副标题）</b>
+<ol>
+<li>「本页是合规原始留痕，不做聚合、不提供改写；过程视图见变更中心。」（规则 5 的另一半）</li>
+<li>记录粒度：谁（租户+用户/系统）· 何时 · 做了什么（动作+对象+参数快照）· 结果。</li>
+<li>唯一交互：筛选与导出。无任何写操作。</li>
+</ol></div>
+</div></div>
+
+<!-- 12 平台健康 -->
+<div class="page-card">
+<div class="pc-hd"><span class="name">⑫ 平台健康</span><span class="question">主问题：平台自己活得好不好？</span></div>
+<div class="pc-bd">
+<span class="tag new">新建·可先做设置内卡片过渡</span><span class="tag move">数据源：health 接口（已有）+ L1HA 池状态</span>
+<div class="pc-sec"><b class="lab">界面效果与流程</b>
+<div class="wf"><div class="wf-body">
+<div class="box"><div class="bh">L0 组件</div>
+<div class="kv"><span class="chip">l0-console ✅</span><span class="chip">PostgreSQL ✅</span><span class="chip">VictoriaMetrics 主 ✅</span><span class="chip">VM-HA 副本 ✅</span><span class="chip">vmalert ✅</span><span class="chip">Grafana ✅</span></div></div>
+<div class="box"><div class="bh">L1 采集机池（L1HA）</div>
+<div class="kv"><span>池内 5 台 · 在岗 3 controller</span><span class="chip">健康 < 2 只时告警不迁移（HA-3 口径）</span><span class="chip gray">对账引擎心跳 40s 前</span></div></div>
+<div class="kv muted">全自动巡检，无人值守；异常时向工作台待办投递，本页不提供修复操作</div>
+</div></div>
+<ol><li><span class="who auto">自动</span>全页自动刷新；与采集健康的边界：本页管<b>平台自身组件</b>，采集健康管<b>采集数据链</b>——两页主问题不同，不得混。</li></ol>
+</div></div>
+
+<!-- ============ PART 4 裁决与落地 ============ -->
+<h2><span class="no">04</span>三处边界裁决（本规范的定案，落地时不再讨论）</h2>
+<table>
+<tr><th>#</th><th>争议</th><th>裁决</th><th>依据</th></tr>
+<tr><td>1</td><td>对账引擎放采集健康还是数据治理？</td><td><b>判决卡（断没断）在采集健康；数据治理只放野指标/高基数/丢弃率切片</b>，互相下钻不复制数字</td><td>规则 4</td></tr>
+<tr><td>2</td><td>修复草案在哪复核、在哪执行？</td><td><b>生成在采集健康（自动模板），复核与转变更只在变更中心</b>；采集健康侧全程只读</td><td>规则 3</td></tr>
+<tr><td>3</td><td>证据链在工作台和采集健康两页重复？</td><td><b>同一 API 同口径，工作台只放概要卡，点击整条下钻</b>；真前端 <code>buildEvidenceChainHTML</code> 本就是共享函数</td><td>规则 4</td></tr>
+</table>
+
+<h2><span class="no">05</span>落地顺序建议（每批可独立收口）</h2>
+<table>
+<tr><th>批次</th><th>内容</th><th>成本</th><th>前置</th></tr>
+<tr><td><b>P0 · 菜单与边界</b></td><td>3 处改名（资源中心/采集目标/插件与策略）、实时总览降只读、变更中心移组、menu 按五组重排</td><td>纯前端，半天级</td><td>无</td></tr>
+<tr><td><b>P1 · 采集健康语义改造</b></td><td>unknown≠failed 四值、覆盖率分母口径、六环证据链（先补配置/传输两环）、修复草案只读预览</td><td>前端为主，recon 产物需补时间戳</td><td>P0</td></tr>
+<tr><td><b>P2 · 新建页</b></td><td>数据治理（recon 独立入口）、平台健康（可先卡片过渡）；变更中心补修复复核三段式</td><td>前端为主</td><td>P1</td></tr>
+<tr><td><b>P3 · 通用条款</b></td><td>空态规范全站铺开（0/0 不显示 100%、空态带引导动作）、四态（loading/error/readonly/empty）纪律、nav badge</td><td>纯前端</td><td>随批次穿插</td></tr>
+</table>
+
+<div class="note"><b>工程红线提醒：</b>所有批次涉及静态 JS/CSS 改动，必须同步 bump <code>index.html</code> 的 <code>?v=</code> 版本号（历史多次踩坑）。</div>
+
+<!-- ============ PART 6 子界面细化 ============ -->
+<h2><span class="no">06</span>第三部分：子界面细化设计（第二批 · 2026-09-26 拍板）</h2>
+<p class="lead">范围：下钻抽屉通用规范（横向基建）、本机接入向导三屏 + 卸载确认抽屉、策略 diff 预演组件。告警按决策只保留现有提醒告警，不细化详情/确认/静默界面。</p>
+
+<h3>6.1 下钻抽屉通用规范（全站统一，一次定义多处复用）</h3>
+<p class="lead">规则 3 确立后「行下钻跳抽屉」是全站标准动作：接入中心详情、采集目标修改、租户归属分配、修复草案预览都用它。本规范约束所有抽屉实例。</p>
+<div class="wf">
+<div class="wf-head"><span class="t">下钻抽屉 · 通用骨架</span><span class="s">右侧滑出，页面列表保持可见</span></div>
+<div class="wf-body">
+<div class="row">
+<div class="box col" style="opacity:.45"><div class="bh">背景页面（降透明度，不可交互）</div>
+<div class="bar" style="width:70%"></div><div class="bar" style="width:50%"></div><div class="bar" style="width:60%"></div>
+<div class="kv muted">点击遮罩 = 关闭；有未保存更改时先弹确认</div></div>
+<div class="box col" style="border-left:4px solid #087d75"><div class="bh">抽屉标题 <span style="float:right;color:#5c7280">✕</span></div>
+<div class="kv"><b>对象名 / 单号</b><span class="chip">状态</span></div>
+<div class="kv muted">—— 摘要两行（关键事实，自动生成）——</div>
+<div class="bar" style="width:80%"></div><div class="bar" style="width:65%"></div>
+<div class="kv"><span class="btn o">次要动作（抽屉内允许的操作）</span><span class="btn">主操作或「去 XX 页发起 →」</span></div>
+<div class="kv muted">Esc 关闭 · 焦点归还触发按钮 · 深链 ?detail= 直达</div></div>
+</div>
+</div></div>
+<table>
+<tr><th>规格项</th><th>定案</th></tr>
+<tr><td>宽度三档</td><td><b>S 420px</b> 纯只读详情（对象详情/漂移记录）；<b>M 560px</b> 单字段轻编辑（归属分配/标签）；<b>L 760px</b> 复合内容（修复草案三段、变更预览）</td></tr>
+<tr><td>操作边界（规则 3 落地）</td><td>抽屉内<b>允许</b>：只读浏览、单字段轻编辑（归属/标签）、跳转链接；<b>禁止</b>：一切会产生变更单的动作（接入/卸载/启停/策略修改）——只给「去 XX 页发起 →」按钮跳出抽屉走页面级流程</td></tr>
+<tr><td>焦点与可达</td><td>打开 → 焦点入抽屉首个可交互元素；关闭 → 焦点归还触发按钮（沿用原型 renderPreservingFocus 纪律）；Esc 与 ✕ 等效；支持 <code>?detail=&lt;id&gt;</code> 深链直达</td></tr>
+<tr><td>载入与失败</td><td>打开即显示两行骨架屏（不白屏）；数据失败显示错误行 + 重试按钮；4s 自动刷新对打开中的抽屉做就地补丁不打断输入</td></tr>
+<tr><td>样式</td><td><code>--panel</code> 实色不透明（真前端既有红线：透出底层页面即 bug）；滑出动画 200ms ease-out；标题栏下沿 <code>--line</code> 分隔</td></tr>
+</table>
+
+<h3>6.2 本机 Agent 接入向导 · 三个关键屏 + 卸载确认抽屉</h3>
+<div class="pc-sec"><b class="lab">屏幕 ① 预演影响卡（向导第 3 步，先回答再发命令）</b>
+<div class="wf">
+<div class="wf-head"><span class="t">接入向导 · 本机 Agent</span><span class="s">第 3 步 / 共 5 步：预演影响</span></div>
+<div class="wf-body">
+<div class="box"><div class="kv"><span class="chip">① 登记对象 ✅</span><span class="chip">② 选方式：本机 Agent ✅</span><span class="chip warn">③ 预演影响</span><span class="chip gray">④ 安装命令</span><span class="chip gray">⑤ 心跳确认</span></div></div>
+<div class="box"><div class="bh">影响预览（自动计算，非实测）</div>
+<div class="kv"><b>影响目标</b><span>1 台主机 · 新增采集目标 1 个（host_metrics · 30s）</span></div>
+<div class="kv"><b>理论频次</b><span>2 samples/min <span class="muted">（非实测，不承诺 CPU/带宽）</span></span></div>
+<div class="kv"><b>网络要求</b><span>出站 8460 → l1-gateway（VIP）；无需入站端口</span></div>
+<div class="kv"><b>回退方式</b><span>卸载向导可完整移除；全过程变更中心留痕</span></div>
+<div class="kv"><span class="btn o">返回修改</span><span class="btn">影响确认 · 生成安装命令</span></div></div>
+</div>
+</div></div>
+
+<div class="pc-sec"><b class="lab">屏幕 ② 安装命令页（复制即走，校验反馈闭环）</b>
+<div class="wf">
+<div class="wf-body">
+<div class="box"><div class="bh">安装命令 <span style="float:right"><span class="chip gray">单机</span><span class="chip">批量脚本</span></span></div>
+<div class="kv" style="background:#142a34;border-radius:6px;padding:8px 10px;color:#7dd6cc;font-family:Menlo,monospace;font-size:11px">curl -sSL http://&lt;l0&gt;/install.sh | sh -s -- --token eyJhb*** 掩码显示 --region 北京一区</div>
+<div class="kv"><span class="btn">⧉ 已复制</span><span class="muted">token 掩码显示，点击复制时带完整值；命令含对象绑定信息，禁止跨对象复用</span></div></div>
+<div class="box"><div class="bh">安装前环境自检（可选执行）</div>
+<div class="kv"><span class="chip">✅ 出站可达 l1-gateway:8460</span><span class="chip">✅ 磁盘 ≥ 200MB</span><span class="chip err">✕ systemd 不可用（容器环境请用远程采集路径）</span></div>
+<div class="kv muted">自检失败给替代路径建议，不硬阻断——用户可自行判断环境特殊性</div></div>
+</div>
+</div></div>
+
+<div class="pc-sec"><b class="lab">屏幕 ③ 心跳等待页（非阻塞，可离开）</b>
+<div class="wf">
+<div class="wf-body">
+<div class="box"><div class="bh">等待心跳 · 已等待 42s</div>
+<div class="kv"><span class="chip warn">⏳ 未连接</span><span class="chip gray">已连接</span><span class="chip gray">首次上报</span><span class="chip gray">完成</span></div>
+<div class="kv muted">状态机：未连接 → 已连接（心跳到达）→ 首次上报（第一个采集窗口落库）→ 完成；心跳周期 30s，超过 2× 周期提示检查网络</div>
+<div class="kv"><span class="btn o">稍后再来（进度保留）</span><span class="muted">关闭向导不丢进度——台账行状态实时可见，连上自动翻转</span></div></div>
+<div class="box" style="border-left:4px solid #1c8a5a"><div class="kv"><span class="chip">✅ 已连接 · 心跳 8s 前</span><span class="chip">✅ 首次上报 · 12 个指标</span><b>接入完成 · 变更单 CHG-0250 已留痕</b></div></div>
+</div>
+</div></div>
+
+<div class="pc-sec"><b class="lab">卸载确认抽屉（M 档 560px，type-to-confirm）</b>
+<div class="wf">
+<div class="wf-body">
+<div class="box" style="border-left:4px solid #ae3c38"><div class="bh">⚠️ 卸载 bj-gateway-01 <span style="float:right;color:#5c7280">✕</span></div>
+<div class="kv"><b>将发生</b></div>
+<div class="kv"><span>① 停止并移除本机 SAgent 进程与 systemd 服务</span></div>
+<div class="kv"><span>② 名下 1 个采集目标停止上报（host_metrics · 30s）</span></div>
+<div class="kv"><span>③ 目标与对象档案保留，可重新接入</span></div>
+<div class="kv"><b>不会发生</b><span class="muted"> 不删除已入库的历史样本；不做任何其他对象的联动操作</span></div>
+<div class="kv"><b>确认方式</b><span>输入对象名以确认：</span><span style="border:1px solid #e3eaee;border-radius:5px;padding:1px 8px;color:#5c7280">bj-gateway-0|</span></div>
+<div class="kv"><span class="btn" style="background:#ae3c38">发起卸载变更</span><span class="btn o">取消</span><span class="muted">点击后进变更中心预演→批准→执行，本抽屉不直接执行</span></div></div>
+</div>
+</div></div>
+
+<h3>6.3 策略 diff 预演组件（插件与策略页 · 预演三问的第 1 问展开）</h3>
+<div class="wf">
+<div class="wf-head"><span class="t">策略预演 · 主机基础观测 rev-0042 → rev-0043</span><span class="s">预演通过前不放行</span></div>
+<div class="wf-body">
+<div class="box"><div class="bh">配置变更 diff（逐字段）</div>
+<table style="font-size:11px;color:#172c36">
+<tr><th>字段</th><th>旧值</th><th></th><th>新值</th><th>影响</th></tr>
+<tr><td>采集间隔</td><td style="background:#fff0ee;text-decoration:line-through">30s</td><td>→</td><td style="background:#e9f5f2"><b>15s</b></td><td>12 个目标</td></tr>
+<tr><td>extra_labels</td><td style="background:#fff0ee;text-decoration:line-through">env=prod</td><td>→</td><td style="background:#e9f5f2">env=prod,dc=bj</td><td>8 个目标</td></tr>
+<tr><td>插件版本</td><td>host_metrics v2</td><td>—</td><td>host_metrics v2</td><td class="muted">无变化</td></tr>
+</table></div>
+<div class="box"><div class="bh">受影响目标 <span class="chip">12 个 · 点击展开</span></div>
+<div class="kv"><span>按池筛选 ▾</span><span>按地域筛选 ▾</span><span class="muted">展开后逐行显示 目标 / 承载 / 当前版本</span></div></div>
+<div class="box"><div class="bh">采样率对比（理论区间，非实测）</div>
+<div class="kv"><span>变更前</span><span class="bar" style="flex:1"><i style="width:40%;background:#8aa0a6"></i></span><span>2/min/目标</span></div>
+<div class="kv"><span>变更后</span><span class="bar" style="flex:1"><i style="width:80%;background:#087d75"></i></span><span>4/min/目标</span></div>
+<div class="kv muted">预检未通过的目标单独分组展示（红色分组头），<b>不计入可执行目标数</b>——放行按钮只对预检通过组生效</div></div>
+<div class="box"><div class="kv"><span class="btn o">返回修改</span><span class="btn">预演通过 · 转为变更提案（含 diff 快照）</span><span class="muted">diff 快照随变更单存档，执行后可对照验收</span></div></div>
+</div>
+</div>
+<div class="note"><b>交互红线：</b>预演组件只读不写——「转为变更提案」是它唯一出口；diff 快照必须随变更单持久化，验收阶段用同一快照对照，禁止用"当前配置"事后反推。</div>
+
+<div class="footer">SAgent 采集平台 · IA 与页面设计规范（整合版） · 2026-09-26 · 每页一句话主问题验收，验收不过就是设计有问题</div>
+</div>
+</body>
+</html>

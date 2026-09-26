@@ -10,23 +10,25 @@
     <!-- Sidebar -->
     <nav>
       <div class="logo">SAgent 采集平台<small>Collect · Govern · Observe</small></div>
-      <!-- 菜单按「平台治理叙事」分 4 组（2026-09-23 前端效果设计定稿，对齐架构文档）：
-           采集平台的核心能力在菜单里看得见：工作台/实时总览/采集健康/资源接入/采集能力/
-           分析大屏/版本/审计/设置。旧 page id 仍可由 goPage 深链访问（utils.js 保留兜底）。 -->
-      <div class="nav-section">监控治理</div>
+      <!-- 菜单按「接入→采集配置→运维观测」闭环叙事分 5 组（2026-09-26 IA 整合设计定稿，
+           设计稿：DESIGN-采集平台IA整合设计-菜单与页面规范.html）。改名对照：
+           资源与接入→接入中心 / 实时总览→采集目标(降只读) / 采集策略→插件与策略 / 分析大屏→指标大屏。
+           页面 id（data-page）全部不变，goPage 深链与历史链接零影响；数据治理、平台健康两页待 P2 立项。 -->
+      <div class="nav-section">总览健康</div>
       <a data-page="overview" onclick="goPage('overview')">◧ 工作台</a>
-      <a data-page="targets" onclick="goPage('targets')">▤ 实时总览</a>
       <a data-page="slo" onclick="goPage('slo')">◫ 采集健康</a>
-      <div class="nav-section">采集接入</div>
-      <a data-page="resources" onclick="goPage('resources')">▦ 资源与接入</a>
-      <a data-page="capabilities" onclick="goPage('capabilities')">🔌 采集策略</a>
-      <div class="nav-section">数据观测</div>
-      <a data-page="metrics-browse" onclick="goPage('metrics-browse')">📈 分析大屏</a>
-      <div class="nav-section">系统</div>
-      <a data-page="versions" onclick="goPage('versions')">🧬 版本与兼容</a>
+      <div class="nav-section">接入</div>
+      <a data-page="resources" onclick="goPage('resources')">▦ 接入中心</a>
+      <a data-page="targets" onclick="goPage('targets')">▤ 采集目标</a>
       <a data-page="changes" onclick="goPage('changes')">📋 变更中心</a>
-      <a data-page="audit" onclick="goPage('audit')">📜 审计日志</a>
+      <div class="nav-section">采集能力</div>
+      <a data-page="capabilities" onclick="goPage('capabilities')">🔌 插件与策略</a>
+      <a data-page="versions" onclick="goPage('versions')">🧬 版本与兼容</a>
+      <div class="nav-section">数据观测</div>
+      <a data-page="metrics-browse" onclick="goPage('metrics-browse')">📈 指标大屏</a>
+      <div class="nav-section">平台</div>
       <a data-page="settings" onclick="goPage('settings')">⚙️ 平台设置</a>
+      <a data-page="audit" onclick="goPage('audit')">📜 审计日志</a>
       <div class="nav-foot"><span id="nav-user">toptea@l0</span> · <span id="nav-ver">v0.4.0</span></div>
     </nav>
 
@@ -107,11 +109,11 @@
     <script src="js/utils.js?v=26"></script>
     <script src="js/api.js?v=16"></script>
     <script src="js/fleet.js?v=16"></script>
-    <script src="js/panel.js?v=26"></script>
-    <script src="js/onboard.js?v=44"></script>
+    <script src="js/panel.js?v=27"></script>
+    <script src="js/onboard.js?v=45"></script>
     <script src="js/version.js?v=2"></script>
-    <script src="js/resources.js?v=16"></script>
-    <script src="js/overview.js?v=4"></script>
+    <script src="js/resources.js?v=17"></script>
+    <script src="js/overview.js?v=5"></script>
     <script src="js/app.js?v=17"></script>
     <script>
       console.log("SAgent MVP v4 loaded @ " + new Date().toLocaleTimeString());

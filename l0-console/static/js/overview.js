@@ -82,9 +82,9 @@ function renderHealthOverview() {
     h += '</div></div>';
 
     h += '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">'
-      + '<button class="btn btn-o btn-sm" onclick="goPage(\'resources\')">打开资源页</button>'
+      + '<button class="btn btn-o btn-sm" onclick="goPage(\'resources\')">打开接入中心</button>'
       + '<button class="btn btn-o btn-sm" onclick="goPage(\'slo\')">对账详情（断采 / 野指标 / 异常 Agent）</button>'
-      + '<button class="btn btn-p btn-sm" onclick="goPage(\'metrics-browse\')">📈 分析大屏</button>'
+      + '<button class="btn btn-p btn-sm" onclick="goPage(\'metrics-browse\')">📈 指标大屏</button>'
       + '<button class="btn btn-o btn-sm" onclick="goPage(\'targets\')">采集目标</button>'
       + '<button class="btn btn-o btn-sm" onclick="goPage(\'audit\')">审计日志</button>'
       + '<button class="btn btn-o btn-sm" onclick="goPage(\'tasks\')">任务历史</button></div>';
