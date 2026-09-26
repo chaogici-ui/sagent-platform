@@ -206,9 +206,11 @@
           '<div class="sc"><div class="n" style="color:var(--primary)">' +
           running +
           '</div><div class="l">运行中</div></div>' +
-          '<div class="sc"><div class="n" style="color:var(--error)">' +
+          // 四值语义（P1）：stopped=明确维护态，offline/created=状态未知（未证实失败）——
+          // 二者都不是"异常"，合并标红会把"可能只是网络断了"当故障报
+          '<div class="sc"><div class="n" style="color:var(--warning,#b45309)">' +
           (stopped + offline) +
-          '</div><div class="l">异常/离线</div></div>';
+          '</div><div class="l">停用/未知</div></div>';
       }
 
       function updateBatchScope() {

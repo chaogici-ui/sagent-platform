@@ -106,8 +106,12 @@ function renderTasks() {
       // 存活率/采集成功率百分比卡与 IDC 分布删掉（总览页已有 Agent 状态，本页只留对账语义）；
       // 批量操作条移至资源页（batchOp 留在 panel.js，fleet 页共用）。
       function renderSLO() {
-        var anomaly = agents.filter(function(a){return a.status!=='healthy'&&a.status!=='running'})
-          .filter(function (a) { return window.tenantVisible(a); }); // 多租户(D3)界面隔离
+        // 四值语义（P1，对齐 IA 设计稿）：healthy/running=在线 · stopped=明确维护态（人工停用，已知状态）
+        // offline/created=状态未知（心跳过期/从未心跳，未证实失败）。
+        // unknown ≠ failed：未知不进异常计数、不进待处理结论，只单独露出——避免把"可能只是网络断了"当成故障报警。
+        var vis = agents.filter(function (a) { return window.tenantVisible(a); }); // 多租户(D3)界面隔离
+        var anomaly = vis.filter(function(a){return a.status==='stopped'}); // 明确维护态（需人工恢复）
+        var unknownA = vis.filter(function(a){return a.status==='offline'||a.status==='created'});
         var html = '';
         // ① 结论条（对账结果回来后填一句人话）+ 证据链概要（共享 buildEvidenceChainHTML，与工作台同源）
         html += '<div class="card"><div class="card-bd" style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">';
@@ -119,7 +123,7 @@ function renderTasks() {
         html += '<div class="slo-grid" style="margin-top:16px">';
         html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-stale\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-stale">⏳</div><div class="slo-label">数据断采 &gt; 10min</div></div>';
         html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-wild\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-wild">⏳</div><div class="slo-label">野指标（VM 有 / 应报口径无）</div></div>';
-        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-anomaly\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" style="color:'+(anomaly.length>0?'var(--error)':'var(--success)')+'">'+anomaly.length+'</div><div class="slo-label">异常 Agent</div></div>';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-anomaly\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" style="color:'+(anomaly.length>0?'var(--warning,#b45309)':'var(--success)')+'">'+anomaly.length+'</div><div class="slo-label">维护态 Agent'+(unknownA.length>0?' <span style="color:var(--muted);font-weight:400">· 另 '+unknownA.length+' 状态未知</span>':'')+'</div></div>';
         html += '</div>';
         // ③-1 断采清单
         html += '<div class="card" style="margin-top:16px" id="recon-stale"><div class="card-hd">📡 断采目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">目录声明应采 × VM 实际在报（近 10min 无数据）</span></div>';
@@ -127,14 +131,23 @@ function renderTasks() {
         // 对账：野指标
         html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span></div>';
         html += '<div class="card-bd" id="recon-wild-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
-        // ③-3 异常 Agent
-        html += '<div class="card" style="margin-top:16px" id="recon-anomaly"><div class="card-hd">⚠️ 异常 Agent（'+anomaly.length+'）</div>';
-        if(anomaly.length===0){
-          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">✅ 全部正常</div>';
+        // ③-3 Agent 状态：维护态与未知态分开列（unknown ≠ failed）
+        html += '<div class="card" style="margin-top:16px" id="recon-anomaly"><div class="card-hd">🖥 Agent 状态 <span style="font-weight:400;font-size:11px;color:var(--muted)">维护态 '+anomaly.length+' · 状态未知 '+unknownA.length+'（心跳过期/从未心跳 ≠ 失败，可能只是网络中断）</span></div>';
+        if(vis.length===0){
+          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">暂无 Agent —— 先到 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">接入中心</a> 完成对象接入</div>';
+        }else if(anomaly.length===0 && unknownA.length===0){
+          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">✅ 全部 '+vis.length+' 个 Agent 在线，无维护态、无状态未知</div>';
         }else{
-          html += '<div class="card-bd" style="padding:0"><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
-          anomaly.forEach(function(a){html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge '+(a.status==='stopped'?'b-s':'b-o')+'">'+(a.status==='stopped'?'已停':'离线')+'</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><button class="btn btn-s btn-sm" onclick="quickStart(\''+a.id+'\')">启动</button></td></tr>'});
-          html += '</tbody></table>';
+          if(anomaly.length>0){
+            html += '<div class="card-bd" style="padding:0"><div style="padding:8px 16px 4px;font-size:11px;color:var(--warning,#b45309);font-weight:600">维护态（已停用，明确状态）</div><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
+            anomaly.forEach(function(a){html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge b-s">已停用</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><button class="btn btn-s btn-sm" onclick="quickStart(\''+a.id+'\')">启动</button></td></tr>'});
+            html += '</tbody></table></div>';
+          }
+          if(unknownA.length>0){
+            html += '<div class="card-bd" style="padding:0'+(anomaly.length>0?';border-top:1px solid var(--line,#eee)':'')+'"><div style="padding:8px 16px 4px;font-size:11px;color:var(--muted);font-weight:600">状态未知（未证实失败，不计入异常）</div><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
+            unknownA.forEach(function(a){var lbl=a.status==='created'?'从未心跳':'心跳过期';html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge" style="background:#f0f0f0;color:#666">未知 · '+lbl+'</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><a href="javascript:void(0)" onclick="openDetailById(\''+a.id+'\')" style="color:var(--primary)">查看详情</a></td></tr>'});
+            html += '</tbody></table></div>';
+          }
         }
         html += '</div>';
         // ③-4 HA-3 归属迁移记录（证据链：跨 L1 归属故障上收后，此处留痕供审计/排障下钻）
@@ -215,7 +228,14 @@ function renderTasks() {
           if (el1) { el1.textContent = vmOk ? st : '—'; el1.style.color = (vmOk&&st>0)?'var(--error)':'var(--success)'; }
           var el4 = document.getElementById('slo-wild');
           if (el4) { el4.textContent = vmOk ? wild : '—'; el4.style.color = (vmOk&&wild>0)?'var(--warning,#b45309)':'var(--success)'; }
-          if (meta) meta.textContent = '对账时间 '+(d.generated_at||'')+' · 检查目标 '+(d.summary.checked||0)+'/'+(d.summary.targets||0)+' · VM '+(vmOk?'可达':'不可达');
+          if (meta) {
+            // 覆盖率口径（P1）：分母 = 可核对目标（checked = 声明目标中插件可解析且有合法探针指标的子集），
+            // 在报率 = (checked - stale) / checked；checked=0 时显示"—"（不适用），绝不伪造 100%。
+            var chk = d.summary.checked||0, decl = d.summary.targets||0, inrate = (chk - st) + '/' + chk;
+            var rateTxt = chk>0 ? '在报率 '+Math.round((chk-st)/chk*100)+'%（'+inrate+'）' : '在报率 —（无可核对目标）';
+            var skipTxt = decl>chk ? ' · 声明 '+decl+'（'+(decl-chk)+' 缺插件口径未核对）' : ' · 声明 '+decl;
+            meta.textContent = '对账时间 '+(d.generated_at||'')+' · '+rateTxt+skipTxt+' · VM '+(vmOk?'可达':'不可达');
+          }
           // ① 一句人话结论
           if (v) {
             if (!vmOk) {
@@ -225,22 +245,33 @@ function renderTasks() {
               var parts = [];
               if (st>0) parts.push('<span style="color:var(--error)">断采 '+st+'</span>');
               if (wild>0) parts.push('<span style="color:var(--warning,#b45309)">野指标 '+wild+'</span>');
-              if (anomaly.length>0) parts.push('<span style="color:var(--error)">异常 Agent '+anomaly.length+'</span>');
-              v.innerHTML = '发现 '+parts.length+' 类问题待处理：'+parts.join('、')+'（点击下方卡片定位）';
+              if (anomaly.length>0) parts.push('<span style="color:var(--warning,#b45309)">维护态 Agent '+anomaly.length+'</span>');
+              v.innerHTML = '发现 '+parts.length+' 类问题待处理：'+parts.join('、')+'（点击下方卡片定位）'
+                + (unknownA.length>0 ? '<span style="font-weight:400;color:var(--muted)">　另有 '+unknownA.length+' 个 Agent 状态未知（心跳过期，未证实失败，未计入）</span>' : '');
               v.style.color = '';
             } else if ((d.summary.checked||0) > 0) {
-              v.innerHTML = '✅ 平台健康：已核对 '+(d.summary.checked||0)+' 个目标全部在报，VM 无野指标，Agent 无异常';
+              v.innerHTML = '✅ 平台健康：已核对 '+(d.summary.checked||0)+' 个可核对目标全部在报，VM 无野指标，Agent 无维护态'
+                + (unknownA.length>0 ? '<span style="font-weight:400;color:var(--muted)">　另有 '+unknownA.length+' 个 Agent 状态未知（未计入）</span>' : '');
               v.style.color = '';
+            } else if ((d.summary.targets||0) > 0) {
+              // 空态规范：有声明目标但全部缺口径 ≠ 全部健康
+              v.innerHTML = '— 声明了 '+(d.summary.targets||0)+' 个目标，但均缺可核对的插件口径（无探针指标），无法判断数据是否在报——到 <a href="javascript:void(0)" onclick="goPage(\'capabilities\')" style="color:var(--primary)">插件与策略</a> 登记指标口径';
+              v.style.color = 'var(--muted)';
             } else {
-              v.innerHTML = '✅ 未发现问题，但本次没有可核对的目标（声明 '+(d.summary.targets||0)+' 个，缺插件口径或未注册）——可到 <a href="javascript:void(0)" onclick="goPage(\'targets\')" style="color:var(--primary)">采集目标</a> 检查目标配置';
-              v.style.color = '';
+              // 空态规范：0 目标不显示"全部健康"，给引导动作
+              v.innerHTML = '— 还没有采集目标，谈不上健康与否——先到 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">接入中心</a> 完成对象接入';
+              v.style.color = 'var(--muted)';
             }
           }
           // 断采清单（带"打开资源"动作）
           var sb = document.getElementById('recon-stale-body');
           if (sb) {
             if (!vmOk) { sb.innerHTML = '⚠ VM 不可达，无法判定断采'; sb.style.color='var(--muted)'; }
-            else if (!d.stale || d.stale.length===0) { sb.innerHTML = '✅ 全部在报'; sb.style.color='var(--muted)'; }
+            else if (!d.stale || d.stale.length===0) {
+              // 空态规范：无可核对目标时不说"全部在报"
+              sb.innerHTML = (d.summary.checked||0)>0 ? '✅ 全部在报（可核对 '+(d.summary.checked||0)+' 个）' : '— 没有可核对的目标（目标缺插件口径或探针指标未登记）';
+              sb.style.color='var(--muted)';
+            }
             else {
               var h = '<table style="text-align:left"><thead><tr><th>目标</th><th>地址</th><th>插件</th><th>分派 Agent</th><th>探测指标</th><th>操作</th></tr></thead><tbody>';
               d.stale.forEach(function(t){
