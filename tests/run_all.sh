@@ -194,6 +194,62 @@ check "幽灵Agent写配置被拒(404)" '[ "$GHOST_PUT" = "404" ]'
 GHOST_TGT=$(curl -s -X POST http://localhost:8080/api/targets -H 'Content-Type: application/json' -d '{"name":"ghost-t","type":"mysql","address":"1.2.3.4:3306","agent_id":"ghost-agent"}' 2>/dev/null | grep -c 'agent not found' || echo 0)
 check "目标分派幽灵Agent被拒" "[ \"\${GHOST_TGT:-0}\" -ge 1 ]"
 
+# ---- 接入中心：模板 / 能力 / 流水线（前端零写死的数据源，批 A 落点）----
+log "接入中心 API 校验..."
+TPL_IDS=$(curl -s http://localhost:8080/api/onboard/templates 2>/dev/null | python3 -c 'import sys,json; print(",".join(sorted(t["id"] for t in json.load(sys.stdin).get("templates",[]))))' 2>/dev/null || echo "")
+check "接入模板下发edge/hybrid/remote" '[ "$TPL_IDS" = "edge,hybrid,remote" ]'
+
+ABILITY_N=$(curl -s http://localhost:8080/api/onboard/abilities 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("abilities",[])))' 2>/dev/null || echo 0)
+check "接入能力清单非空" "[ \"\${ABILITY_N:-0}\" -ge 8 ]"
+
+# 参数表单字段来自插件包 params.yaml（L3 层）——写死则这里必为 0
+MYSQL_FIELDS=$(curl -s http://localhost:8080/api/onboard/abilities 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); a=[x for x in d.get("abilities",[]) if x.get("id")=="mysql_probe"]; print(len(a[0].get("params") or []) if a else 0)' 2>/dev/null || echo 0)
+check "mysql参数表单来自params.yaml" "[ \"\${MYSQL_FIELDS:-0}\" -ge 3 ]"
+
+# 能力声明唯一（同一 id 声明两处会让参数表单被前一处静默遮蔽）
+DUP_ABILITY=$(curl -s http://localhost:8080/api/onboard/abilities 2>/dev/null | python3 -c 'import sys,json,collections; ids=[a["id"] for a in json.load(sys.stdin).get("abilities",[])]; print(sum(1 for k,v in collections.Counter(ids).items() if v>1))' 2>/dev/null || echo 0)
+check "能力声明无重复id" "[ \"\${DUP_ABILITY:-0}\" = \"0\" ]"
+
+FLOW_CREATE=$(curl -s -X POST http://localhost:8080/api/onboard/flow -H 'Content-Type: application/json' \
+  -d '{"resources":["10.99.99.201"],"mode":"edge","abilities":["prometheus_scrape"],"params":{"prometheus_scrape":{"url":"http://10.99.99.201:9100/metrics"}}}' 2>/dev/null)
+FLOW_ID=$(echo "$FLOW_CREATE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("flows",[{}])[0].get("id",0))' 2>/dev/null || echo 0)
+check "新建接入流水线" "[ \"\${FLOW_ID:-0}\" -gt 0 ]"
+
+FLOW_DET=$(curl -s "http://localhost:8080/api/onboard/flow?id=$FLOW_ID" 2>/dev/null)
+STEP_OK_N=$(echo "$FLOW_DET" | python3 -c 'import sys,json; s=json.load(sys.stdin).get("flow",{}).get("step_status",{}); print(sum(1 for v in s.values() if v=="ok"))' 2>/dev/null || echo 0)
+STEP_RUN_N=$(echo "$FLOW_DET" | python3 -c 'import sys,json; s=json.load(sys.stdin).get("flow",{}).get("step_status",{}); print(sum(1 for v in s.values() if v=="running"))' 2>/dev/null || echo 0)
+STEP_PEND_N=$(echo "$FLOW_DET" | python3 -c 'import sys,json; s=json.load(sys.stdin).get("flow",{}).get("step_status",{}); print(sum(1 for v in s.values() if v=="pending"))' 2>/dev/null || echo 0)
+FLOW_STATUS=$(echo "$FLOW_DET" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("flow",{}).get("status",""))' 2>/dev/null || echo "")
+check "平台侧步骤自动完成" "[ \"\${STEP_OK_N:-0}\" -ge 1 ]"
+check "外部步骤停下等回报(不假装完成)" "[ \"\${STEP_RUN_N:-0}\" -ge 1 ]"
+check "未就绪步骤为pending" "[ \"\${STEP_PEND_N:-0}\" -ge 1 ]"
+check "流水线状态running" '[ "$FLOW_STATUS" = "running" ]'
+
+# 能力探路已并入主机探路（2026-09-21）：edge 流程不许再有 preflight_ability 环节；
+# 主机探路（external）推进后应处于 running（平台 ansible 代跑/停等回报），不许瞬间假完成
+PAB_GONE=$(echo "$FLOW_DET" | python3 -c 'import sys,json; ss=json.load(sys.stdin).get("flow",{}).get("step_status",{}); print("no" if "preflight_ability" in ss else "yes")' 2>/dev/null || echo "")
+check "能力探路已并入主机探路" '[ "$PAB_GONE" = "yes" ]'
+PH_STATUS=$(echo "$FLOW_DET" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("flow",{}).get("step_status",{}).get("preflight_host",""))' 2>/dev/null || echo "")
+check "主机探路不假完成" '[ "$PH_STATUS" = "running" ] || [ "$PH_STATUS" = "pending" ]'
+
+# 步骤快照与时间线可读（模板演进后历史流水线仍可重放）
+STEP_N=$(echo "$FLOW_DET" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d.get("flow",{}).get("step_ids",[])))' 2>/dev/null || echo 0)
+EV_N=$(echo "$FLOW_DET" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d.get("events") or []))' 2>/dev/null || echo 0)
+check "步骤快照已持久化" "[ \"\${STEP_N:-0}\" -ge 5 ]"
+check "时间线与步骤一一对应" '[ "${EV_N:-0}" = "${STEP_N:-0}" ]'
+
+RES_N=$(curl -s "http://localhost:8080/api/resources?q=10.99.99.201" 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("resources",[])))' 2>/dev/null || echo 0)
+check "资源对象已登记" "[ \"\${RES_N:-0}\" -ge 1 ]"
+
+# collect_params 落参数建目标，且目标带 flow_id 可回溯到流水线（采集目标页「接入过程」深链依赖它）
+TG_FLOW=$(curl -s http://localhost:8080/api/targets 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); ts=d if isinstance(d,list) else d.get("targets",[]); print(max([t.get("flow_id",0) or 0 for t in ts] or [0]))' 2>/dev/null || echo 0)
+check "采集目标带流水线回溯ID" "[ \"\${TG_FLOW:-0}\" -ge 1 ]"
+
+# 强制通过必须填理由（审计留痕，不可静默放行）
+FORCE_NO_REASON=$(curl -s -X POST http://localhost:8080/api/onboard/flow/step -H 'Content-Type: application/json' \
+  -d "{\"flow_id\":$FLOW_ID,\"step\":\"preflight_host\",\"action\":\"force\",\"reason\":\"\"}" 2>/dev/null | grep -c '必须填写理由' || echo 0)
+check "强制通过未填理由被拒" "[ \"\${FORCE_NO_REASON:-0}\" -ge 1 ]"
+
 # ====== 9. 红线 lint（CONSTRAINTS.md 静态检查，机器执行红线 2） ======
 log ""
 log "===== 9. 红线 lint（生产化约束） ====="
@@ -215,6 +271,55 @@ check "审计operator透传compose"        'grep -qn "AUDIT_OPERATOR" "$ROOT/dep
 check "版本比较用语义化verCmp"         'grep -qn "function verCmp" "$ROOT/l0-console/static/js/panel.js" && ! grep -qn "verMap).sort()" "$ROOT/l0-console/static/js/panel.js"'
 check "死端点清零(JSON文件存储)"       '! grep -qn "data/plugins.json" "$ROOT/l0-console/"*.go && ! grep -qEn "/api/plugins\"|/api/metrics/synced|metrics-by-target" "$ROOT/l0-console/"*.go'
 check "旧JSON插件存储文件已删"         '[ ! -e "$ROOT/l0-console/data/plugins.json" ]'
+
+# ---- 批 A：接入中心与流程引擎（引擎只认原子能力，编排/参数/检查项全部数据化）----
+check "流程模板在镜像COPY清单"         'grep -qn "data/flow_templates/" "$ROOT/l0-console/Dockerfile"'
+check "流程模板进种子并随启动同步"     'grep -qn "l0-seed/flow_templates" "$ROOT/l0-console/Dockerfile" && grep -qn "flow_templates" "$ROOT/l0-console/docker-entrypoint.sh"'
+check "六个模式模板文件存在"           '[ "$(ls -1 "$ROOT/l0-console/data/flow_templates/"*.yaml 2>/dev/null | wc -l | tr -d " ")" = "6" ]'
+# 引擎零插件名：编排引擎里出现具体插件名 = 分层退化（该写进 onboard_config.json / 模板 / params.yaml）
+check "引擎零插件名写死"               '! grep -qE "\"(mysql_probe|redis_probe|kafka_exporter|elasticsearch_exporter|clickhouse_exporter|http_response|log_metrics|host_metrics|port_checker|prometheus_scrape|custom_scripts)\"" "$ROOT/l0-console/onboard_engine.go" "$ROOT/l0-console/onboard_atoms.go"'
+check "接入流水线走库(PG)非JSON"       '! grep -qEn "onboard_flow\.json|flows\.json|onboard\.json" "$ROOT/l0-console/"*.go'
+check "探路端点不提前占位(批D才注册)"  '! grep -qn "/api/onboard/preflight" "$ROOT/l0-console/"*.go'
+check "引擎回归测试存在"               '[ -f "$ROOT/l0-console/onboard_test.go" ] && grep -qn "func TestAdvanceFlow" "$ROOT/l0-console/onboard_test.go"'
+check "接入中心前端模块存在"           '[ -f "$ROOT/l0-console/static/js/onboard.js" ] && grep -qn "onboard.js" "$ROOT/l0-console/static/index.html"'
+check "接入中心菜单项存在"             'grep -qn "onboard-center" "$ROOT/l0-console/static/index.html" && grep -qn "case \"onboard-center\"" "$ROOT/l0-console/static/js/utils.js"'
+# 接入向导零硬编码：能力清单与参数表单字段必须来自 /api/onboard/*（写死即分层退化）
+check "接入向导零硬编码插件名"         '! grep -qE "host_metrics|mysql_probe|redis_probe|kafka_exporter|elasticsearch_exporter|clickhouse_exporter|http_response|log_metrics|port_checker|prometheus_scrape|custom_scripts" "$ROOT/l0-console/static/js/onboard.js"'
+TPL_OK=$(grep -l "^steps:" "$ROOT/l0-console/data/flow_templates/"*.yaml 2>/dev/null | wc -l | tr -d " ")
+check "六个模板均含steps定义"          '[ "${TPL_OK:-0}" = "6" ]'
+# 参数声明文件齐备：onboard_config.json 里声明的 params 路径必须在磁盘上真实存在。
+# 路径写错不会报错，只会静默退化成「该能力无需参数」——接入向导表单为空且无人察觉。
+PARAMS_MISS=$(python3 -c 'import json,os,sys
+root=sys.argv[1]
+cfg=json.load(open(os.path.join(root,"l0-console/data/onboard_config.json")))
+base=os.path.join(root,"l0-console/data/integrations")
+print(len([p["params"] for p in cfg.get("onboard_plugins",[]) if p.get("params") and not os.path.isfile(os.path.join(base,p["params"]))]))' "$ROOT" 2>/dev/null || echo 999)
+check "插件参数声明文件齐备"           '[ "${PARAMS_MISS:-1}" = "0" ]'
+check "目标详情有接入过程深链"         'grep -qn "openOnboardFlow" "$ROOT/l0-console/static/js/panel.js"'
+# 审计修正（2026-09-21）：三处方案↔代码对账缺口的防回归门禁
+check "hybrid含远程可达性探路"         'grep -qn "preflight_remote" "$ROOT/l0-console/data/flow_templates/hybrid.yaml"'
+check "平台设备强制自监控兜底"         'grep -qn "platform_device" "$ROOT/l0-console/agent_api.go" && grep -qn "GetAgentResourceID" "$ROOT/l0-console/agent_api.go" "$ROOT/l0-console/store/fleet.go"'
+check "stall判定分执行域"              'grep -qn "runningScopes" "$ROOT/l0-console/onboard_api.go"'
+# 能力探路已并入主机探路（2026-09-21）：三模板不许再有独立 preflight_ability 环节，
+# 但三模板都必须保留 atom preflight_host（能力可行性检查现在由它承担）
+check "探路环节已合并(三模板)"  'TPL_OK=1; for t in edge remote hybrid; do grep -q "id: preflight_ability" "$ROOT/l0-console/data/flow_templates/$t.yaml" && TPL_OK=0; grep -q "atom: preflight_host" "$ROOT/l0-console/data/flow_templates/$t.yaml" || TPL_OK=0; done; [ "$TPL_OK" = "1" ]'
+# 下发配置必须等探路门禁（edge: 主机探路含能力检查；remote/hybrid 另有远程可达性探路）
+check "下发配置依赖探路门禁(三模板)"  'TPL_DEP_OK=1; for t in edge remote hybrid; do grep -A6 "id: sync_config" "$ROOT/l0-console/data/flow_templates/$t.yaml" | grep -q "preflight_host" || TPL_DEP_OK=0; done; [ "$TPL_DEP_OK" = "1" ]'
+# Agent 域验证步骤必须等 Agent 就位：Agent 未装就「等待回报」是死等（2026-09-21 用户评审）
+check "验证/入库依赖Agent就位(三模板)" 'TPL_AG_OK=1; for t in edge remote hybrid; do for s in verify_probe observe_collect; do grep -A5 "id: $s" "$ROOT/l0-console/data/flow_templates/$t.yaml" | grep -q "install_agent" || TPL_AG_OK=0; done; done; [ "$TPL_AG_OK" = "1" ]'
+# 五阶段视图（2026-09-21 用户评审「11步压缩为5阶段」）：引擎步骤粒度不变，展示层归组；
+# 前端必须定义五阶段映射 + self_metrics 注册回报 180s 步骤级超时（不落 3600 default）
+check "五阶段视图已定义(onboard.js)"  'grep -q "OB_STAGES" "$ROOT/l0-console/static/js/onboard.js" && grep -q "obStageAgg" "$ROOT/l0-console/static/js/onboard.js" && grep -q "obStageDots" "$ROOT/l0-console/static/js/onboard.js"'
+check "self_metrics注册超时180s"      'grep -q "\"self_metrics\"" "$ROOT/l0-console/onboard.go" && grep -q "self_metrics" "$ROOT/l0-console/data/onboard_config.json" && grep -q "timeoutSpecForStep" "$ROOT/l0-console/onboard_timeout.go"'
+
+# 升级/启停流程（2026-09-22 用户需求）：internal 模板 + 守护协议 playbook + 决策卡 + 维护态
+check "升级模板五步齐备"        'grep -q "id: upgrade_agent" "$ROOT/l0-console/data/flow_templates/upgrade.yaml" && grep -q "atom: pick_version" "$ROOT/l0-console/data/flow_templates/upgrade.yaml" && grep -q "atom: confirm_upgrade" "$ROOT/l0-console/data/flow_templates/upgrade.yaml"'
+check "启停模板四步齐备"        'grep -q "atom: confirm_service" "$ROOT/l0-console/data/flow_templates/service.yaml" && grep -q "atom: service_execute" "$ROOT/l0-console/data/flow_templates/service.yaml"'
+check "升级playbook自证契约"    'grep -q "UPGRADE_OK" "$ROOT/l0-console/data/playbooks/upgrade.yml" && grep -q "UPGRADE_DIRTY" "$ROOT/l0-console/data/playbooks/upgrade.yml" && grep -q "BAK_NAME" "$ROOT/l0-console/data/playbooks/upgrade.yml"'
+check "启停playbook守护协议"    'grep -q "run/stopped" "$ROOT/l0-console/data/playbooks/agent_service.yml" && grep -q "SVC_STOPPED" "$ROOT/l0-console/data/playbooks/agent_service.yml" && grep -q "SVC_PLUGIN_STARTED" "$ROOT/l0-console/data/playbooks/agent_service.yml"'
+check "启停参数白名单"          'grep -q "validPluginName" "$ROOT/l0-console/onboard_service.go" && grep -q "func (p svcParams) valid" "$ROOT/l0-console/onboard_service.go"'
+check "维护态登记与清理"        'grep -q "SetResourceSvcState" "$ROOT/l0-console/store/onboard.go" && grep -q "SetResourceSvcState" "$ROOT/l0-console/onboard_atoms.go" && grep -q "svc_state" "$ROOT/l0-console/static/js/onboard.js"'
+check "行内升级/启停按钮"       'grep -q "obUpgrade" "$ROOT/l0-console/static/js/onboard.js" && grep -q "obService" "$ROOT/l0-console/static/js/onboard.js" && grep -q "can_upgrade" "$ROOT/l0-console/onboard_api.go"'
 
 # ====== 总结 ======
 log ""

@@ -1,0 +1,57 @@
+# vmalert 告警规则层（架构 3.4 可监控 · ALERT-1）
+#
+# 消费 L0 自监控出口 sagent_l0_*（vmagent job=l0-console 抓入 VM），对平台自身状态做规则化求值，
+# 把 firing 的告警以 ALERTS 系列回写 VM（-remoteWrite.url），实现"平台对自身告警"的可监控闭环：
+#   l0-console /metrics  -->  vmagent  -->  victoriametrics  -->  vmalert 求值  -->  ALERTS 系列 --> VM/Grafana
+#
+# 与 L0 内部告警中心（alert.go，firing 存内存态、/api/alerts 展示）分层：
+#   · alert.go      ——规则化扫描 + 状态翻转去重 + webhook gate（控制台内告警中心，D6 默认载体）
+#   · 本 vmalert    ——把 sagent_l0_alerts_active>0 等平台信号转成 Prometheus 级告警规则（可被
+#                     VM/Alertmanager/Grafana 编排，例如持久 firing 升级、静默、聚合）
+# 消除重复告警的约定：vmalert 仅放行"平台整体不可用/数据面不可达"的低频信号，逐项告警仍由
+# 控制台内部告警中心（alert.go）负责，避免两条链对同一心跳互相刷屏。
+groups:
+  - name: l0-platform
+    interval: 15s
+    rules:
+      # L0 控制面失联：/metrics 探不到（进程死/网络断）。最高优先级，全网失管前奏。
+      - alert: L0ControlPlaneDown
+        expr: sagent_l0_up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "L0 控制台失联"
+          description: "l0-console 的 /metrics 探不到（sagent_l0_up=0），可能进程退出或网络不可达。"
+
+      # L0 catalog 状态库不可达：存接管/多副本状态强一致的根基。
+      - alert: L0CatalogUnreachable
+        expr: sagent_l0_catalog_reachable == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "L0 catalog 状态库不可达"
+          description: "catalog 存储探测失败（sagent_l0_catalog_reachable=0），L1 接管/HAA 状态一致性根基受损。"
+
+      # L0 内部告警中心存在活跃告警：平台自身判定至少一条规则处于 firing。
+      # 这是把"控制台内部告警中心(D6)"桥接到可编排告警链的关键——alert.go 判定为 firing 的，
+      # 此处转成 Prometheus 规则，供 VM/Alertmanager/静默/升级编排。
+      - alert: L0InternalAlertsActive
+        expr: sagent_l0_alerts_active > 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "L0 内部告警中心存在活跃告警"
+          description: "平台自身判定 {{ $value }} 条规则处于 firing（sagent_l0_alerts_active={{ $value }}），可下钻 /api/alerts 查阅明细。"
+
+      # 接入 SAgent 多数离线：online/total 比例跌破 50%（total>0 才判，避免无 Agent 时误报）。
+      - alert: L0AgentsMajorityOffline
+        expr: sagent_l0_agents_total > 0 and (sagent_l0_agents_online / sagent_l0_agents_total) < 0.5
+        for: 60s
+        labels:
+          severity: critical
+        annotations:
+          summary: "绝大多数 SAgent 离线"
+          description: "在线/总数比例跌破 50%（sagent_l0_agents_online / sagent_l0_agents_total = {{ $value }}）。"

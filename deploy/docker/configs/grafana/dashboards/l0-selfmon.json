@@ -1,0 +1,263 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "prometheus", "uid": "${DS}" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "title": "L0 平台自监控 (SAgent)",
+  "uid": "sagent-l0-selfmon",
+  "tags": ["sagent", "selfmon"],
+  "timezone": "browser",
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "version": 1,
+  "weekStart": "",
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "label": "数据源",
+        "name": "DS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Agent 在线",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "area", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_agents_online", "legendFormat": "在线" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_agents_total", "legendFormat": "总数" }
+      ],
+      "interval": ""
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "活跃告警",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_alerts_active", "legendFormat": "firing" }
+      ],
+      "interval": ""
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "目录库可达",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "不可达", "color": "red" }, "1": { "text": "可达", "color": "green" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_catalog_reachable", "legendFormat": "catalog" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "处理中流水线",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_onboard_pending_flows", "legendFormat": "flows" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "租户数",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_tenants_total", "legendFormat": "tenants" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "插件 / 指标",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_catalog_plugins", "legendFormat": "plugins" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_catalog_metrics", "legendFormat": "metrics" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "活跃告警数趋势",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": { "fillOpacity": 30, "lineWidth": 2, "showPoints": "auto", "spanNulls": true },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["last"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_alerts_active", "legendFormat": "firing 规则数" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Agent 在线 / 注册",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_agents_online", "legendFormat": "在线" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_agents_total", "legendFormat": "注册" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_agents_edge", "legendFormat": "edge" },
+        { "refId": "D", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_agents_proxy", "legendFormat": "proxy" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Catalog 插件 / 指标规模",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["last"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_catalog_plugins", "legendFormat": "plugins" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_catalog_metrics", "legendFormat": "metrics" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${DS}" }, "expr": "sagent_l0_catalog_audit_rows", "legendFormat": "audit_rows" }
+      ]
+    }
+  ]
+}

@@ -1,9 +1,65 @@
 # vmagent scrape 配置
 scrape_configs:
+      # L0 自身自监控（架构 3.3 可监控：平台也要能被监控）。
+      # l0-console 的 /metrics 出口 sagent_l0_*（进程/依赖/Agent规模/流水线/版本指纹），
+      # 与前端自监控面板、/api/selfmon 同源，纳入 VM 数据链供 Grafana 大盘可视化，形成"监控平台的平台"闭环。
+      - job_name: "l0-console"
+        scrape_interval: 15s
+        static_configs:
+              - targets:
+                      - "l0-console:8080"
+        metrics_path: /metrics
       - job_name: "sagent"
         scrape_interval: 15s
+        # D4 收口核心：SAgent /metrics 不再被 vmagent 直连，统一经 l1-vmauth 单端口(8427)收敛。
+        #   - 入口鉴权：vmagent 带 Bearer demo-d4-bearer 打 vmauth，vmauth 裸鉴权不通过即 401；
+        #   - path 白名单：vmauth 按 /sagent-{1,2,proxy}/metrics 白名单路由并注入 SAgent 所需 Bearer；
+        #   - 明细节奏：targets 仍写 sagent-*,19090（逻辑标识），relabel 把 __address__ 置换为 vmauth:8427、
+        #     __metrics_path__ 按 host 映射到对应白名单 path，job_name 保持不变（指标标签/github 大盘兼容）。
+        # vmagent 1.93 不展开配置文件 ${VAR}，这里的密钥与 SAgent SAGENT_METRICS_AUTH_KEY 及
+        # configs/vmauth/auth.yaml 三处需同步（生产轮换密钥时一并更新）。
+        bearer_token: "demo-d4-bearer"
         static_configs:
               - targets:
                       - "sagent-1:19090"
                       - "sagent-2:19090"
                       - "sagent-proxy:19090"
+                      - "sagent-proxy-2:19090"
+                      - "sagent-proxy-3:19090"
+        relabel_configs:
+              - source_labels: [__address__]
+                regex: "sagent-1:.*"
+                target_label: __metrics_path__
+                replacement: /sagent-1/metrics
+              - source_labels: [__address__]
+                regex: "sagent-2:.*"
+                target_label: __metrics_path__
+                replacement: /sagent-2/metrics
+              - source_labels: [__address__]
+                regex: "sagent-proxy:.*"
+                target_label: __metrics_path__
+                replacement: /sagent-proxy/metrics
+              # 注意：Prometheus relabel 的 regex 两端锚定，"sagent-proxy:.*" 不会误命中 sagent-proxy-2
+              - source_labels: [__address__]
+                regex: "sagent-proxy-2:.*"
+                target_label: __metrics_path__
+                replacement: /sagent-proxy-2/metrics
+              - source_labels: [__address__]
+                regex: "sagent-proxy-3:.*"
+                target_label: __metrics_path__
+                replacement: /sagent-proxy-3/metrics
+              # 保留各 SAgent 原标识作为 instance（默认 instance 取 __address__，若不保留会被置换后的
+              # vmauth:8427 覆盖而全部合并成同一个 target，导致 Grafana 大盘无法区分主机）
+              - source_labels: [__address__]
+                target_label: instance
+              # 任何以上 host 都把实际抓取地址统一置换为 vmauth 单端口
+              - source_labels: [__address__]
+                regex: "sagent-.*:.*"
+                target_label: __address__
+                replacement: "vmauth:8427"
+      # 接入流水线装机后自动登记的靶机（l0-console 写 file_sd 共享卷，15s 热加载）
+      - job_name: "sagent-onboarded"
+        scrape_interval: 15s
+        file_sd_configs:
+              - files:
+                      - "/etc/vmagent-sd/*.json"

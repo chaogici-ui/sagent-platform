@@ -5,15 +5,15 @@
 
 ---
 
-## 红线 1：持久化一律 SQLite，禁止内存态承载业务数据
+## 红线 1：持久化一律 PostgreSQL，禁止内存态承载业务数据
 
-引入 SQLite 的目的就是**往真实产品走**，不是临时存个文件。
+引入目录库的目的就是**往真实产品走**，不是临时存个文件。
 
-- 所有业务数据（目录、指标定义、Agent、目标、配置版本、审计、任务状态）必须落 SQLite（`data/catalog.db`，modernc.org/sqlite 纯 Go 驱动，免 CGO）。
-- **禁止**新增"内存切片 + 重启即丢"的业务数据结构。现有 `AgentStore` 内存层只是 SQLite 的读缓存/心跳状态，唯一事实来源是库。
-- 新增数据一律通过 `store` 层方法（建表语句挂 `init` 迁移清单），**禁止手工 SQL 编辑运行库**——WAL 模式下手工编辑必然踩坑（丢行/malformed，2026-09-20 已实证），持久化源头只有两个：`data/integrations/` 插件包 + `data/metrics.json` 种子，其余靠启动引导确定性重建。
+- 所有业务数据（目录、指标定义、Agent、目标、配置版本、审计、任务状态）必须落目录库（PostgreSQL，pgx/v5 驱动，`CATALOG_DSN` 环境变量注入）。**SQLite 载体已于 2026-09-25 全面移除**（驱动、方言翻译、回退分支一并删除），`CATALOG_DSN` 缺配置即启动快速失败——不留"静默回落本地文件库"的口子。
+- **禁止**新增"内存切片 + 重启即丢"的业务数据结构。现有 `AgentStore` 内存层只是目录库的读缓存/心跳状态，唯一事实来源是库。
+- 新增数据一律通过 `store` 层方法（建表语句挂 `init` 迁移清单），**禁止手工 SQL 编辑运行库**，持久化源头只有两个：`data/integrations/` 插件包 + `data/metrics.json` 种子，其余靠启动引导确定性重建。
 - 内存双写（如审计）必须是 best-effort 落库 + 内存镜像展示，库是事实，内存只是视图。
-- **数据文件升级语义（data 卷遮蔽根治）**：`data/` 下的数据源文件（metrics.json、onboard_config.json、integrations/ 插件包）**随镜像版本走（镜像赢）**，由 entrypoint 每次启动从 `/opt/l0-seed/` 同步到卷；运行态产物（catalog.db 三件套、plugins 上传目录）**留在卷里（卷赢）**。新增数据文件只改仓库 + 镜像，禁止再用 docker cp 手工塞。
+- **数据文件升级语义（data 卷遮蔽根治）**：`data/` 下的数据源文件（metrics.json、onboard_config.json、integrations/ 插件包）**随镜像版本走（镜像赢）**，由 entrypoint 每次启动从 `/opt/l0-seed/` 同步到卷；运行态产物（plugins 上传目录、sync_report）**留在卷里（卷赢）**。新增数据文件只改仓库 + 镜像，禁止再用 docker cp 手工塞。目录库数据不在卷里，由 `pg-data` 卷承载。
 
 ## 红线 2：业务代码禁止写死环境地址、端口、凭据、演示数据
 

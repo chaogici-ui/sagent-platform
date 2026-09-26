@@ -12,6 +12,9 @@ networks:
 
 services:
   # ==================== L0 中心 ====================
+  # 架构 P2 VM-HA：victoriametrics 存储多副本（默认组合 1A 单节点复制副本 replicationFactor 语义）。
+  # 写面：vmagent 经 remoteWrite 多端点把全量写入主/副本两实例（vm-ha 各持全量副本，单存储 down 不静默丢）；
+  # 读面就近任一副本可查。双方加 dedup.minScrapeInterval=10s 合并双 vmagent 对同一序列的重叠采样点（M3 去重）。
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.93.0
     container_name: l0-victoriametrics
@@ -23,8 +26,49 @@ services:
       - "--storageDataPath=/storage"
       - "--retentionPeriod=30d"
       - "--httpListenAddr=:8428"
+      - "--dedup.minScrapeInterval=10s"
     volumes:
       - vm-storage:/storage
+    restart: unless-stopped
+
+  # VM-HA M1 存储副本：与主同镜像同参数，独立存储卷，仅内网可达（读面仲裁/就近副本）。
+  victoriametrics-ha:
+    image: victoriametrics/victoria-metrics:v1.93.0
+    container_name: l0-victoriametrics-ha
+    networks:
+      - l0-net  # 不映射宿主端口：写面经 vmagent remoteWrite 内部写入；读面由 l0-console 按需可达
+    command:
+      - "--storageDataPath=/storage"
+      - "--retentionPeriod=30d"
+      - "--httpListenAddr=:8428"
+      - "--dedup.minScrapeInterval=10s"
+    volumes:
+      - vm-storage-ha:/storage
+    restart: unless-stopped
+
+  # ==================== L0 状态库 PostgreSQL（架构 D1：唯一载体） ====================
+  # 目录库已全面 PG，不再有 SQLite 回退：l0-console 的 CATALOG_DSN 为必填，缺配置快速失败。
+  # 端口只绑回环：宿主 `go test` 需要连 PG（单测载体已改 PG），但 PG 不对外网暴露。
+  postgres:
+    image: postgres:16-alpine
+    container_name: l0-postgres
+    networks:
+      - l0-net
+    ports:
+      - "127.0.0.1:${PG_HOST_PORT:-55432}:5432"
+    environment:
+      - POSTGRES_USER=${PG_USER:-sagent}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-sagent}
+      - POSTGRES_DB=${PG_DB:-sagent}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # 首次初始化（空数据卷）时建单测库 sagent_test：宿主 go test 用它 + 每用例独立 schema
+      - ./configs/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-sagent} -d ${PG_DB:-sagent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
   grafana:
@@ -41,6 +85,37 @@ services:
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./configs/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./configs/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+
+  # ==================== L0 告警规则层（架构 3.4 可监控 · ALERT-1） ====================
+  # vmalert 对平台自监控指标 sagent_l0_* 做规则化求值，把窗控面失联/catalog 不可达/
+  # 内部活跃告警/Agent 多数离线转成 Prometheus 级告警；firing 的告警以 ALERTS 系列回写
+  # victoriametrics，VM/Grafana/Alertmanager 可直接编排（静默/升级/聚合）。
+  # 不依赖 Alertmanager：无 -notifier.url 时仍把 ALERTS 序列 remote-write 回 VM，自包含闭环。
+  # 8880 为 vmalert 求值 UI/查看端点（operator 排障用）。
+  # 命名：归 L0（只挂 l0-net，datasource/remoteWrite 均指 l0-net 的 victoriametrics）——
+  # 原 `l1-vmalert` 名字与网域不符，易被误读为采集机组件。
+  l0-vmalert:
+    image: victoriametrics/vmalert:v1.93.0
+    container_name: l0-vmalert
+    networks:
+      - l0-net
+    ports:
+      - "8880:8880"
+    command:
+      - "-rule=/etc/vmalert/rules.yml"
+      - "-datasource.url=http://victoriametrics:8428"
+      - "-remoteWrite.url=http://victoriametrics:8428"
+      - "-httpListenAddr=:8880"
+      - "-evaluationInterval=15s"
+      # 通知落点由 L0 内部告警中心(alert.go) 负责，本 vmalert 仅做规则化求值 + 把 ALERTS
+      # 系列 remote-write 回 VM 供 Grafana 编排；blackhole 丢弃出站通知以消除启动对 notifier 的要求。
+      - "-notifier.blackhole=true"
+    volumes:
+      - ./configs/vmalert:/etc/vmalert:ro
     restart: unless-stopped
     depends_on:
       - victoriametrics
@@ -68,35 +143,234 @@ services:
       - AGENT_CONTAINER_PREFIX=l1-
       - L0_NET=docker_l0-net
       - AGENT_HTTP_PORT=19090
+      # 架构 D1：L0 状态存储唯一载体 PostgreSQL（SQLite 回退已移除，置空则启动快速失败）。
+      # 演示环境由 .env 注入；生产按实际库地址覆盖。
+      - CATALOG_DSN=${CATALOG_DSN:-}
+      # 架构 D5 IN5 B3/B4 灰度开关（D8）：执行端总开关，作用于「支持集」内的 atom
+      #   inprocess（默认）= 进程内起 ansible 作业（旧路径，可随时回滚）
+      #   runner          = 投递 L1 Ansible Runner（执行面搬到 L1 后唯一路径）
+      # 支持集：install（B3）+ 卸载侧四步 scan_collectors/uninstall_plugins/cleanup_autostart/uninstall（B4）
+      # 默认 inprocess 是刻意的：开关的语义是"敢不敢切"，切错必须能一句话切回。
+      - L1_EXEC_EXECUTOR=${L1_EXEC_EXECUTOR:-inprocess}
+      # B3 期的旧开关名：仅在上面的总开关未设置时兜底，避免两处同时生效互相打架。
+      - L1_INSTALL_EXECUTOR=${L1_INSTALL_EXECUTOR:-inprocess}
+      # 接收安装任务的 L1 执行端身份：投递端（本进程）与 Runner 侧必须一致，
+      # 不一致任务会永远停在 pending（灰度期最易踩的坑，故两端共用同一环境变量与默认值）
+      - L1_ANSIBLE_RUNNER_ID=${L1_ANSIBLE_RUNNER_ID:-l1-ansible-runner-1}
     volumes:
       - catalog-data:/home/deploy/l0-console/data
-      # 本机 docker.sock：l0-console 借此探测 l1-* 演示 Agent 的真实容器状态
-      - /Users/gici/.docker/run/docker.sock:/var/run/docker.sock
+      # 采集目标登记（file_sd）：安装作业写入这里，vmagent 同挂此目录自动热加载。
+      # 用宿主机 bind mount——嵌套命名卷在 Docker Desktop 上 root 无法 chown（曾踩）
+      - ./configs/scrape-sd:/home/deploy/l0-console/data/scrape-sd
+      # 本机 docker.sock：l0-console 借此探测 l1-* 演示 Agent 的真实容器状态。
+      # 路径随宿主而变（Docker Desktop/macOS 为 ~/.docker/run/docker.sock），走 .env 的 DOCKER_SOCK
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     # socket 属 root 组（660），补充 root 组获得读写权
     group_add:
       - "0"
     restart: unless-stopped
     depends_on:
       - victoriametrics
+      - postgres
 
-  # ==================== L1 vmagent 汇聚层 ====================
+  # ==================== L1 独立 Package Cache 进程（架构 D5 IN1） ====================
+  # 复用 l0-console 镜像，以 `-package-cache` 模式起独立进程：不建 DB、不起 console，
+  # 只加载版本清单 + 起 package-cache HTTP（/api/package-cache/* + /v1/package-cache/resolve）。
+  # 与 l0-console 共享 catalog-data 卷（data/binaries + versions.yaml 种子 + packages 缓存）。
+  # 网络域：属 L1 采集机（仅 l1-net）——就近取包是 L1 侧执行器经共享卷落盘取用，不走 HTTP 回 L0，
+  # 故 L0 侧无需可达：L1_PACKAGE_CACHE_URL 保持缺省（安装走进程内 resolveInstallBinary，红线语义一致）；
+  # Gateway 白名单亦刻意不含 /api/package-cache/*（避免 Gateway 沦为任意端点代理，见 gateway_test.go）。
+  l1-package-cache:
+    image: docker-l0-console
+    container_name: l1-package-cache
+    command: ["-package-cache"]
+    networks:
+      - l1-net
+    ports:
+      - "8450:8450"
+    environment:
+      - PACKAGE_CACHE_LISTEN=:8450
+      - L1_PACKAGE_CACHE=/home/deploy/l0-console/data/packages
+    volumes:
+      - catalog-data:/home/deploy/l0-console/data
+    restart: unless-stopped
+    depends_on:
+      - l0-console
+
+  # ==================== L1 Gateway SAgent 通道汇聚中继（架构 D5 IN2） ====================
+  # 复用 l0-console 镜像，以 `-gateway` 模式起独立进程：无状态反向中继（不建 DB、不起 console），
+  # 把本资源池 SAgent 的注册/心跳/接入证据转发给上游 L1 Controller——
+  # 实现「万台 SAgent 只打通到本采集机、不直连 L0」的网络安全域收敛（控制面汇聚的第一跳）。
+  # 网络域：只挂 l1-net——控制面出口收敛到 Controller 后，面向半可信 SAgent 的中继进程
+  # **不持有 L0 可达**（攻击面分离）。白名单只收 SAgent 通道（/api/agent/* + 证据回报 +
+  # 任务回执 /api/l1/task/ack），数据面不经此。
+  l1-gateway:
+    image: docker-l0-console
+    container_name: l1-gateway
+    command: ["-gateway"]
+    networks:
+      - l1-net
+    ports:
+      - "8460:8460"
+    environment:
+      - L1_GATEWAY_LISTEN=:8460
+      - L1_CONTROLLER_URL=http://l1-controller:8461
+    restart: unless-stopped
+    depends_on:
+      - l1-controller
+
+  # ==================== L1 Controller 控制面唯一出口 + 任务分流（架构 D5 IN3） ====================
+  # 复用 l0-console 镜像，以 `-controller` 模式起独立进程：直连 L0 拉任务 → 按 kind 分流决策
+  # （controller 自处理 / ansible→AnsibleRunner(IN4) / agent→经 Gateway 下发）→ 回执终态；
+  # 同时挂中继入口承接 Gateway 汇聚来的 SAgent 通道与 L1 内部组件的任务拉取。
+  # 网络域：**唯一双挂的控制面进程**（l0-net + l1-net）——控制面流量在 L1 侧汇聚后由它出网，
+  # 出口只有一个：Gateway/AnsibleRunner 都只挂 l1-net，上游指本进程。
+  # 执行器（Ansible/Gateway 独立接线）属 IN4/G2。
+  l1-controller:
+    image: docker-l0-console
+    container_name: l1-controller
+    command: ["-controller"]
+    networks:
+      - l0-net
+      - l1-net
+    ports:
+      - "8461:8461"
+    environment:
+      - L1_CONTROLLER_ID=l1-controller-1
+      - L1_CONTROLLER_LISTEN=:8461
+      - L1_CONTROLLER_LOOP_MS=3000
+      # 出口直连 L0（不经中继）；该地址同时是中继入口的上游
+      - L0_CONSOLE_URL=http://l0-console:8080
+    restart: unless-stopped
+    depends_on:
+      - l0-console
+
+  # ==================== L1 Ansible Runner 安装执行器（架构 D5 IN4） ====================
+  # 复用 l0-console 镜像，以 `-ansible-runner` 模式起独立进程（进程 #4）：反向经 L1 Controller
+  # 拉安装任务 → 本地执行 playbook（就近取包/语法门禁/流式执行与 L0 同语义）→ 回执终态。
+  # 与 l0-console 共享 catalog-data 卷（data/binaries + playbooks + packages 缓存），
+  # 使 Runner 可就近取包安装（L1_PACKAGE_CACHE 与 l0-console 安装侧同根）。
+  # 网络域：正常态只挂 l1-net——拉任务/回执经 L1 Controller 出网（`/api/l1/task/{pull,ack}` 在
+  # controllerControlPaths 白名单内）；且需从 l1-net 直连被管主机（sagent-host）执行安装。
+  #
+  # ⚠ B3 验证期临时偏离（B5 收口即删）：额外双挂 l0-net。
+  # 原因：本阶段 install 已搬 Runner（走 l1-net），而 preflight_host 探路仍在 L0 进程内（走 l0-net），
+  # 台账 `resources` 只有单一 IP 字段——单一地址无法同时被 L0 与 Runner 可达（Docker bridge 互隔离）。
+  # SPEC「主机暂留 l0-net 双挂」不足：主机若搬 l1-net，L0 进程内探路当场断链（探路属 B4 才搬）。
+  # 故验证期改为「主机留在 l0-net + Runner 临时双挂 l0-net」，共享 L0 对同一 IP 的可达性；
+  # 主机 IP/台账零改动，L0 进程内探路不受影响，切回 inprocess 亦可回滚。B5 主机搬 l1-net 后删此行。
+  l1-ansible-runner:
+    image: docker-l0-console
+    container_name: l1-ansible-runner
+    command: ["-ansible-runner"]
+    networks:
+      - l1-net
+      - l0-net
+    ports:
+      - "8462:8462"
+    environment:
+      - L1_ANSIBLE_RUNNER_ID=l1-ansible-runner-1
+      - L1_ANSIBLE_RUNNER_LISTEN=:8462
+      - L1_ANSIBLE_RUNNER_LOOP_MS=3000
+      - L1_CONTROLLER_URL=http://l1-controller:8461
+      - L1_PACKAGE_CACHE=/home/deploy/l0-console/data/packages
+      - AGENT_HOME_ROOT=/home
+    volumes:
+      - catalog-data:/home/deploy/l0-console/data
+    restart: unless-stopped
+    depends_on:
+      - l1-controller
+
+  # ==================== 目标机（模拟真实业务主机，SAgent 接入靶机） ====================
+  # 独立干净主机：sshd + python3，静态 IP 挂 l0-net（平台同网段可达，ansible 直连）；
+  # 不预装任何 SAgent 产物——探路/安装全走平台 ansible 执行器。凭据 .env 可覆盖
+  # 注意（B 段待办，见 SPEC-D5-IN5）：构建上下文目录已改名为 sagent-host；服务名/容器名
+  # 改名 + 搬 l1-net(10.20.0.20) 需与「执行面搬迁」同步进行，否则 L0 失去目标机可达、
+  # 探路/安装/卸载/升级/启停全线断链。此处仅先修正构建路径，拓扑不动。
+  vm-host:
+    build:
+      context: ./sagent-host
+      dockerfile: Dockerfile
+    container_name: vm-host-1
+    hostname: vm-host-1
+    networks:
+      l0-net:
+        ipv4_address: 10.10.0.20
+    environment:
+      - SSH_DEPLOY_PASSWORD=${SSH_DEPLOY_PASSWORD:?请在 deploy/docker/.env 设置 SSH_DEPLOY_PASSWORD（vm-host 演示主机的 deploy 账号口令）}
+    restart: unless-stopped
+
+  # ==================== L1 vmagent 汇聚层（架构 P2 VM-HA M2：多副本 + 多端点） ====================
   vmagent:
     image: victoriametrics/vmagent:v1.93.0
     container_name: l1-vmagent
     networks:
       l1-net:
       l0-net:
+    # VM-HA 多端点：remoteWrite.url 并列主/副本两存储端点，全量双写（非仅 fallback）→ 单存储 down 数据仍在另一实例；
+    # 两个 vmagent 副本（本机 + vmagent-ha）对同一序列的重叠采样点由存储侧 dedup.minScrapeInterval 合并。
     command:
       - "--promscrape.config=/etc/vmagent/scrape.yml"
-      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write"
+      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write,http://victoriametrics-ha:8428/api/v1/write"
       - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
       - "--remoteWrite.maxDiskUsagePerURL=2GB"
     volumes:
       - ./configs/vmagent:/etc/vmagent:ro
+      # 接入流水线自动登记的抓取目标（l0-console 安装作业写入，热加载）
+      # 注意：不能挂 /etc/vmagent/sd —— 父目录是 ro bind mount，建不了挂点
+      - ./configs/scrape-sd:/etc/vmagent-sd:ro
       - vmagent-buffer:/tmp/vmagent-buffer
     restart: unless-stopped
     depends_on:
       - victoriametrics
+      - victoriametrics-ha
+      - vmauth
+
+  # VM-HA M2 vmagent 副本：与主同 scrape 配置，独立缓冲卷（解决共享缓冲多进程写冲突，归 4B 每副本缓冲）。
+  # 双 vmagent 各拉全量 → 各双写两存储 → 存储侧 dedup 合并，实现"单 vmagent/单存储 down 均不静默丢"。
+  vmagent-ha:
+    image: victoriametrics/vmagent:v1.93.0
+    container_name: l1-vmagent-ha
+    networks:
+      l1-net:
+      l0-net:
+    command:
+      - "--promscrape.config=/etc/vmagent/scrape.yml"
+      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write,http://victoriametrics-ha:8428/api/v1/write"
+      - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
+      - "--remoteWrite.maxDiskUsagePerURL=2GB"
+    volumes:
+      - ./configs/vmagent:/etc/vmagent:ro
+      - ./configs/scrape-sd:/etc/vmagent-sd:ro
+      - vmagent-buffer-ha:/tmp/vmagent-buffer
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+      - victoriametrics-ha
+      - vmauth
+
+  # ==================== L1 vmauth 单端口收口（架构 D4） ====================
+  # 数据面安全核心：对外只暴露 8427 一个受鉴权端口，按 path 白名单收敛各 SAgent /metrics；
+  # 未带 Authorization: Bearer 的 curl/扫描一律 401，拿不到任何 metric（"curl 不暴露采集数据"）。
+  vmauth:
+    image: victoriametrics/vmauth:v1.93.0
+    container_name: l1-vmauth
+    networks:
+      - l1-net
+    ports:
+      # 仅本机可达：vmauth 单端口暴露给运维/排障，公网抓取一律经此而非直连 SAgent
+      - "8427:8427"
+    command:
+      - "--auth.config=/etc/vmauth/auth.yaml"
+      - "--httpListenAddr=:8427"
+    volumes:
+      - ./configs/vmauth:/etc/vmauth:ro
+    restart: unless-stopped
+    depends_on:
+      - sagent-1
+      - sagent-2
+      - sagent-proxy
+      - sagent-proxy-2
 
   # ==================== L1 SAgent 采集节点 ====================
   sagent-1:
@@ -108,12 +382,15 @@ services:
     networks:
       - l1-net
     environment:
+      # 网络域收敛末环：控制通道（注册/心跳/证据回传）正式经 l1-gateway 汇聚，对齐「SAgent 不直连 L0」。
+      - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
       - SAGENT_RESOURCE_ID=order.prod.host.sagent-1
       - SAGENT_RESOURCE_TYPE=host
       - SAGENT_BUSINESS_SYSTEM=order
       - SAGENT_ENV=prod
       - SAGENT_IDC=idc-a
       - SAGENT_CLUSTER=docker-cluster
+      - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
     volumes:
       - ./configs/sagent/sagent-1.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
       - sagent-1-data:/home/deploy/SAgent/data
@@ -134,12 +411,15 @@ services:
     networks:
       - l1-net
     environment:
+      # 网络域收敛末环：控制通道正式经 l1-gateway 汇聚
+      - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
       - SAGENT_RESOURCE_ID=order.prod.host.sagent-2
       - SAGENT_RESOURCE_TYPE=host
       - SAGENT_BUSINESS_SYSTEM=order
       - SAGENT_ENV=prod
       - SAGENT_IDC=idc-a
       - SAGENT_CLUSTER=docker-cluster
+      - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
     volumes:
       - ./configs/sagent/sagent-2.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
       - sagent-2-data:/home/deploy/SAgent/data
@@ -158,7 +438,7 @@ services:
     networks:
       - l1-net
     environment:
-      MYSQL_ROOT_PASSWORD: sagent_test
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 deploy/docker/.env 设置 MYSQL_ROOT_PASSWORD（MySQL 测试容器口令）}
       MYSQL_DATABASE: testdb
     volumes:
       - mysql-1-data:/var/lib/mysql
@@ -175,7 +455,7 @@ services:
     networks:
       - l1-net
     environment:
-      MYSQL_ROOT_PASSWORD: sagent_test
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 deploy/docker/.env 设置 MYSQL_ROOT_PASSWORD（MySQL 测试容器口令）}
       MYSQL_DATABASE: testdb
     volumes:
       - mysql-2-data:/var/lib/mysql
@@ -196,12 +476,15 @@ services:
     networks:
       - l1-net
     environment:
+      # 网络域收敛末环：控制通道正式经 l1-gateway 汇聚
+      - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
       - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-01
       - SAGENT_RESOURCE_TYPE=collector_proxy
       - SAGENT_BUSINESS_SYSTEM=order
       - SAGENT_ENV=prod
       - SAGENT_IDC=idc-a
       - SAGENT_CLUSTER=docker-cluster
+      - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
     volumes:
       - ./configs/sagent/sagent-proxy.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
       - sagent-proxy-data:/home/deploy/SAgent/data
@@ -213,13 +496,78 @@ services:
       retries: 3
       start_period: 5s
 
+  # 同池第二台采集机：池内健康 ≥2 才有承接方（单台故障无处可漂）。备用承载端，不重复采集业务目标。
+  sagent-proxy-2:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-proxy-2
+    hostname: sagent-proxy-2
+    networks:
+      - l1-net
+    environment:
+      - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+      - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-02
+      - SAGENT_RESOURCE_TYPE=collector_proxy
+      - SAGENT_BUSINESS_SYSTEM=order
+      - SAGENT_ENV=prod
+      - SAGENT_IDC=idc-a
+      - SAGENT_CLUSTER=docker-cluster
+      - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
+    volumes:
+      - ./configs/sagent/sagent-proxy-2.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+      - sagent-proxy-2-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:19090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # 同池第三台采集机：G6 保护要求「池内健康承接端 ≥2」，池仅 2 台时一台故障后只剩 1 台健康，
+  # 会被判池内不足（只告警不迁移）而无法演示自动漂移；补齐第 3 台后一台故障仍有 2 台可承接。
+  # 同为备用承载端，不重复采集业务目标。
+  sagent-proxy-3:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-proxy-3
+    hostname: sagent-proxy-3
+    networks:
+      - l1-net
+    environment:
+      - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+      - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-03
+      - SAGENT_RESOURCE_TYPE=collector_proxy
+      - SAGENT_BUSINESS_SYSTEM=order
+      - SAGENT_ENV=prod
+      - SAGENT_IDC=idc-a
+      - SAGENT_CLUSTER=docker-cluster
+      - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
+    volumes:
+      - ./configs/sagent/sagent-proxy-3.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+      - sagent-proxy-3-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:19090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
 volumes:
   vm-storage:
+  vm-storage-ha:
   grafana-storage:
   catalog-data:
+  pg-data:
   vmagent-buffer:
+  vmagent-buffer-ha:
   sagent-1-data:
   sagent-2-data:
   sagent-proxy-data:
+  sagent-proxy-2-data:
+  sagent-proxy-3-data:
   mysql-1-data:
   mysql-2-data:

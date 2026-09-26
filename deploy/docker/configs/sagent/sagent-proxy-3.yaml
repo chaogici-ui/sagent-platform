@@ -1,0 +1,27 @@
+# SAgent Core 配置 — Collector Proxy（同池第三台采集机）
+# 存在的意义：G6 保护要求「池内健康承接端 ≥2」才允许漂移；池只有 2 台时，一台故障后仅剩 1 台健康，
+# 会被判池内不足（只告警不迁移），无法演示自动漂移。SPEC 亦约定「每池 3-5 台」。
+# 本机为「备用承载端」：只跑主机自监控（证明自身活着、可被选为承接方），不重复采集业务目标，
+# 待属主采集机失效、归属迁移到本机后再由平台下发承接配置。
+server:
+  listen: ":19090"
+
+resource:
+  id: "order.prod.mysql.proxy-03"
+  type: "collector_proxy"
+  business_system: "order"
+  env: "prod"
+  idc: "idc-a"
+  cluster: "docker-cluster"
+  # 与 proxy-01/proxy-02 同池（cn-east）：同池才互为故障承接方
+  pool: "cn-east"
+  region: "cn-east"
+
+plugins:
+  host_metrics:
+    enabled: true
+    interval: 30s
+  log_metrics:
+    enabled: false
+  mysql_probe:
+    enabled: false

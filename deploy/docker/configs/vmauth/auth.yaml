@@ -1,0 +1,56 @@
+# vmauth 单端口收敛配置（架构 D4：数据面端口收口）
+#
+# 设计依据：PLAN-架构设计与高可用运维方案.md §3.1-C "端口收口方案（已定：vmauth 单端口）"
+#   - 对外只暴露 1 个受鉴权端口(8427)；未带 auth_key 的 curl/扫描一律 401，返回不了任何 metric
+#   - 按 path 白名单路由到各 SAgent /metrics，未命中白名单的 path 一律 401/404（防路径探测/防绕过）
+#   - 兼容远程 PaaS 采集跨机收敛（path 前缀为扩展点）
+#
+# 鉴权（双层纵深，符合"curl 不暴露采集数据"红线）：
+#   1) vmauth 入口鉴权：客户端(vmagent)必须带 Authorization: Bearer <key>，否则 vmauth 直接 401——
+#      这是最外层防护，curl localhost:8427/... 拿不到任何 metric
+#   2) 后端 SAgent /metrics 鉴权：vmauth 转发时注入 SAgent 所需 Bearer——
+#      即便绕过 vmauth 直连 SAgent:19090，SAgent 侧(架构D4本地校验层 B9)仍 401
+#   vmagent 抓取链：vmagent --Bearer--> vmauth:8427 --注入Bearer--> SAgent:19090/sagent-N/metrics
+#
+# v1.93 说明：当前 vmauth 镜像为 v1.93，URLMap 不支持 drop_src_path_prefix_parts（剥前缀），
+# 转发时保留完整 src path。因此 SAgent 侧新增 /sagent-{name}/metrics 前缀路由配合（见
+# server.go D4 注释），vmauth 把 /sagent-N/metrics 原样转发到 SAgent:19090/sagent-N/metrics 命中。
+# 未来若升级 vmauth（支持剥前缀），可改为 src_paths:"/sagent-1/.*"+drop_src_path_prefix_parts:1
+# +url_prefix:"http://sagent-1:19090" 实现根路径 /metrics 直达，无需 SAgent 前缀路由。
+#
+# 注意：VictoriaMetrics 组件不展开配置文件中的 ${VAR} 环境变量，此处内联实际密钥。
+# 密钥与 SAgent 的 SAGENT_METRICS_AUTH_KEY（compose env）保持一致，生产轮换时三处同步：
+#   ① deploy/docker/configs/scrape.yml 的 bearer_token  ② 本文件 bearer_token/headers
+#   ③ SAGENT_METRICS_AUTH_KEY 环境变量
+users:
+  - bearer_token: "demo-d4-bearer"
+    # url_map 即 path 白名单：仅放行明确列出的 SAgent 前缀 /metrics，其余路径一律拒绝（防路径探测/防绕过）。
+    url_map:
+      - src_paths:
+          - "/sagent-1/metrics"
+        url_prefix: "http://sagent-1:19090"
+        headers:
+          - "Authorization: Bearer demo-d4-bearer"
+      - src_paths:
+          - "/sagent-2/metrics"
+        url_prefix: "http://sagent-2:19090"
+        headers:
+          - "Authorization: Bearer demo-d4-bearer"
+      - src_paths:
+          - "/sagent-proxy/metrics"
+        url_prefix: "http://sagent-proxy:19090"
+        headers:
+          - "Authorization: Bearer demo-d4-bearer"
+      - src_paths:
+          - "/sagent-proxy-2/metrics"
+        url_prefix: "http://sagent-proxy-2:19090"
+        headers:
+          - "Authorization: Bearer demo-d4-bearer"
+      - src_paths:
+          - "/sagent-proxy-3/metrics"
+        url_prefix: "http://sagent-proxy-3:19090"
+        headers:
+          - "Authorization: Bearer demo-d4-bearer"
+  # 未来：接入流水线登记的真实靶机(file_sd)同样在此追加 /file-sd/{ip}/metrics -> ip:19090 白名单项
+  # 即可把远程主机收口到同一 vmauth 单端口，此为 path 前缀扩展点，本期聚焦 compose 托管的 SAgent
+  # （sagent-1/2 + sagent-proxy/-2/-3，其中 proxy-* 为 cn-east 池的 3 台采集机）。

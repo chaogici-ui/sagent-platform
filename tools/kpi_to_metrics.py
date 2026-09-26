@@ -5,10 +5,15 @@
 #   - 中间层/容器 37 项 → plugin=docker_metrics，phase=2（二期实现，本期只进目录）
 #   - expression 存纯指标名（图表查询用）；计算公式进 note（展示口径）
 #   - cat 取采集分组中文名（与 Agent 分组注册表对齐）；level/major/category 为 KPI 表层级三列
-import json, sys, io
+import json, sys, io, os
 
-SRC = "/Users/gici/Downloads/sagent-host-kpi.txt"
-DST = "/Users/gici/代码/SAgent/code/l0-console/data/metrics.json"
+# 源 KPI 表与目标 metrics.json 都从参数/环境变量取，默认落在仓库内相对路径——
+# 不再写死任何用户目录（KPI_SRC 也可用第一个命令行参数给出）
+SRC = os.environ.get("KPI_SRC") or (sys.argv[1] if len(sys.argv) > 1 else "")
+if not SRC:
+    sys.exit("用法：kpi_to_metrics.py <KPI 标准表路径>（或用环境变量 KPI_SRC 指定）")
+DST = os.environ.get("KPI_DST") or os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "l0-console", "data", "metrics.json"))
 
 # 分组 key + 中文名（与 sagent/internal/plugin/builtin/host_metrics.go 注册表一致）
 def group_of(name):

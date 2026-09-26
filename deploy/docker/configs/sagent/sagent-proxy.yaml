@@ -9,6 +9,9 @@ resource:
   env: "prod"
   idc: "idc-a"
   cluster: "docker-cluster"
+  # 采集机池归属（HA 漂移边界）：同池采集机互为故障承接方，池内健康 <2 台则不可漂移（只告警）
+  pool: "cn-east"
+  region: "cn-east"
 
 plugins:
   host_metrics:
