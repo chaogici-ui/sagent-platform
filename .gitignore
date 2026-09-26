@@ -31,3 +31,5 @@ deploy/docker/.env
 
 # SAgent 版本上传的编译产物（运行态生成，构建可复现）
 l0-console/data/binaries/
+# 本地编译二进制
+l0-console/l0-console
