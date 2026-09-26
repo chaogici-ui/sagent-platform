@@ -1,10 +1,19 @@
-# 运行态产物（目录库由启动引导全量重建：Sync integrations + metrics.json 种子 + 系统插件行）
-l0-console/data/catalog.db
-l0-console/data/catalog.db-wal
-l0-console/data/catalog.db-shm
+# 运行态产物（目录库为 PG，启动引导全量重建：Sync integrations + metrics.json 种子 + 系统插件行）
 l0-console/data/plugins.json
 l0-console/data/plugins/upload/
 l0-console/data/sync_report.json
+
+# 交叉编译产物与备份文件（不得入库）
+sagent/bin/*.exe
+sagent/bin/SAgent
+sagent/bin/SAgent-linux
+l0-console/bin/
+# L1 四进程 tar.gz 构建产物（scripts/build-l1-bundle.sh 输出）
+dist/
+l1-edge-4proc-*.tar.gz
+*.bak
+*.sock
+*.gz
 
 # 本地临时文件
 *.log
@@ -16,3 +25,9 @@ deploy/docker/.env
 
 # WorkBuddy 会话数据
 .workbuddy/
+
+# Trae HTML 分享包（临时产物）
+.trae-html-share-packages/
+
+# SAgent 版本上传的编译产物（运行态生成，构建可复现）
+l0-console/data/binaries/
