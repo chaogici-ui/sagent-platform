@@ -1,21 +1,27 @@
 package store
 
 import (
-	"path/filepath"
+	"fmt"
 	"testing"
+
+	"github.com/sagent/l0-console/internal/testpg"
 )
 
-// openTestDB 打开临时 SQLite（随进程结束自动清理目录）
+// openTestDB 打开隔离 schema 的 PG 目录库（架构 D1：目录库唯一载体 PG）。
+// 每个用例一个独立 schema，等价于 SQLite 时代的 t.TempDir() 隔离口径：
+// 用例乱序/并发/重复跑都不互相污染。CATALOG_TEST_DSN 未设置时用例跳过。
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := OpenPostgres(testpg.Provision(t))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	// fleet 三表（agents/targets/agent_config）由 InitFleet 显式建表（main 启动引导同款路径）
-	if err := db.InitFleet(); err != nil {
-		t.Fatalf("InitFleet: %v", err)
+	// 建齐全部业务表（main 启动引导同款路径）；单测不挑表，避免漏建造成偶发红
+	for _, init := range []func() error{db.InitFleet, db.InitOnboard, db.InitL1Tasks, db.InitRelocations} {
+		if err := init(); err != nil {
+			t.Fatalf("init test db: %v", err)
+		}
 	}
 	return db
 }
@@ -87,5 +93,113 @@ func TestAgentConfigVersionChain(t *testing.T) {
 	// GetAgentSource：未注册返回空，注册后可读
 	if src, _ := db.GetAgentSource("agent-x"); src != "" {
 		t.Fatalf("unregistered agent should have empty source, got %q", src)
+	}
+}
+
+func TestAgentConfigConcurrentWritesHaveUniqueVersions(t *testing.T) {
+	db := openTestDB(t)
+	if _, _, err := db.SetAgentConfig("agent-concurrent", `{"initial":true}`); err != nil {
+		t.Fatal(err)
+	}
+	const writers = 32
+	type result struct {
+		version int
+		changed bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, writers)
+	for i := range writers {
+		go func() {
+			<-start
+			version, changed, err := db.SetAgentConfig("agent-concurrent", fmt.Sprintf(`{"sequence":%d}`, i))
+			results <- result{version, changed, err}
+		}()
+	}
+	close(start)
+	versions := make(map[int]bool, writers)
+	for range writers {
+		r := <-results
+		if r.err != nil || !r.changed {
+			t.Errorf("distinct write: version=%d changed=%t err=%v", r.version, r.changed, r.err)
+		}
+		if versions[r.version] {
+			t.Errorf("different contents received the same version %d", r.version)
+		}
+		versions[r.version] = true
+	}
+	version, _, err := db.GetAgentConfig("agent-concurrent")
+	if err != nil || version != writers+1 {
+		t.Fatalf("latest version=%d, want %d; err=%v", version, writers+1, err)
+	}
+}
+
+func TestAgentConfigConcurrentIdenticalCreationIsIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	const writers = 16
+	type result struct {
+		version int
+		changed bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, writers)
+	for range writers {
+		go func() {
+			<-start
+			version, changed, err := db.SetAgentConfig("agent-new", `{"targets":[]}`)
+			results <- result{version, changed, err}
+		}()
+	}
+	close(start)
+	changes := 0
+	for range writers {
+		r := <-results
+		if r.err != nil || r.version != 1 {
+			t.Errorf("identical write: version=%d err=%v", r.version, r.err)
+		}
+		if r.changed {
+			changes++
+		}
+	}
+	if changes != 1 {
+		t.Fatalf("content changed %d times, want 1", changes)
+	}
+}
+
+// 资源删除（2026-09-21 用户要求补 API）：删行如实回报；活跃流水线守卫计数只算未终态
+func TestDeleteResourceAndActiveFlowGuard(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.InitOnboard(); err != nil {
+		t.Fatalf("InitOnboard: %v", err)
+	}
+
+	if err := db.UpsertResource(&Resource{ID: "res-a", IP: "10.0.0.1"}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	// 判空守卫的边界：先建一条终态流水线，不应阻止删除
+	if _, err := db.CreateFlow(&Flow{ResourceID: "res-a", Mode: "edge", Status: "done"}); err != nil {
+		t.Fatalf("CreateFlow(done): %v", err)
+	}
+	if n, _ := db.CountActiveFlowsByResource("res-a"); n != 0 {
+		t.Fatalf("终态流水线不应计入活跃数，实际 %d", n)
+	}
+
+	// blocked（未终态）流水线计入活跃数
+	if _, err := db.CreateFlow(&Flow{ResourceID: "res-a", Mode: "edge", Status: "blocked"}); err != nil {
+		t.Fatalf("CreateFlow(blocked): %v", err)
+	}
+	if n, _ := db.CountActiveFlowsByResource("res-a"); n != 1 {
+		t.Fatalf("blocked 流水线应计入活跃数，实际 %d", n)
+	}
+
+	// 真删除：RowsAffected 如实回报
+	ok, err := db.DeleteResource("res-a")
+	if err != nil || !ok {
+		t.Fatalf("DeleteResource 应成功，实际 ok=%v err=%v", ok, err)
+	}
+	// 再删同一 id：必须报"不存在"，不许静默成功
+	if ok, _ := db.DeleteResource("res-a"); ok {
+		t.Fatalf("重复删除应返回 false（不存在）")
 	}
 }

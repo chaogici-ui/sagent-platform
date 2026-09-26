@@ -1,0 +1,47 @@
+# Elasticsearch 采集参数声明（L3 层：随插件包走，平台读它渲染表单）
+plugin: elasticsearch_exporter
+title: Elasticsearch 采集参数
+fields:
+  - name: address
+    label: 目标地址
+    type: string
+    required: true
+    placeholder: http://10.20.30.43:9200
+    probe: tcp
+    help: 从代理机可达的地址，不是从浏览器可达
+
+  - name: port
+    label: 端口
+    type: int
+    default: 9200
+    required: true
+    probe: tcp
+
+  - name: mode
+    label: 部署形态
+    type: enum
+    options: [single, cluster]
+    default: single
+
+  - name: username
+    label: 认证用户名
+    type: string
+    required: false
+    help: 未开启认证时留空
+
+  - name: password
+    label: 认证口令
+    type: secret
+    required: false
+    help: 未开启认证时留空
+
+  - name: interval
+    label: 采集频率
+    type: duration
+    default: 30s
+    help: 不低于 5s
+
+  - name: extra_labels
+    label: 附加标签
+    type: kv
+    help: 形如 env=prod,app=order，逗号分隔

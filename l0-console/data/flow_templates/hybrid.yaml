@@ -1,0 +1,101 @@
+# 混合场景：同一台主机既装边缘 SAgent（采本机），又当远程采集代理机
+# 定序规则（声明先行、地基先落、能力并行）：
+#   1. 先把"采什么 + 参数"声明清楚 —— 探路要按声明的参数核对，声明在探路之前
+#   2. 探路一次做完主机事实与能力可行性（装 Agent 之前），探不通就地拦住
+#   3. Agent 必须先装 —— 不装它，后面所有插件与采集动作无处落地
+#   4. 自监控紧跟 Agent、先于任何插件 —— 它是"这台机器活着"的唯一证据
+#   5. 边缘能力与远程能力之间无依赖 —— 谁先都一样，界面勾选，后端并行分支
+#   6. 二次进入跳过地基段 —— 这就是"接入过"分支
+id: hybrid
+name: 混合采集
+description: 主机既装边缘 SAgent 采本机，又作为远程采集代理机
+steps:
+  - id: pick_object
+    atom: pick_object
+    title: 选择资源对象
+    scope: platform
+    hint: 同一台主机同时承载边缘能力与远程代理能力，一次操作配两种
+
+  - id: pick_proxy
+    atom: pick_agent
+    title: 确认承载主机
+    scope: platform
+    requires: [pick_object]
+    hint: 默认即上面选的资源对象；已在别处接入过的机器可直接复用
+
+  - id: pick_ability
+    atom: pick_ability
+    title: 选择采集能力（边缘 + 远程可多选）
+    scope: platform
+    requires: [pick_object]
+    hint: 采集能力是需求声明，前置到探路之前——先说清"要采什么"，探路才知道要按哪些参数核对
+
+  - id: collect_params
+    atom: collect_params
+    title: 采集参数
+    scope: platform
+    requires: [pick_ability]
+    when: abilities_requires_params
+    hint: 字段由插件 params.yaml 声明；probe 绑定同时决定探路要核对哪些项
+
+  - id: preflight_host
+    atom: preflight_host
+    title: 主机探路
+    scope: external
+    requires: [collect_params, pick_proxy]
+    gate: blocker
+    hint: 一次探完两类事——① 主机事实：OS/架构、磁盘余量、端口占用、是否已有 SAgent（决定装哪个版本）；② 能力可行性：按所选能力的参数声明核对目标可达性（账号/权限类由 Agent 侧在配置下发后验证）
+
+  - id: preflight_remote
+    atom: preflight_ability
+    title: 远程可达性探路
+    scope: external
+    requires: [collect_params, pick_proxy]
+    gate: blocker
+    hint: 从代理机侧探被采目标端口与账号——探路必须在真正执行采集的那一侧跑（对齐 remote 模式）；探什么目标由采集参数声明，所以必须等参数就绪
+
+  - id: pick_version
+    atom: pick_version
+    title: 选择 SAgent 版本
+    scope: platform
+    requires: [preflight_host]
+
+  - id: install_agent
+    atom: install_agent
+    title: 安装 SAgent（地基）
+    scope: external
+    requires: [pick_version]
+    when: "!agent_exists"
+
+  - id: register_platform_device
+    atom: register_platform_device
+    title: 登记为平台设备
+    scope: platform
+    requires: [install_agent]
+    hint: 承载平台能力的机器，无条件登记并强制带主机自监控
+
+  - id: self_metrics
+    atom: observe_collect
+    title: 主机自监控生效（地基完成）
+    scope: agent
+    requires: [register_platform_device]
+    hint: 地基完成的分界线。此后边缘能力与远程能力并行叠加
+
+  - id: sync_config
+    atom: sync_config
+    title: 生成并下发配置
+    scope: platform
+    requires: [preflight_host, preflight_remote]
+    hint: 两道探路门禁都过才渲染配置（主机事实与能力可行性、远程可达性）
+
+  - id: verify_probe
+    atom: verify_probe
+    title: 连通验证
+    scope: agent
+    requires: [sync_config, install_agent]
+
+  - id: observe_collect
+    atom: observe_collect
+    title: 采集入库
+    scope: agent
+    requires: [sync_config, install_agent]

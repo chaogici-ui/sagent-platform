@@ -1,0 +1,100 @@
+# 远程采集：SAgent 装在采集机上，远程拉取目标实例的指标（被采对象零侵入）
+# 注意：远程采集必然要装 SAgent —— 否则这台采集机自己没有采集自监控数据。
+#      采集机不属于任何业务系统，是采集平台自己的设备，因此强制登记为 platform_device 并带主机自监控。
+# 两步语义：① 选承载采集机（pick_proxy，按池候选 + 承载数，默认自动挑机可改选）
+#          ② 配被采对象（collect_params：IP / 账号 / 口令，字段由插件 params.yaml 声明）
+# 定序：先声明（采什么 + 参数）→ 再探路（主机事实 + 能力可行性 + 远程可达性）→ 再选版本装机。
+#      探路必须在"真正执行采集的那一侧"跑，这正是能力检查与远程可达性都放进探路阶段的原因。
+id: remote
+name: 远程采集
+description: 在代理机上安装 SAgent，远程采集数据库/中间件等实例指标
+steps:
+  - id: pick_object
+    atom: pick_object
+    title: 选择采集对象
+    scope: platform
+    hint: 被采集的实例（MySQL/Redis/Kafka…）。目标机不需要装任何东西
+
+  - id: pick_proxy
+    atom: pick_agent
+    title: 选择承载采集机
+    scope: platform
+    requires: [pick_object]
+    hint: 装 SAgent 的那台采集机（远程采集只承载在采集机上）。按池给出候选与当前承载数，默认自动挑负载最低的健康采集机，可在决策区改选；池内健康采集机不足 2 台时该池无法自动漂移
+
+  - id: pick_ability
+    atom: pick_ability
+    title: 选择采集能力
+    scope: platform
+    requires: [pick_object]
+    hint: 采集能力是需求声明，前置到探路之前——先说清"要采什么"，探路才知道要按哪些参数核对可达性与账号
+
+  - id: collect_params
+    atom: collect_params
+    title: 采集参数（采谁：IP / 账号 / 口令）
+    scope: platform
+    requires: [pick_ability]
+    when: abilities_requires_params
+    hint: 被采对象自身的信息（地址/端口/账号/口令/路径），字段由插件 params.yaml 声明——"选承载采集机"与"配被采对象"是两步，这里只配被采对象
+
+  - id: preflight_host
+    atom: preflight_host
+    title: 采集机探路
+    scope: external
+    requires: [collect_params, pick_proxy]
+    gate: blocker
+    hint: 一次探完两类事——① 采集机事实：OS/架构/磁盘/端口/是否已有 SAgent（决定装哪个版本）；② 能力可行性：按所选能力的参数声明，从采集机侧核对被采对象可达性（账号/权限类由 Agent 侧在配置下发后验证）
+
+  - id: preflight_remote
+    atom: preflight_ability
+    title: 远程可达性探路
+    scope: external
+    requires: [collect_params, pick_proxy]
+    gate: blocker
+    hint: 从采集机侧探被采对象端口与账号——探路必须在真正执行采集的那一侧跑；探什么对象由采集参数声明，所以必须等参数就绪（无参数时该步跳过，视为就绪）
+
+  - id: pick_version
+    atom: pick_version
+    title: 选择 SAgent 版本
+    scope: platform
+    requires: [preflight_host]
+
+  - id: install_agent
+    atom: install_agent
+    title: 安装 SAgent（采集机）
+    scope: external
+    requires: [pick_version]
+    when: "!agent_exists"
+    hint: 已接入过的采集机跳过此步
+
+  - id: register_platform_device
+    atom: register_platform_device
+    title: 登记为平台设备
+    scope: platform
+    requires: [install_agent]
+    hint: 采集机是采集平台自己的设备，无条件登记并强制带主机自监控（装了或复用都算）
+
+  - id: self_metrics
+    atom: observe_collect
+    title: 采集机自监控生效
+    scope: agent
+    requires: [register_platform_device]
+
+  - id: sync_config
+    atom: sync_config
+    title: 生成并下发配置
+    scope: platform
+    requires: [preflight_host, preflight_remote]
+    hint: 两道探路门禁都过才渲染配置——能力可行性由主机探路承担，目标可达性由远程可达性探路承担
+
+  - id: verify_probe
+    atom: verify_probe
+    title: 连通验证
+    scope: agent
+    requires: [sync_config, install_agent]
+
+  - id: observe_collect
+    atom: observe_collect
+    title: 采集入库
+    scope: agent
+    requires: [sync_config, install_agent]

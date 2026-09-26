@@ -1,0 +1,100 @@
+# SAgent 卸载 playbook（外置：改卸载动作不动代码；l0-console 启动时加载，@TOKEN@ 由平台渲染）
+# 可用占位符：@DEST_HOME@ 目标机用户家目录（与安装 playbook 同一口径）
+# 幂等：没装过 SAgent 的主机跑这份 playbook 同样安全通过（目标结果态一致：机器上没有 SAgent）
+#
+# 顺序不能颠倒（实测踩过）：必须先确认进程**真的退出**，再删目录。
+# SAgent 收到 SIGTERM 会优雅关停（停插件 / 停子进程 / 停 bus），这个过程要几秒；
+# 进程还活着就删目录，它最后几次写盘（日志与配置落盘都带 MkdirAll）会把
+# /home/<user>/SAgent/{data,logs} 重新建出来 —— 表现就是"删了又说还在"。
+# 不谎报成功：末尾「卸载结果核对」拿目标机自己的口径（目录 / 进程 / 监听端口）核对，
+#   核对不过就断言失败，卸载没卸干净必须暴露出来，而不是"看着成功"。
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 停止 SAgent 并等待进程真正退出（先 SIGTERM，超时再 SIGKILL）
+      shell: |
+        # 进程存活判定：/proc/<pid>/exe 精确匹配安装路径。
+        # 不用 pkill -f —— 它的 -f 会匹配到执行本脚本的 sh 自身（历史踩坑）；
+        # 不按 pid 文件盲杀 —— pid 可能已被回收成别的进程；
+        # 也不用 kill -0 单判 —— 僵尸进程 kill -0 仍返回 0，但它已经不是 SAgent 了。
+        # 判定口径与末尾「卸载结果核对」保持一致：同一个口径，不允许两处各说一套
+        alive() {
+          for exe in /proc/[0-9]*/exe; do
+            tgt=$(readlink "$exe" 2>/dev/null || true)
+            case "$tgt" in @DEST_HOME@/SAgent/bin/SAgent*) return 0 ;; esac
+          done
+          return 1
+        }
+        kill_all() {
+          sig="$1"
+          for exe in /proc/[0-9]*/exe; do
+            tgt=$(readlink "$exe" 2>/dev/null || true)
+            case "$tgt" in
+              @DEST_HOME@/SAgent/bin/SAgent*)
+                p=${exe#/proc/}
+                kill "$sig" "${p%/exe}" 2>/dev/null || true
+                ;;
+            esac
+          done
+        }
+        wait_gone() {
+          i=0
+          while [ "$i" -lt "$1" ]; do
+            alive || return 0
+            i=$((i+1)); sleep 1
+          done
+          return 1
+        }
+        if ! alive; then echo "SAgent 进程：卸载前未在运行"; exit 0; fi
+        kill_all TERM
+        if wait_gone 15; then
+          echo "SAgent 进程：已优雅退出"
+        else
+          kill_all KILL
+          if wait_gone 10; then echo "SAgent 进程：优雅退出超时，已强杀"; else echo "SAgent 进程：强杀后仍未消失"; fi
+        fi
+        exit 0
+
+    - name: 删除 SAgent 安装目录（进程已确认退出后才执行）
+      file:
+        path: "@DEST_HOME@/SAgent"
+        state: absent
+
+    - name: 卸载结果核对（目录 / 进程 / 监听端口 三项目标机口径）
+      shell: |
+        # 取值语义：yes = 仍然存在 / 仍在监听（脏），no = 已消失（净）。
+        # 与字段名 dir_exists / process_exists / port_agent_listening 的字面意思严格对齐——
+        # 曾经写反过（干净也判成脏，卸载永远失败），别再玩反话。
+        # 进程判定口径与上面「停止 SAgent」任务里的 alive() 完全一致：同一个口径，不允许两处各说一套。
+        dir=no;  [ -d "@DEST_HOME@/SAgent" ] && dir=yes
+        proc=no
+        for exe in /proc/[0-9]*/exe; do
+          tgt=$(readlink "$exe" 2>/dev/null || true)
+          case "$tgt" in @DEST_HOME@/SAgent/bin/SAgent*) proc=yes ;; esac
+        done
+        port=no
+        (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true) | grep -q ':@AGENT_PORT@' && port=yes
+        echo "dir_exists=$dir process_exists=$proc port_agent_listening=$port"
+        # 硬判据只有两条：安装目录、安装路径下的进程。两者都消失才叫卸干净。
+        if [ "$dir" = no ] && [ "$proc" = no ]; then
+          echo "UNINSTALL_CLEAN"
+        else
+          echo "UNINSTALL_DIRTY"
+        fi
+        # 端口只作旁证，不参与成败判定：目录与进程都没了它还占着 @AGENT_PORT@，
+        # 那是别的程序在用这个端口，不代表本次卸载没干净（误判会把干净的卸载判成失败）
+        if [ "$port" = yes ] && [ "$proc" = no ]; then
+          echo "NOTE: @AGENT_PORT@ 仍被监听，但占用者已不是 SAgent 进程（仅供参考）"
+        fi
+        exit 0
+      register: uninstall_check
+      changed_when: false
+
+    - name: 输出卸载核对结果（界面逐任务可见）
+      debug:
+        msg: "卸载核对 {{ uninstall_check.stdout }}"
+
+    - name: 断言卸载结果（目录与进程均须消失）
+      command: /bin/true
+      changed_when: false
+      failed_when: "'UNINSTALL_CLEAN' not in uninstall_check.stdout"

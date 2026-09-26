@@ -1,0 +1,60 @@
+# SAgent 版本清单 —— pick_version 人工选择的数据源（数据驱动：登记新版本改这里，不改代码）
+# status: stable（可直接选）/ deprecated（可选但标记旧版，选择时界面有醒目提示）
+# sha256: 与 data/binaries/<tag>/SAgent 平台本地版本库一一对应，安装作业分发前强制校验
+versions:
+  - tag: linux-amd64-0.4.0
+    version: 0.4.0
+    os: linux
+    arch: amd64
+    sha256: "3cc65a1529cf2304835995e73f98bd838c708dd78269b4f04b03bde80f488a40"
+    status: stable
+    released: "2026-09-10"
+    notes: 当前团队基线版本（含 L0 控制客户端）
+  - tag: linux-arm64-0.4.0
+    version: 0.4.0
+    os: linux
+    arch: arm64
+    sha256: "8928ac9f406b48ea2a91aee7fddc4a6d6c909c3340cb0d99e9bb9ff8e22ae393"
+    status: stable
+    released: "2026-09-10"
+    notes: 当前团队基线版本（含 L0 控制客户端）
+  - tag: linux-amd64-0.3.2
+    version: 0.3.2
+    os: linux
+    arch: amd64
+    sha256: ""
+    status: deprecated
+    released: "2026-06-20"
+    notes: 旧基线，仅存量主机续用；新接入不建议（版本库无二进制，选中安装会如实失败）
+  - tag: linux-amd64-0.4.1-dev
+    version: 0.4.1-dev
+    os: linux
+    arch: amd64
+    sha256: "b6f2989f44c7db307acd3b3034d05a3761af8783690e9360b29904805428c567"
+    status: stable
+    released: "2026-09-22"
+    notes: 升级流程真机验收用构建（0.4.0 基线上重编译；含指标 key 稳定与 procs 口径修正）
+  - tag: linux-arm64-0.4.1-dev
+    version: 0.4.1-dev
+    os: linux
+    arch: arm64
+    sha256: "8ef168b18294e9c554b43b0f0a4bbbfe06c97c8e80ac042febdb2247eafa2905"
+    status: stable
+    released: "2026-09-22"
+    notes: 升级流程真机验收用构建（0.4.0 基线上重编译；含指标 key 稳定与 procs 口径修正）
+  - tag: linux-amd64-0.4.2-dev
+    version: 0.4.2-dev
+    os: linux
+    arch: amd64
+    sha256: "959c72ce84527f3380772161d6bca4cd6bee5ad71dd152c49a55fecfd37aa52a"
+    status: stable
+    released: "2026-09-24"
+    notes: 远程采集集中部署提速用构建：采集机短心跳（10s，type=proxy/collector*）+ 池归属标签（pool/region）
+  - tag: linux-arm64-0.4.2-dev
+    version: 0.4.2-dev
+    os: linux
+    arch: arm64
+    sha256: "a33644be49d02f7edcd68ec5ca2c21cef5c9fcff1c17a554228bb854c2b399be"
+    status: stable
+    released: "2026-09-24"
+    notes: 远程采集集中部署提速用构建：采集机短心跳（10s，type=proxy/collector*）+ 池归属标签（pool/region）

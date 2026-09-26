@@ -1,0 +1,38 @@
+# SAgent 启停前预检 playbook（只读，不改动目标机任何东西）
+# 占位符：@DEST_HOME@ 目标机用户家目录
+# 输出契约（逐行可解析，平台 parsePreflightService 消费）：
+#   SVC_PRE pid=<SAgent进程pid|-> guard=<yes|no> stopped=<yes|no> ctl=<status原文压缩|->
+#           plugins_json=<ctl status 单行 JSON|->
+#   SVC_PRE_END
+# 插件清单来自 control.sock status 实测（进程级/插件级启停都以此为据，不猜配置）
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 启停前预检（只读：进程/守护/暂停标记/插件状态）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        pid="-"
+        if [ -f "$AG/run/SAgent.pid" ]; then p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; fi
+        if [ "$pid" = "-" ]; then
+          for e in /proc/[0-9]*/exe; do t=$(readlink "$e" 2>/dev/null); case "$t" in "$AG"/bin/SAgent*) q=${e#/proc/}; pid=${q%/exe};; esac; done
+        fi
+        guard="no"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac
+        done
+        stopped="no"; [ -f "$AG/run/stopped" ] && stopped="yes"
+        ctl="-"
+        if [ -S "$AG/run/control.sock" ] && [ "$pid" != "-" ]; then
+          out=$(cd "$AG" && timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1 | tr -d '\n')
+          [ -n "$out" ] && ctl="$out"
+        fi
+        echo "SVC_PRE pid=$pid guard=$guard stopped=$stopped ctl=$ctl"
+        echo "SVC_PRE_END"
+      args:
+        executable: /bin/sh
+      register: pre
+      changed_when: false
+
+    - name: 输出预检结果（平台解析此行）
+      debug:
+        msg: "{{ pre.stdout }}"

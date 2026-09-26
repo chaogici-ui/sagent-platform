@@ -1,0 +1,222 @@
+# 采集物扫描 playbook（外置：改扫描口径不动代码；l0-console 启动时加载，@TOKEN@ 由平台渲染）
+# 可用占位符：@DEST_HOME@ 目标机用户家目录（与安装/卸载 playbook 同一口径）
+#
+# 定位：卸载前的「知情」环节。回答操作人员一个问题——
+#   这台机器上除了 SAgent 本体，还挂着多少采集插件、有没有自愈守护？
+#   点卸载会连带把这些东西一起停掉，先看清楚再决定。
+#
+# 硬约束：本 playbook 只读。
+#   不 kill 进程、不写文件、不碰 crontab。「扫描」与「执行」必须分开：
+#   扫描失败不该动目标机，执行失败也不该怪扫描。
+#   唯一允许的是 ansible 自己的连接与 shell 读取。
+#
+# 输出契约（Go 侧按前缀解析，改格式必须同步 onboard_ansible.go 的解析器）：
+#   PLUGIN name=<名> form=<builtin|subprocess|exec|unknown> source=<config|dir> enabled=<yes|no> process=<yes|no|unknown> path=<相对安装目录路径|->
+#   AUTOSTART kind=<run_sh|cron_user|cron_system> state=<running|present|absent> hits=<N> note=<...>
+#   SCAN plugins_total=<N> plugins_process=<N> autostart=<N>
+#   SCAN_END
+#
+# 幂等：没装过 SAgent 的主机跑这份 playbook 同样安全通过（输出 plugins_total=0）。
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 扫描采集插件与自愈守护（只读，不改动目标机）
+      shell: |
+        AG="@DEST_HOME@/SAgent"
+        CFG="$AG/conf/SAgent.yaml"
+
+        # ---- 1. 配置里启用的插件（conf/SAgent.yaml 的 plugins 段）----
+        # 只解析两级结构（插件名 + enabled），够用且不依赖 PyYAML：
+        # 目标机不一定有 python-yaml，而扫描不该因为缺库就放弃——
+        # 解析失败时退化为"只按目录实扫"，绝不假装扫到了什么
+        cfg_plugins=""
+        if [ -f "$CFG" ]; then
+          cfg_plugins=$(awk '
+            /^plugins:[[:space:]]*$/ { inblk=1; next }
+            inblk && /^[^[:space:]]/ { inblk=0; cur="" }
+            inblk && /^  [A-Za-z0-9_]+:[[:space:]]*$/ { cur=$1; sub(/:$/,"",cur); next }
+            inblk && cur!="" && /^[[:space:]]+enabled:[[:space:]]*/ {
+              v=$2; gsub(/["\r]/,"",v)
+              if (v=="true") print cur
+              cur=""
+            }
+          ' "$CFG" 2>/dev/null)
+        fi
+
+        # ---- 2. 运行中的插件进程 / SAgent 本体（按 /proc/<pid>/exe 精确匹配路径）----
+        # 口径与卸载侧的进程判定一致：按 /proc/<pid>/exe 精确匹配路径。
+        # 不用 pgrep -f —— 它的 -f 会匹配到执行本脚本的 sh 自身（历史踩坑）
+        # 本体 pid 也要收：守护判定靠"谁是 SAgent 的父进程"，得先知道本体是谁
+        proc_paths=""; AGENT_PIDS=""
+        for e in /proc/[0-9]*/exe; do
+          t=$(readlink "$e" 2>/dev/null) || continue
+          p=${e#/proc/}; p=${p%/exe}
+          case "$t" in
+            "$AG"/plugins/*)   proc_paths="$proc_paths $t" ;;
+            "$AG"/bin/SAgent*) AGENT_PIDS="$AGENT_PIDS $p" ;;
+          esac
+        done
+
+        # ---- 3. 逐个插件判定并输出 ----
+        total=0; nproc=0; seen=""
+        emit() {
+          n="$1"
+          case " $seen " in *" $n "*) return ;; esac
+          seen="$seen $n"
+          total=$((total+1))
+          [ "$5" = yes ] && nproc=$((nproc+1))
+          echo "PLUGIN name=$n form=$2 source=$3 enabled=$4 process=$5 path=$6"
+        }
+        # 插件名与安装产物的对应关系（与 sagent/internal/constants 的默认路径一致）
+        form_of() {
+          case "$1" in
+            log_metrics|mysql_probe) echo subprocess ;;
+            custom_scripts) echo exec ;;
+            host_metrics|port_checker|prometheus_scrape) echo builtin ;;
+            *) echo unknown ;;
+          esac
+        }
+        path_of() {
+          case "$1" in
+            log_metrics) echo plugins/vector/bin/vector ;;
+            mysql_probe) echo plugins/mysql_exporter/mysqld_exporter ;;
+            custom_scripts) echo plugins/custom_scripts ;;
+            *) echo "-" ;;
+          esac
+        }
+
+        # 3.1 配置里 enabled 的插件（SAgent 实际在采集的东西）
+        for p in $cfg_plugins; do
+          f=$(form_of "$p"); pp=$(path_of "$p")
+          pno=no
+          if [ "$pp" != "-" ]; then
+            case "$proc_paths" in *"$AG/$pp"*) pno=yes ;; esac
+          fi
+          emit "$p" "$f" config yes "$pno" "$pp"
+        done
+
+        # 3.2 plugins/ 目录里实存、但配置未启用的产物
+        #     （装了没用 / 卸过一半——这类残留恰恰是操作人员最该知道的）
+        for d in "$AG"/plugins/*/; do
+          [ -d "$d" ] || continue
+          dn=${d%/}; dn=${dn##*/}
+          case "$dn" in
+            vector) nm=log_metrics ;;
+            mysql_exporter) nm=mysql_probe ;;
+            custom_scripts) nm=custom_scripts ;;
+            *) nm="$dn" ;;
+          esac
+          f=$(form_of "$nm"); pp=$(path_of "$nm")
+          [ "$pp" = "-" ] && pp="plugins/$dn"
+          pno=no
+          case "$pp" in
+            plugins/custom_scripts) pno=unknown ;;
+          esac
+          case "$proc_paths" in *"$AG/$pp"*) pno=yes ;; esac
+          emit "$nm" "$f" dir no "$pno" "$pp"
+        done
+
+        # ---- 4. 自愈守护 ----
+        autostart=0
+
+        # ppid_of：从 /proc/<pid>/stat 取父进程号。
+        # 不用 awk '{print $4}'：comm 带括号/空格时字段会错位，这里先剥掉 "pid (comm) " 前缀
+        ppid_of() {
+          s=$(cat "/proc/$1/stat" 2>/dev/null) || return
+          s=${s#*) }
+          set -- $s
+          echo "$2"
+        }
+
+        # 4.1 run.sh 守护进程（SAgent 官方包自带：崩溃后 3 秒自动拉起）
+        # 两路判据并行，任一命中即认它存在：
+        #   (a) 父子关系：守护一定是 SAgent 本体的父进程。
+        #       这条不依赖 /proc/<pid>/cwd —— 实测容器里守护被 reparent 到 PID 1 之后
+        #       cwd / exe / environ 全部 Permission denied，只认 cwd 必然漏判
+        #   (b) cwd == 安装目录：覆盖"SAgent 刚退出、守护还在 sleep 3"的空窗期
+        #       此时没有子进程可依，只能看 cwd
+        # 为什么必须双路：漏判的代价不是报错，而是"守护没被清掉、SAgent 删了又被拉回来"，
+        # 运维会以为卸载功能坏了；而只按 cmdline 含 run.sh 判定又会把别人家的 run.sh 算进来
+        guard=absent; gpids=""
+        for p in $AGENT_PIDS; do
+          pp=$(ppid_of "$p")
+          [ -n "$pp" ] || continue
+          pcl=$(tr '\0' ' ' < "/proc/$pp/cmdline" 2>/dev/null) || continue
+          case "$pcl" in *run.sh*) gpids="$gpids $pp" ;; esac
+        done
+        for d in /proc/[0-9]*; do
+          pid=${d#/proc/}
+          [ -r "$d/cmdline" ] || continue
+          cl=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+          case "$cl" in
+            *run.sh*)
+              cw=$(readlink "$d/cwd" 2>/dev/null) || cw=""
+              [ "$cw" = "$AG" ] && gpids="$gpids $pid"
+              ;;
+          esac
+        done
+        gpids=$(printf '%s\n' $gpids | sort -n -u | tr '\n' ' ')
+        gpids=$(printf '%s' "$gpids" | sed 's/^ *//; s/ *$//')
+        [ -n "$gpids" ] && guard=running
+        [ "$guard" = absent ] && [ -f "$AG/run.sh" ] && guard=present
+        [ "$guard" != absent ] && autostart=$((autostart+1))
+        # pid 列表用逗号连接且不留空格：输出契约是 "k=v k2=v2"，
+        # 值里带空格会把解析方的按空格切分打乱（Go 侧 parseKV 的约定）
+        # hits 必须如实：run.sh 只有"一个守护位"，但 absent 时报 hits=1 会被读成
+        # "发现 1 处残留"——hits 跟随 state，absent 时报 0（2026-09-22 用户评审）
+        rhits=0; [ "$guard" != absent ] && rhits=1
+        echo "AUTOSTART kind=run_sh state=$guard hits=$rhits pid=$(printf '%s' "$gpids" | tr ' ' ',') note=SAgent-package-supervisor"
+
+        # 4.2 用户 crontab 里指向 SAgent 的条目
+        # 「读不到」必须与「没有命中」分开：crontab 不可用（非 suid、精简容器里常见）时
+        # 报 absent 就是谎报干净——运维会以为没自愈残留，其实根本没查成。
+        # 所以这里有三态：present / absent / unknown，unknown 由平台侧升级成告警
+        cron_state=unknown; cron_hits=0; cron_note=unreadable
+        if command -v crontab >/dev/null 2>&1; then
+          cout=$(crontab -l 2>&1); crc=$?
+          if [ "$crc" -eq 0 ]; then
+            cron_note=read; cron_hits=0
+            if [ -n "$cout" ]; then
+              cron_hits=$(printf '%s\n' "$cout" | grep -c -E 'SAgent' 2>/dev/null || true)
+              [ -z "$cron_hits" ] && cron_hits=0
+            fi
+            if [ "$cron_hits" -gt 0 ]; then cron_state=present; else cron_state=absent; fi
+          else
+            case "$cout" in
+              *"no crontab"*) cron_state=absent; cron_note=empty ;;
+              *)              cron_state=unknown; cron_note=unreadable ;;
+            esac
+          fi
+        else
+          cron_note=no-crontab-cmd
+        fi
+        [ "$cron_state" = present ] && autostart=$((autostart+1))
+        echo "AUTOSTART kind=cron_user state=$cron_state hits=$cron_hits note=$cron_note"
+
+        # 4.3 系统级 crontab（/etc/crontab 与 /etc/cron.d）
+        # 只报告不删：本次约定的清理范围是 run.sh + 用户 crontab，
+        # 系统级文件属于别的团队的资产，发现了要让人知道，但不越权改。
+        # 不可读的文件同样计 unknown，不许当成"没有命中"
+        sys_hits=0; sys_unreadable=0
+        for f in /etc/crontab /etc/cron.d/*; do
+          [ -f "$f" ] || continue
+          if [ ! -r "$f" ]; then sys_unreadable=$((sys_unreadable+1)); continue; fi
+          k=$(grep -c -E 'SAgent' "$f" 2>/dev/null || true)
+          [ -z "$k" ] && k=0
+          sys_hits=$((sys_hits + k))
+        done
+        if [ "$sys_hits" -gt 0 ]; then sstate=present
+        elif [ "$sys_unreadable" -gt 0 ]; then sstate=unknown
+        else sstate=absent; fi
+        [ "$sstate" = present ] && autostart=$((autostart+1))
+        echo "AUTOSTART kind=cron_system state=$sstate hits=$sys_hits unreadable=$sys_unreadable note=report-only"
+
+        echo "SCAN plugins_total=$total plugins_process=$nproc autostart=$autostart"
+        echo "SCAN_END"
+        exit 0
+      register: scan_out
+      changed_when: false
+
+    - name: 输出扫描结果（界面逐任务可见）
+      debug:
+        msg: "{{ scan_out.stdout }}"

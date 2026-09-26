@@ -125,15 +125,15 @@ func exporterDocTemplate(name, displayName string) string {
 
 1. 在目标机器上启动 exporter，默认监听 :9104（端口以实际为准）：
 
-   ` + "```bash" + `
+   `+"```bash"+`
    ./%s_exporter --web.listen-address=:9104 [其他启动参数]
-   ` + "```" + `
+   `+"```"+`
 
 2. 验证指标端点可访问：
 
-   ` + "```bash" + `
+   `+"```bash"+`
    curl -s http://<目标机IP>:9104/metrics | head
-   ` + "```" + `
+   `+"```"+`
 
 3. 在本平台「采集目标」菜单，新建采集目标并绑定本插件，填入 exporter 地址（IP:端口）。
 
@@ -211,9 +211,11 @@ func syncIntegrations(s *store.DB, integDir string, report *SyncReport) (int, er
 		if ptype == "" {
 			ptype = "exporter"
 		}
+		// Version 留空：集成包本身不带版本元数据，编一个 v1.0.0 只会让人误以为有版本语义；
+		// 空值时前端不渲染版本徽标（2026-09-22 界面评审）
 		p := &store.Plugin{
 			Name: name, DisplayName: display, Category: cat, Type: ptype,
-			Version: "v1.0.0", Source: "builtin",
+			Source: "builtin",
 		}
 		// 插件不存在时才写采集说明模板；已存在的保留用户编辑
 		if _, err := s.UpsertPlugin(p); err != nil {
@@ -252,17 +254,17 @@ func syncIntegrations(s *store.DB, integDir string, report *SyncReport) (int, er
 				if err := json.Unmarshal(data, &list); err != nil {
 					continue
 				}
-			for _, m := range list {
-				mm := &store.Metric{
-					PluginID: pid, PluginName: name, Name: m.Name, Unit: m.Unit, Note: m.Note,
-					Expression: m.Expression, MetricType: m.MetricType, Source: "builtin",
+				for _, m := range list {
+					mm := &store.Metric{
+						PluginID: pid, PluginName: name, Name: m.Name, Unit: m.Unit, Note: m.Note,
+						Expression: m.Expression, MetricType: m.MetricType, Source: "builtin",
+					}
+					// 内置采集能力包标注渠道/归属/溯源，治理视图渠道维度可筛选
+					if ch := channelMap[name]; ch != "" {
+						mm.Channel, mm.Ownership, mm.SourceRef = ch, "preset", name
+					}
+					ms = append(ms, mm)
 				}
-				// 内置采集能力包标注渠道/归属/溯源，治理视图渠道维度可筛选
-				if ch := channelMap[name]; ch != "" {
-					mm.Channel, mm.Ownership, mm.SourceRef = ch, "preset", name
-				}
-				ms = append(ms, mm)
-			}
 			}
 		}
 		// 变更对比：库中该插件现有指标名 vs 本次包内指标名
@@ -374,7 +376,7 @@ func dirHasFiles(dir, suffix string) bool {
 	return false
 }
 
-// SyncMetricsFile 把旧指标中心数据（data/metrics.json）一次性导入 SQLite 统一存储。
+// SyncMetricsFile 把旧指标中心数据（data/metrics.json）一次性导入目录库统一存储。
 // 仅插入缺失的指标（同名跳过），用户在指标中心的编辑不回写该文件、不被覆盖。
 // 返回新插入条数。
 func SyncMetricsFile(s *store.DB, path string) (int, error) {

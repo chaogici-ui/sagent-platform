@@ -7,8 +7,48 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+
+	storepkg "github.com/sagent/l0-console/store"
 )
+
+// TaskItem 任务历史条目（/api/tasks 输出）
+type TaskItem struct {
+	Time     string `json:"time"`
+	Operator string `json:"operator"`
+	Action   string `json:"action"`
+	Target   string `json:"target"`
+	Scope    string `json:"scope"`
+	Result   string `json:"result"`
+}
+
+// automatedAuditActions 自动化/流水线内部回报类动作：进审计日志但不进任务历史。
+// 任务历史语义 = 人/运维对系统做的操作；Agent 心跳注册、环节自动回报、超时判死等
+// 是系统自身运转留痕，混进来会把真正的操作记录淹没
+var automatedAuditActions = map[string]bool{
+	"自动回报接入步骤":          true,
+	"执行器回报接入环节":         true,
+	"注册 Agent":          true,
+	"ansible 探路完成":      true,
+	"探路结果回填":            true,
+	"ansible 扫描采集物（只读）": true,
+	"步骤超时判死":            true,
+	"步骤超时（未完成）":         true,
+	"步骤超时自动重试":          true,
+}
+
+// taskRowsFromAudits 从审计行提取任务历史（排除自动化回报类动作）
+func taskRowsFromAudits(rows []storepkg.AuditRow) []TaskItem {
+	out := make([]TaskItem, 0, len(rows))
+	for _, e := range rows {
+		if automatedAuditActions[e.Action] {
+			continue
+		}
+		out = append(out, TaskItem(e))
+	}
+	return out
+}
 
 // registerMiscRoutes 注册站点配置/审计/任务/集成包/VM 代理等杂项 API
 func registerMiscRoutes(mux *http.ServeMux, onboardCfg *OnboardConfig) {
@@ -26,9 +66,19 @@ func registerMiscRoutes(mux *http.ServeMux, onboardCfg *OnboardConfig) {
 		writeJSON(w, onboardCfg)
 	})
 	// API: 操作审计（M2-⑪：读落库数据，重启不丢；DB 不可用时回退内存镜像）
+	// limit 查询参数：前端分页取数用（默认 200，上限 AuditKeep=库内保留条数）
 	mux.HandleFunc("/api/audit", func(w http.ResponseWriter, r *http.Request) {
+		limit := 200
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if limit > storepkg.AuditKeep {
+			limit = storepkg.AuditKeep
+		}
 		if auditDB != nil {
-			if rows, err := auditDB.ListAudit(200); err == nil {
+			if rows, err := auditDB.ListAudit(limit); err == nil {
 				writeJSON(w, rows)
 				return
 			}
@@ -68,27 +118,23 @@ func registerMiscRoutes(mux *http.ServeMux, onboardCfg *OnboardConfig) {
 	// 以下死端点已删除（前端零引用，历史遗留，详见回归 lint「死端点清零」）：
 	// - metrics/synced           旧内存 map 存储，重启即丢，违反红线 1
 	// - vm 侧按 target 聚合指标  无消费方
-	// - plugins                  旧 JSON 文件存储，插件目录统一走 SQLite catalog 命名空间
+	// - plugins                  旧 JSON 文件存储，插件目录统一走 catalog 库命名空间
 
-	// API: 任务历史（从审计日志聚合）
+	// API: 任务历史（人工/运维操作记录，同审计：读落库数据重启不丢，DB 不可用时回退内存镜像）
 	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
-		auditMu.Lock()
-		defer auditMu.Unlock()
-		type TaskItem struct {
-			Time     string `json:"time"`
-			Operator string `json:"operator"`
-			Action   string `json:"action"`
-			Target   string `json:"target"`
-			Scope    string `json:"scope"`
-			Result   string `json:"result"`
-		}
-		var tasks = make([]TaskItem, 0)
-		for _, e := range auditLog {
-			if e.Action == "启动 Agent" || e.Action == "停止 Agent" || e.Action == "重启 Agent" || e.Action == "部署 Agent" || e.Action == "升级 Agent" || e.Action == "sync_metrics" {
-				tasks = append(tasks, TaskItem(e))
+		if auditDB != nil {
+			if rows, err := auditDB.ListAudit(500); err == nil {
+				writeJSON(w, taskRowsFromAudits(rows))
+				return
 			}
 		}
-		writeJSON(w, tasks)
+		auditMu.Lock()
+		defer auditMu.Unlock()
+		rows := make([]storepkg.AuditRow, 0, len(auditLog))
+		for _, e := range auditLog {
+			rows = append(rows, storepkg.AuditRow(e))
+		}
+		writeJSON(w, taskRowsFromAudits(rows))
 	})
 
 	// API: 插件文件上传（图标 + 脚本）

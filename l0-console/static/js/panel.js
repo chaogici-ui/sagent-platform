@@ -92,8 +92,8 @@ function renderTasks() {
             tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">暂无任务记录</td></tr>';
           } else {
             tbody.innerHTML = tasks.reverse().map(function(t){
-              var badge = t.Result.indexOf('失败')>=0 ? (t.Result.indexOf('ERROR')>=0?'b-o':'b-o') : 'b-h';
-              return '<tr><td style="white-space:nowrap">'+t.time+'</td><td><span class="badge" style="background:#e8f0fe;color:#2563eb">'+t.action+'</span></td><td>'+t.target+'</td><td>'+t.scope+'</td><td><span class="badge '+badge+'">'+t.result+'</span></td></tr>';
+              var badge = t.result.indexOf('失败')>=0 ? 'b-o' : 'b-h';
+              return '<tr><td style="white-space:nowrap">'+t.time+'</td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+t.action+'</span></td><td>'+t.target+'</td><td>'+t.scope+'</td><td><span class="badge '+badge+'">'+t.result+'</span></td></tr>';
             }).join('');
           }
           var cnt = document.getElementById('tasks-count');
@@ -101,46 +101,34 @@ function renderTasks() {
         }).catch(function(){});
       }
 
+      // 采集健康 = 对账工作台（2026-09-22 定稿）：一屏回答"有没有问题、问题在哪、接下来点什么"。
+      // 顶部一句人话结论；三张问题卡锚到三个清单，清单行带处理动作。
+      // 存活率/采集成功率百分比卡与 IDC 分布删掉（总览页已有 Agent 状态，本页只留对账语义）；
+      // 批量操作条移至资源页（batchOp 留在 panel.js，fleet 页共用）。
       function renderSLO() {
-        var healthy = agents.filter(function(a){return a.status==='healthy'}).length;
-        var total = agents.length || 1;
-        var anomaly = agents.filter(function(a){return a.status!=='healthy'&&a.status!=='running'});
-        // 采集成功率：心跳 stats 聚合（M1-⑦ 真数据）
-        var sOk=0, sFail=0;
-        agents.forEach(function(a){
-          if (a.stats && a.source==='heartbeat') {
-            sOk += parseInt(a.stats.success)||0;
-            sFail += parseInt(a.stats.fail)||0;
-          }
-        });
-        var succRate = (sOk+sFail)>0 ? (Math.round(sOk/(sOk+sFail)*1000)/10)+'%' : '-';
+        var anomaly = agents.filter(function(a){return a.status!=='healthy'&&a.status!=='running'})
+          .filter(function (a) { return window.tenantVisible(a); }); // 多租户(D3)界面隔离
         var html = '';
-        // SLO cards（断采/野指标来自对账引擎）
-        html += '<div class="slo-grid">';
-        html += '<div class="slo-card"><div class="slo-val slo-ok">'+(Math.round(healthy/total*1000)/10)+'%</div><div class="slo-label">Agent 存活率</div></div>';
-        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-stale\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-stale">⏳</div><div class="slo-label">数据断采 &gt; 10min</div></div>';
-        html += '<div class="slo-card"><div class="slo-val '+(succRate!=='-'&&parseFloat(succRate)>=99?'slo-ok':'')+'" id="slo-succ">'+succRate+'</div><div class="slo-label">采集成功率</div></div>';
-        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-wild\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-wild">⏳</div><div class="slo-label">野指标（VM 有 / 应报口径无）</div></div>';
-        html += '</div>';
-        html += '<div style="font-size:11px;color:var(--muted);margin-top:4px" id="recon-meta">对账引擎计算中...</div>';
-        // IDC distribution
-        var idcMap = {};
-        agents.forEach(function(a){var d=(a.labels||{}).idc||'unknown';if(!idcMap[d])idcMap[d]={t:0,h:0};idcMap[d].t++;if(a.status==='healthy')idcMap[d].h++});
-        var maxT = Math.max.apply(null, Object.values(idcMap).map(function(x){return x.t}));
-        html += '<div class="card" style="margin-top:16px"><div class="card-hd">🏢 IDC 健康分布</div><div class="card-bd">';
-        Object.keys(idcMap).sort().forEach(function(d){
-          var m=idcMap[d],pct=maxT>0?Math.round(m.t/maxT*100):0,hasIssue=m.t>m.h;
-          html += '<div class="idc-bar" style="cursor:pointer"><div class="idc-bar-label">'+d+'</div><div class="idc-bar-track"><div class="idc-bar-fill'+(hasIssue?' idc-bar-warn':'')+'" style="width:'+pct+'%"></div></div><div class="idc-bar-nums"><b>'+m.t+'</b> <span style="color:var(--success)">'+m.h+' 健康</span>'+(hasIssue?' <span style="color:var(--error)">'+(m.t-m.h)+' 异常</span>':'')+'</div></div>';
-        });
+        // ① 结论条（对账结果回来后填一句人话）+ 证据链概要（共享 buildEvidenceChainHTML，与工作台同源）
+        html += '<div class="card"><div class="card-bd" style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">';
+        html += '<div id="recon-verdict" style="font-size:14px;font-weight:600">⏳ 对账引擎计算中...</div>';
+        html += '<div id="recon-meta" style="font-size:11px;color:var(--muted);margin-left:auto"></div>';
+        html += '<div id="recon-evid" style="flex:1 1 100%;margin-top:10px"></div>';
         html += '</div></div>';
-        // 对账：断采目标
+        // ② 三张问题卡（点击定位到清单）
+        html += '<div class="slo-grid" style="margin-top:16px">';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-stale\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-stale">⏳</div><div class="slo-label">数据断采 &gt; 10min</div></div>';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-wild\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-wild">⏳</div><div class="slo-label">野指标（VM 有 / 应报口径无）</div></div>';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-anomaly\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" style="color:'+(anomaly.length>0?'var(--error)':'var(--success)')+'">'+anomaly.length+'</div><div class="slo-label">异常 Agent</div></div>';
+        html += '</div>';
+        // ③-1 断采清单
         html += '<div class="card" style="margin-top:16px" id="recon-stale"><div class="card-hd">📡 断采目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">目录声明应采 × VM 实际在报（近 10min 无数据）</span></div>';
         html += '<div class="card-bd" id="recon-stale-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
         // 对账：野指标
         html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span></div>';
         html += '<div class="card-bd" id="recon-wild-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
-        // Anomaly list
-        html += '<div class="card" style="margin-top:16px"><div class="card-hd">⚠️ 异常 Agent（'+anomaly.length+'）</div>';
+        // ③-3 异常 Agent
+        html += '<div class="card" style="margin-top:16px" id="recon-anomaly"><div class="card-hd">⚠️ 异常 Agent（'+anomaly.length+'）</div>';
         if(anomaly.length===0){
           html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">✅ 全部正常</div>';
         }else{
@@ -149,57 +137,147 @@ function renderTasks() {
           html += '</tbody></table>';
         }
         html += '</div>';
-        // Batch bar
-        html += '<div class="batch-bar" style="margin-top:16px"><strong style="font-size:13px">批量操作</strong><select id="batch-scope-type"><option value="idc">IDC</option><option value="type">类型</option></select><select id="batch-scope-val"></select><select id="batch-action"><option value="restart">重启</option><option value="stop">停止</option><option value="start">启动</option></select><button class="btn btn-p" onclick="batchOp()">执行</button></div>';
+        // ③-4 HA-3 归属迁移记录（证据链：跨 L1 归属故障上收后，此处留痕供审计/排障下钻）
+        html += '<div class="card" style="margin-top:16px" id="recon-relocate"><div class="card-hd">↹ HA-3 归属迁移记录 <span style="font-weight:400;font-size:11px;color:var(--muted)">跨 L1 归属故障上收证据：Exporter 归属从失效 SAgent 迁至同租户同地域健康端（冷却期内不重复迁移）</span></div>';
+        html += '<div class="card-bd" id="recon-relocate-body" style="text-align:center;color:var(--muted);padding:16px">查询中...</div></div>';
         document.getElementById("main-content").innerHTML = html;
-        updateBatchScope();
-        document.getElementById("batch-scope-type").onchange = updateBatchScope;
-        // 拉对账结果
-        fetch(API+'/recon').then(function(r){return r.json()}).then(function(d){
-          if (!d || !d.summary) return;
-          var st = d.summary.stale||0, wild = d.summary.wild||0;
-          var el1 = document.getElementById('slo-stale');
-          if (el1) { el1.textContent = st; el1.className = 'slo-val '+(st>0?'':'slo-ok'); el1.style.color = st>0?'var(--error)':''; }
-          var el4 = document.getElementById('slo-wild');
-          if (el4) { el4.textContent = wild; el4.className = 'slo-val '+(wild>0?'':'slo-ok'); el4.style.color = wild>0?'var(--warning,#b45309)':''; }
+        // HA-3 归属迁移记录（证据链下钻，独立轻量请求不阻塞对账主链）
+        fetch(API+'/relocations').then(function(r){return r.json()}).catch(function(){return {relocations:[]}}).then(function(rd){
+          var rb = document.getElementById('recon-relocate-body');
+          if (!rb) return;
+          var rels = rd.relocations || [];
+          if (!rels.length) { rb.innerHTML = '✅ 暂无归属迁移记录（跨 L1 归属稳定，未发生故障上收）'; rb.style.color='var(--muted)'; return; }
+          rb.style.textAlign='left';
+          rb.innerHTML = '<table style="text-align:left"><thead><tr><th>时间</th><th>目标</th><th>租户</th><th>地域</th><th>原属主</th><th>→ 新属主</th><th>结果</th><th>原因</th></tr></thead><tbody>'
+            + rels.map(function(x){
+                var st = x.Status==='moved' ? '<span class="badge" style="background:#e0f2f1;color:#0b6e66">已迁移</span>' : (x.Status==='skipped' ? '<span class="badge" style="background:#fff3cd;color:#8a6d3b">冷却跳过</span>' : '<span class="badge" style="background:#fde8e8;color:#b91c1c">拒绝</span>');
+                var ts = x.CreatedAt ? new Date(x.CreatedAt*1000).toLocaleString('zh-CN',{hour12:false}) : '-';
+                return '<tr><td style="white-space:nowrap">'+ts+'</td><td>'+escHtml(x.TargetName||x.TargetID)+'</td><td>'+escHtml(x.TenantID||'default')+'</td><td>'+(x.Region?escHtml(x.Region):'-')+'</td><td>'+(x.FromAgent?escHtml(x.FromAgent):'-')+'</td><td>'+(x.ToAgent?escHtml(x.ToAgent):'-')+'</td><td>'+st+'</td><td style="font-size:11px;color:var(--muted)">'+escHtml(x.Reason||x.Note||'')+'</td></tr>';
+              }).join('')
+            + '</tbody></table>'
+            + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">迁移记录经 config 轨接管（先新后旧防双写）+ 冷却终态保护，供审计与排障留痕。</div>';
+        });
+        // 对账结果 + 目标↔资源反查（断采行要给"打开资源"动作）
+        Promise.all([
+          fetch(API+'/recon').then(function(r){return r.json()}).catch(function(){return null}),
+          fetch(API+'/targets').then(function(r){return r.json()}).catch(function(){return []}),
+          fetch(API+'/resources').then(function(r){return r.json()}).catch(function(){return {}}),
+          fetch(API+'/agents').then(function(r){return r.json()}).catch(function(){return []}),
+          fetch(API+'/collect-stats').then(function(r){return r.json()}).catch(function(){return {}})
+        ]).then(function(rs){
+          var d = rs[0], tgts = rs[1]||[], resList = (rs[2]||{}).resources||[];
+          // 证据链数据（与工作台 resFetchAll 同源口径）：agents / collect-stats 归一化进 dE
+          var ag = rs[3]||[], cstat = rs[4]||{};
+          var dE = {
+            agents: Array.isArray(ag) ? ag : (ag.agents||[]),
+            recon: d,
+            stats: {}
+          };
+          (cstat.resources||[]).forEach(function(s){ if(s.resource_id) dE.stats[s.resource_id]=s; if(s.instance) dE.stats[s.instance]=s; });
+          var evWrap = document.getElementById('recon-evid');
+          if (evWrap && typeof globalThis.buildEvidenceChainHTML === 'function') {
+            // 就地归因：点击证据链数据侧缺口(源采集/链路/入库)时，直接滚动定位到本页对应问题卡并高亮。
+            // kind: stale(断采) / wild(野指标) / transport / anomaly
+            globalThis.__sloDrill = function (kind) {
+              var map = { stale: 'recon-stale', wild: 'recon-wild', transport: 'recon-verdict', anomaly: 'recon-anomaly' };
+              var id = map[kind] || map.stale;
+              var el = document.getElementById(id);
+              if (!el) return;
+              el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              var old = el.style.boxShadow, oldB = el.style.borderColor;
+              el.style.boxShadow = '0 0 0 3px rgba(217,119,6,.45)';
+              el.style.borderColor = 'var(--warning,#d97706)';
+              setTimeout(function () {
+                el.style.boxShadow = old; el.style.borderColor = oldB;
+              }, 2200);
+            };
+            evWrap.innerHTML = globalThis.buildEvidenceChainHTML(dE);
+          }
+          var tgRes = {};
+          tgts.forEach(function(t){ tgRes[t.id] = t.resource_id; });
+          var resNames = {};
+          resList.forEach(function(x){ resNames[x.id] = x.name || x.ip || x.id; });
           var meta = document.getElementById('recon-meta');
-          if (meta) meta.textContent = '对账时间 '+(d.generated_at||'')+' · 检查目标 '+(d.summary.checked||0)+'/'+(d.summary.targets||0)+' · VM '+(d.summary.vm_reachable?'可达':'不可达');
-          // 断采清单
+          var sb0 = document.getElementById('recon-stale-body');
+          var wb0 = document.getElementById('recon-wild-body');
+          var v = document.getElementById('recon-verdict');
+          if (!d || !d.summary) {
+            if (v) v.textContent = '⚠ 对账引擎暂不可用，无法判断"数据是否在报"';
+            ['slo-stale','slo-wild'].forEach(function(id){ var el=document.getElementById(id); if(el){ el.textContent='?'; el.style.color='var(--muted)'; } });
+            if (sb0) sb0.textContent = '对账引擎暂不可用';
+            if (wb0) wb0.textContent = '对账引擎暂不可用';
+            return;
+          }
+          var st = d.summary.stale||0, wild = d.summary.wild||0;
+          var vmOk = !!d.summary.vm_reachable;
+          // VM 不可达时断采/野指标不可判（全量误报"断采"、空清单误读"无野指标"），显示 —
+          var el1 = document.getElementById('slo-stale');
+          if (el1) { el1.textContent = vmOk ? st : '—'; el1.style.color = (vmOk&&st>0)?'var(--error)':'var(--success)'; }
+          var el4 = document.getElementById('slo-wild');
+          if (el4) { el4.textContent = vmOk ? wild : '—'; el4.style.color = (vmOk&&wild>0)?'var(--warning,#b45309)':'var(--success)'; }
+          if (meta) meta.textContent = '对账时间 '+(d.generated_at||'')+' · 检查目标 '+(d.summary.checked||0)+'/'+(d.summary.targets||0)+' · VM '+(vmOk?'可达':'不可达');
+          // ① 一句人话结论
+          if (v) {
+            if (!vmOk) {
+              v.textContent = '⚠ VM 不可达，本次无法判断"数据是否在报"，请先检查 VictoriaMetrics';
+              v.style.color = 'var(--error)';
+            } else if (st>0 || wild>0 || anomaly.length>0) {
+              var parts = [];
+              if (st>0) parts.push('<span style="color:var(--error)">断采 '+st+'</span>');
+              if (wild>0) parts.push('<span style="color:var(--warning,#b45309)">野指标 '+wild+'</span>');
+              if (anomaly.length>0) parts.push('<span style="color:var(--error)">异常 Agent '+anomaly.length+'</span>');
+              v.innerHTML = '发现 '+parts.length+' 类问题待处理：'+parts.join('、')+'（点击下方卡片定位）';
+              v.style.color = '';
+            } else if ((d.summary.checked||0) > 0) {
+              v.innerHTML = '✅ 平台健康：已核对 '+(d.summary.checked||0)+' 个目标全部在报，VM 无野指标，Agent 无异常';
+              v.style.color = '';
+            } else {
+              v.innerHTML = '✅ 未发现问题，但本次没有可核对的目标（声明 '+(d.summary.targets||0)+' 个，缺插件口径或未注册）——可到 <a href="javascript:void(0)" onclick="goPage(\'targets\')" style="color:var(--primary)">采集目标</a> 检查目标配置';
+              v.style.color = '';
+            }
+          }
+          // 断采清单（带"打开资源"动作）
           var sb = document.getElementById('recon-stale-body');
           if (sb) {
-            if (!d.stale || d.stale.length===0) { sb.innerHTML = '✅ 全部在报'; sb.style.color='var(--muted)'; }
+            if (!vmOk) { sb.innerHTML = '⚠ VM 不可达，无法判定断采'; sb.style.color='var(--muted)'; }
+            else if (!d.stale || d.stale.length===0) { sb.innerHTML = '✅ 全部在报'; sb.style.color='var(--muted)'; }
             else {
-              var h = '<table style="text-align:left"><thead><tr><th>目标</th><th>地址</th><th>插件</th><th>分派 Agent</th><th>探测指标</th></tr></thead><tbody>';
+              var h = '<table style="text-align:left"><thead><tr><th>目标</th><th>地址</th><th>插件</th><th>分派 Agent</th><th>探测指标</th><th>操作</th></tr></thead><tbody>';
               d.stale.forEach(function(t){
-                h += '<tr><td>'+escHtml(t.name)+'</td><td><code>'+escHtml(t.address)+'</code></td><td><span class="badge" style="background:#e8f0fe;color:#2563eb">'+escHtml(t.plugin)+'</span></td><td>'+(t.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+t.agent_id+'\')" style="color:var(--primary)">'+escHtml(t.agent_id)+'</a>':'-')+'</td><td style="font-size:10px;color:var(--muted)">'+escHtml((t.probe_keys||[]).slice(0,2).join(', '))+'</td></tr>';
+                var rid = tgRes[t.id], act;
+                if (!rid) act = '<span style="color:var(--muted)">—</span>';
+                else if (resNames[rid]) act = '<a href="javascript:void(0)" onclick="openResourceDrawer(\''+rid+'\')" style="color:var(--primary)">打开资源</a>';
+                else act = '<span style="color:var(--muted)">资源已删除</span>';
+                h += '<tr><td>'+escHtml(t.name)+'</td><td><code>'+escHtml(t.address)+'</code></td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(t.plugin)+'</span></td><td>'+(t.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+t.agent_id+'\')" style="color:var(--primary)">'+escHtml(t.agent_id)+'</a>':'-')+'</td><td style="font-size:10px;color:var(--muted)">'+escHtml((t.probe_keys||[]).slice(0,2).join(', '))+'</td><td>'+act+'</td></tr>';
               });
               h += '</tbody></table>';
               sb.innerHTML = h; sb.style.color='';
             }
           }
-          // 野指标清单
+          // 野指标清单 + 处理建议
           var wb = document.getElementById('recon-wild-body');
           if (wb) {
-            if (!d.wild || d.wild.length===0) { wb.innerHTML = '✅ 无野指标'; }
+            if (!vmOk) { wb.innerHTML = '⚠ VM 不可达，无法判定野指标'; }
+            else if (!d.wild || d.wild.length===0) { wb.innerHTML = '✅ 无野指标'; }
             else {
               wb.style.textAlign='left';
               wb.innerHTML = d.wild.map(function(n){return '<code style="display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;background:var(--bg2,#f5f5f5);border-radius:4px;font-size:11px">'+escHtml(n)+'</code>'}).join('')
-                + (d.summary.wild>50?'<div style="margin-top:8px;color:var(--muted);font-size:11px">…共 '+d.summary.wild+' 条</div>':'');
+                + (d.summary.wild>50?'<div style="margin-top:8px;color:var(--muted);font-size:11px">…共 '+d.summary.wild+' 条</div>':'')
+                + '<div style="margin-top:10px;font-size:12px;color:var(--muted)">处理建议：目录该有而没有的 → <a href="javascript:void(0)" onclick="goPage(\'capabilities\')" style="color:var(--primary)">去能力与指标登记</a>；确认不该采的 → 检查对应 Agent 生效配置。</div>';
             }
           }
-        }).catch(function(){
-          var meta = document.getElementById('recon-meta');
-          if (meta) meta.textContent = '对账引擎暂不可用';
         });
       }
 
 function renderMetricsBrowse() {
+        // 默认 VMUI：免登录、免建面板，打开就能查；Grafana 只留入口（登录后落到面板列表）。
+        // 之前默认 iframe Grafana dashboard/new?editPanel=1 是个建面板的半成品页面，不是"看数据"
         siteCfg(function(cfg) {
-          var grafanaUrl = cfg.grafana_url + '/dashboard/new?orgId=1&editPanel=1';
+          var vmuiUrl = cfg.vm_url + '/vmui/';
           var html = '<div class="card" style="height:calc(100vh - 130px);display:flex;flex-direction:column">';
-          html += '<div class="card-hd">📈 指标浏览 <span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'grafana\')">Grafana</span><span onclick="switchMetricsTab(\'vmui\')">VMUI</span></span></div>';
+          html += '<div class="card-hd">📈 指标浏览 <span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span></div>';
           html += '<div class="card-bd" style="flex:1;padding:0;overflow:hidden">';
-          html += '<iframe id="metrics-frame" src="'+grafanaUrl+'" style="width:100%;height:100%;border:0"></iframe>';
+          html += '<iframe id="metrics-frame" src="'+vmuiUrl+'" style="width:100%;height:100%;border:0"></iframe>';
           html += '</div></div>';
           document.getElementById("main-content").innerHTML = html;
         });
@@ -208,7 +286,7 @@ function renderMetricsBrowse() {
         document.querySelectorAll(".card-hd .tabs span").forEach(function(s){s.classList.toggle("active",s.textContent.toLowerCase().indexOf(t)>=0)});
         var frame = document.getElementById("metrics-frame");
         if (frame) siteCfg(function(cfg) {
-          frame.src = t==='vmui' ? cfg.vm_url + '/vmui/#/' : cfg.grafana_url + '/dashboard/new?orgId=1&editPanel=1';
+          frame.src = t==='grafana' ? cfg.grafana_url + '/' : cfg.vm_url + '/vmui/';
         });
       }
 
@@ -216,11 +294,13 @@ function renderMetricsBrowse() {
       //  PAGE: Agent List
       // ===================================================================
       function renderAgentList() {
-        var html = '<div class="card"><div class="card-hd">📋 Agent 清单（'+agents.length+'）</div>';
+        // 多租户(D3)界面隔离：当前租户非"全部"时，仅展示该租户的 Agent
+        var scope = agents.filter(function (a) { return window.tenantVisible(a); });
+        var html = '<div class="card"><div class="card-hd">📋 Agent 清单（'+scope.length+' / 共 '+agents.length+'）</div>';
         html += '<div class="card-bd">';
         html += '<div class="filter-bar"><input placeholder="搜索 ID / IP / 名称" oninput="renderAgentListFiltered(this.value)" style="flex:1;max-width:300px"><select onchange="renderAgentListFilteredByType(this.value)"><option value="all">全部类型</option><option value="edge">📡 边缘</option><option value="proxy">🔗 Proxy</option></select><select onchange="renderAgentListFilteredByStatus(this.value)"><option value="all">全部状态</option><option value="healthy">健康</option><option value="offline">离线</option><option value="stopped">已停</option></select></div>';
         html += '<table><thead><tr><th>Agent ID</th><th>名称</th><th>类型</th><th>状态</th><th>版本</th><th>IDC</th><th>插件</th><th>操作</th></tr></thead><tbody id="agent-list-tbody">';
-        agents.forEach(function(a) {
+        scope.forEach(function(a) {
           html += '<tr style="cursor:pointer" onclick="openDetailById(\''+a.id+'\')"><td style="color:var(--primary)">'+a.id+'</td><td>'+a.name+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge '+(a.status==='healthy'?'b-h':'b-s')+'">'+a.status+'</span></td><td>'+a.version+'</td><td>'+((a.labels||{}).idc||'-')+'</td><td>'+(a.plugins||[]).map(function(p){return '<span class="badge" style="background:#f0f0f0;color:#666;margin-right:2px">'+p+'</span>'}).join('')+'</td><td><button class="btn btn-o btn-sm" onclick="event.stopPropagation();quickStart(\''+a.id+'\')">启动</button></td></tr>';
         });
         html += '</tbody></table></div>';
@@ -250,16 +330,18 @@ function renderMetricsBrowse() {
         html += '<select onchange="auditFilter()" id="audit-result" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部结果</option><option value="成功">成功</option><option value="失败">失败</option></select>';
         html += '<span style="font-size:11px;color:var(--muted)" id="audit-count"></span>';
         html += '</div>';
-        html += '<table style="font-size:12px"><thead><tr><th>时间</th><th>操作人</th><th>操作类型</th><th>目标</th><th>范围</th><th>结果</th></tr></thead><tbody id="audit-tbody">';
-        html += '</tbody></table></div></div>';
+        html += '<table style="font-size:12px;table-layout:fixed;width:100%"><thead><tr><th style="width:170px">时间</th><th style="width:90px">操作人</th><th style="width:150px">操作类型</th><th style="width:101px">目标</th><th style="width:100px">范围</th><th style="width:421px">结果</th></tr></thead><tbody id="audit-tbody">';
+        html += '</tbody></table><div id="audit-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px;font-size:12px"></div></div></div>';
         document.getElementById("main-content").innerHTML = html;
         window._auditData = [];
-        fetch(API+"/audit").then(function(r){return r.json()}).then(function(entries){
+        window._auditPage = 1;
+        fetch(API+"/audit?limit=1000").then(function(r){return r.json()}).then(function(entries){
           window._auditData = entries || [];
           auditRender();
         }).catch(function(){ document.getElementById("audit-tbody").innerHTML = '<tr><td colspan="6" style="color:var(--error)">加载失败</td></tr>'; });
       }
-      function auditFilter() { auditRender(); }
+      function auditFilter() { window._auditPage = 1; auditRender(); }
+      function auditGoPage(d) { window._auditPage = Math.max(1, (window._auditPage||1) + d); auditRender(); }
       // 审计条目字段兼容（API 返回小写 key，旧数据可能为大写）
       function auditF(e) {
         return {
@@ -288,19 +370,47 @@ function renderMetricsBrowse() {
           if (q && e.operator.toLowerCase().indexOf(q)<0 && e.target.toLowerCase().indexOf(q)<0 && e.result.toLowerCase().indexOf(q)<0 && e.scope.toLowerCase().indexOf(q)<0) return false;
           return true;
         }).reverse();
+        // 前端分页（每页 20 条）：过滤后的全量在内存里，翻页不回服务端
+        var ps = 20;
+        var totalPages = Math.max(1, Math.ceil(filtered.length / ps));
+        if ((window._auditPage||1) > totalPages) window._auditPage = totalPages;
+        var page = window._auditPage || 1;
+        var pageItems = filtered.slice((page-1)*ps, page*ps);
         var tbody = document.getElementById('audit-tbody');
         if (tbody) {
           if (filtered.length === 0) {
             tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted)">无匹配记录</td></tr>';
           } else {
-            tbody.innerHTML = filtered.map(function(e){
-              var badge = e.result.indexOf('失败')>=0 ? 'b-o' : 'b-h';
-              return '<tr><td style="white-space:nowrap">'+escHtml(e.time)+'</td><td>'+escHtml(e.operator)+'</td><td><span class="badge" style="background:#e8f0fe;color:#2563eb">'+escHtml(e.action)+'</span></td><td>'+escHtml(e.target)+'</td><td>'+escHtml(e.scope)+'</td><td><span class="badge '+badge+'">'+escHtml(e.result)+'</span></td></tr>';
-            }).join('');
-          }
+          tbody.innerHTML = pageItems.map(function(e,i){
+            var isFail = e.result.indexOf('失败')>=0;
+            var badge = isFail ? 'b-o' : 'b-h';
+            var badgeColor = isFail ? 'background:#fef2f2;color:#b91c1c' : 'background:#f0fdf4;color:#15803d';
+            // 结果拆两段：状态徽章 + 详情文本（默认两行截断，点击展开全量）
+            // 注意：全局 CSS 有 td{white-space:nowrap}，详情/目标列必须显式 white-space:normal 才能折行
+            var detail = escHtml(e.result);
+            var no = 'aud-' + Math.abs(hashStr(JSON.stringify(e) + i));
+            return '<tr><td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+escHtml(e.time)+'</td>'
+              +'<td style="overflow:hidden;text-overflow:ellipsis" title="'+escHtml(e.operator)+'">'+escHtml(e.operator)+'</td>'
+              +'<td style="overflow:hidden"><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(e.action)+'</span></td>'
+              +'<td style="white-space:normal;word-break:break-all" title="'+escHtml(e.target)+'">'+escHtml(e.target)+'</td>'
+              +'<td style="white-space:normal;word-break:break-all">'+escHtml(e.scope)+'</td>'
+              +'<td><div style="display:flex;align-items:flex-start;gap:6px;min-width:0">'
+              +'<span class="badge '+badge+'" style="'+badgeColor+';flex-shrink:0">'+(isFail?'失败':'成功')+'</span>'
+              +'<span id="'+no+'" title="'+detail+'" onclick="audToggle(\''+no+'\')" style="flex:1;min-width:0;cursor:pointer;white-space:normal;word-break:break-all;max-height:34px;overflow:hidden;color:var(--text)">'+detail+'</span>'
+              +'</div></td></tr>';
+          }).join('');
+        }
         }
         var cnt = document.getElementById('audit-count');
-        if (cnt) cnt.textContent = '显示 '+filtered.length+'/'+entries.length+' 条';
+        if (cnt) cnt.textContent = filtered.length === 0 ? '共 0 条'
+          : '第 ' + ((page-1)*ps+1) + '-' + Math.min(page*ps, filtered.length) + ' 条 / 共 ' + filtered.length + ' 条';
+        var pager = document.getElementById('audit-pager');
+        if (pager) {
+          pager.innerHTML = filtered.length === 0 ? '' :
+            '<button class="btn btn-o btn-sm" '+(page<=1?'disabled':'')+' onclick="auditGoPage(-1)">上一页</button>'
+            + '<span style="color:var(--muted)">第 '+page+' / '+totalPages+' 页 · 每页 '+ps+' 条</span>'
+            + '<button class="btn btn-o btn-sm" '+(page>=totalPages?'disabled':'')+' onclick="auditGoPage(1)">下一页</button>';
+        }
       }function verCmp(a, b) {
         // 语义化版本比较：v0.10.0 > v0.9.0（分段数值比较，修字典序 sort 的 v0.10 < v0.9 缺陷）；unknown 恒为最小
         if (a === b) return 0;
@@ -340,12 +450,12 @@ function renderMetricsBrowse() {
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">';
         // Version column
         html += '<div class="card"><div class="card-hd">📦 版本分布</div><div class="card-bd">';
-        var verColors = {'v0.3.0':'#10b981','v0.3.1':'#2563eb','v0.4.0':'#f59e0b',unknown:'#d1d5db'};
+        var verColors = {'v0.3.0':'#10b981','v0.3.1':'#0f766e','v0.4.0':'#f59e0b',unknown:'#d1d5db'};
         html += '<table style="font-size:12px;width:100%"><thead><tr><th>版本</th><th style="text-align:right">数量</th><th>占比</th><th>状态</th></tr></thead><tbody>';
         Object.keys(verMap).sort(verCmp).reverse().forEach(function(v){
           var pct = Math.round(verMap[v]/total*100);
           var status = v===latest?'<span class="badge b-h">最新</span>':(pct<10?'<span class="badge" style="background:#fef3c7;color:#f59e0b">老旧</span>':'<span class="badge b-r">稳定</span>');
-          html += '<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+(verColors[v]||'#d1d5db')+';margin-right:6px"></span><b>'+v+'</b></td><td style="text-align:right">'+verMap[v]+'</td><td><div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:6px;background:var(--bg);border-radius:3px;overflow:hidden"><div style="width:'+pct+'%;height:100%;background:'+(verColors[v]||'#2563eb')+';border-radius:3px"></div></div>'+pct+'%</div></td><td>'+status+'</td></tr>';
+          html += '<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+(verColors[v]||'#d1d5db')+';margin-right:6px"></span><b>'+v+'</b></td><td style="text-align:right">'+verMap[v]+'</td><td><div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:6px;background:var(--bg);border-radius:3px;overflow:hidden"><div style="width:'+pct+'%;height:100%;background:'+(verColors[v]||'#0f766e')+';border-radius:3px"></div></div>'+pct+'%</div></td><td>'+status+'</td></tr>';
         });
         html += '</tbody></table></div>';
         // OS column
@@ -376,15 +486,16 @@ function renderMetricsBrowse() {
         document.getElementById("main-content").innerHTML = html;
       }
       
-// ============ 插件能力目录（SQLite 配置库驱动，全数据渲染） ============
+// ============ 插件能力目录（目录库驱动，全数据渲染） ============
 var _catalog = {
   currentId: null, detail: null, metrics: [], filters: {types:[],units:[]},
   expanded: {}, dashList: [], dash: null, dashRange: '1h', dashVar: {}, dashPanels: []
 };
 
-function renderPluginsMart() {
+function renderPluginsMart(hostId) {
+  var host = hostId || 'main-content';
   var html = '<div class="card"><div class="card-hd">🔌 采集插件 <span style="font-weight:400;font-size:11px;color:var(--muted)">采集能力目录 · 配置化驱动</span> <button class="btn btn-o btn-sm" style="float:right" onclick="reimportCatalog()">⟳ 重新导入</button></div><div class="card-bd" id="plugin-main"><div style="text-align:center;color:var(--muted);padding:20px">⏳ 加载插件目录...</div></div></div>';
-  document.getElementById("main-content").innerHTML = html;
+  document.getElementById(host).innerHTML = html;
   fetch(API+'/catalog/plugins').then(function(r){return r.json()}).then(function(list){
     window._catalogList = list || [];
     renderPluginGrid();
@@ -423,7 +534,8 @@ function renderPluginGrid() {
     var icon = p.icon && p.icon.indexOf('/')>=0 ? '<img src="'+p.icon+'" style="width:32px;height:32px;border-radius:6px">' : '🧩';
     h += '<div class="plugin-card plugin-item" data-cat="'+p.category+'" style="cursor:pointer" onclick="showPluginDetail('+p.id+')">'
       + '<div class="plugin-icon">'+icon+'</div>'
-      + '<div class="plugin-info"><div class="plugin-name">'+p.display_name+' <span style="font-size:10px;color:var(--muted)">'+p.version+'</span></div>'
+      // 版本徽标只在后端给了真版本时渲染——集成包不带版本，空值就别占位（2026-09-22 界面评审）
+      + '<div class="plugin-info"><div class="plugin-name">'+p.display_name+(p.version?' <span style="font-size:10px;color:var(--muted)">'+p.version+'</span>':'')+'</div>'
       + '<div class="plugin-desc">📏 '+p.metric_count+' 指标 · 📊 '+p.dash_count+' 仪表盘</div>'
       + '<div style="font-size:10px;color:var(--muted);margin-top:4px">'+p.category+'</div></div>'
       + '<div><span class="badge '+(p.source==='custom'?'b-s':'b-h')+'">'+(p.source==='custom'?'自定义':'内置')+'</span></div></div>';
@@ -586,6 +698,19 @@ function savePluginDoc() {
 // ---- 轻量 Markdown 渲染（零依赖） ----
 function escHtml(s) {
   return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+// 审计结果详情展开/收起：两行截断(34px) ↔ 全量
+function audToggle(id) {
+  var el = document.getElementById(id); if (!el) return;
+  var open = el.style.maxHeight === 'none';
+  el.style.maxHeight = open ? '34px' : 'none';
+  el.title = open ? el.textContent : '点击收起';
+}
+// 简易字符串哈希（生成审计详情元素的稳定 id）
+function hashStr(s) {
+  var h = 0;
+  for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+  return h;
 }
 function inlineMD(s) {
   s = escHtml(s);
@@ -974,20 +1099,26 @@ function mdRender(md) {
         return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="100%" preserveAspectRatio="none" style="display:block">'+gridY+paths+'</svg>';
       }
       function renderTargets() {
-        var html = '<div class="card"><div class="card-hd">🎯 采集目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">远程采集的目标实例清单（SQLite 持久化）</span>'
+        var html = '<div class="card"><div class="card-hd">🎯 采集目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">远程采集的目标实例清单（目录库持久化）</span>'
           + '<button class="btn btn-o btn-sm" style="float:right" onclick="targetEdit()">➕ 新增目标</button>'
           + '<button class="btn btn-p btn-sm" style="float:right;margin-right:6px" onclick="openOnboardWizard()">🚀 接入向导</button></div><div class="card-bd">';
         html += '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">';
         html += '<input placeholder="搜索目标..." oninput="targetFilter()" style="width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px" id="target-search">';
         html += '<select onchange="targetFilter()" id="target-type" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部类型</option><option value="mysql">MySQL</option><option value="redis">Redis</option><option value="kafka">Kafka</option><option value="elasticsearch">Elasticsearch</option><option value="clickhouse">ClickHouse</option><option value="http">HTTP</option></select>';
         html += '</div>';
-        html += '<table style="font-size:12px"><thead><tr><th>目标名称</th><th>类型</th><th>地址</th><th>分派 Agent</th><th>插件</th><th>连通性</th><th>操作</th></tr></thead><tbody id="target-tbody">';
+        html += '<table style="font-size:12px"><thead><tr><th>目标名称</th><th>类型</th><th>地址</th><th>所属资源</th><th>分派 Agent</th><th>插件</th><th>连通性</th><th>操作</th></tr></thead><tbody id="target-tbody">';
         html += '</tbody></table></div></div>';
         document.getElementById("main-content").innerHTML = html;
-        fetch(API+'/targets').then(function(r){return r.json()}).then(function(list){
-          window._targets = list || [];
+        Promise.all([
+          fetch(API+'/targets').then(function(r){return r.json()}).catch(function(){ return []; }),
+          fetch(API+'/resources').then(function(r){return r.json()}).catch(function(){ return {}; })
+        ]).then(function(out){
+          window._targets = out[0] || [];
+          var map = {};
+          ((out[1]||{}).resources||[]).forEach(function(x){ map[x.id] = x.name || x.ip || x.id; });
+          window._resMap = map;
           targetRender();
-        }).catch(function(){ window._targets = []; targetRender(); });
+        });
       }
       function targetRender() {
         var q = ((document.getElementById('target-search')||{}).value||'').toLowerCase();
@@ -997,14 +1128,19 @@ function mdRender(md) {
         });
         var tbody = document.getElementById('target-tbody');
         if (!tbody) return;
-        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">无匹配目标，点击右上角「新增目标」开始接入</td></tr>'; return; }
+        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">无匹配目标，点击右上角「新增目标」开始接入</td></tr>'; return; }
         tbody.innerHTML = filtered.map(function(tg){
           var res = tg.last_test_result||'';
+          var resCell = !tg.resource_id ? '<span style="color:var(--muted)">—</span>'
+            : ((window._resMap||{})[tg.resource_id]
+              ? '<a href="javascript:void(0)" onclick="openResourceDrawer(\''+escHtml(tg.resource_id)+'\')" style="color:var(--primary)" title="打开资源详情">'+escHtml((window._resMap||{})[tg.resource_id])+'</a>'
+              : '<span style="color:var(--muted)" title="台账里已没有这个资源（资源被删除后目标残留）">'+escHtml(tg.resource_id)+'（资源已删除）</span>');
           var st = res ? (res.indexOf('失败')===0
             ? '<span class="badge" style="background:#fee2e2;color:var(--error)" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>'
             : '<span class="badge b-h" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>')
             : '<span class="badge b-o">未测试</span>';
-          return '<tr><td>'+escHtml(tg.name)+'</td><td><span class="badge" style="background:#e8f0fe;color:#2563eb">'+escHtml(tg.type)+'</span></td><td><code>'+escHtml(tg.address)+'</code></td><td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+tg.agent_id+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td><td>'+(tg.plugin?'<span class="badge" style="background:#f0f0f0;color:#666">'+escHtml(tg.plugin)+'</span>':'-')+'</td><td>'+st+'</td><td style="white-space:nowrap"><button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetTest('+tg.id+')">测试</button> <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetEdit('+tg.id+')">编辑</button> <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px;color:var(--error)" onclick="targetDelete('+tg.id+',\''+escHtml(tg.name)+'\')">删除</button></td></tr>';
+          var traceBtn = tg.flow_id ? ' <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="openOnboardFlow('+tg.flow_id+')" title="回到产生这个目标的接入流水线，看它是怎么走过来的">🧭 接入过程</button>' : '';
+          return '<tr><td>'+escHtml(tg.name)+'</td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(tg.type)+'</span></td><td><code>'+escHtml(tg.address)+'</code></td><td>'+resCell+'</td><td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+tg.agent_id+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td><td>'+(tg.plugin?'<span class="badge" style="background:#f0f0f0;color:#666">'+escHtml(tg.plugin)+'</span>':'-')+'</td><td>'+st+'</td><td style="white-space:nowrap"><button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetTest('+tg.id+')">测试</button> <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetEdit('+tg.id+')">编辑</button> <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px;color:var(--error)" onclick="targetDelete('+tg.id+',\''+escHtml(tg.name)+'\')">删除</button>'+traceBtn+'</td></tr>';
         }).join('');
       }
       function targetFilter() { targetRender(); }
@@ -1064,11 +1200,13 @@ function mdRender(md) {
         }).catch(function(){ toast('保存失败','err'); });
       }
       // ---- M1-⑤ 接入向导：选插件 → 填目标 → 分派 Agent → 连通性测试 → 配置下发回执 ----
-      function openOnboardWizard(prePlugin) {
+      // prePlugin 预选插件；preAgentID 预选分派 Agent（从资源抽屉进来时必须带，否则建出来的目标
+      // 落在"未分派"，本机清单里看不到）；backFn 关闭后回哪页（默认回采集目标页）
+      function openOnboardWizard(prePlugin, preAgentID, backFn) {
         onboardCfg(function(cfg) {
         var plugins = cfg.onboard_plugins || [];
         var agentOpts = agents.map(function(a){
-          return '<option value="'+a.id+'"'+(a.source==='heartbeat'?' data-hb="1"':'')+'>'+escHtml(a.id)+'（'+(a.type==='proxy'?'Proxy':'Edge')+(a.source==='heartbeat'?' · 心跳':' · 本机')+' · '+a.status+'）</option>';
+          return '<option value="'+a.id+'"'+(a.id===preAgentID?' selected':'')+(a.source==='heartbeat'?' data-hb="1"':'')+'>'+escHtml(a.id)+'（'+(a.type==='proxy'?'Proxy':'Edge')+(a.source==='heartbeat'?' · 心跳':' · 本机')+' · '+a.status+'）</option>';
         }).join('');
         renderOverlay('🚀 接入向导 <span style="font-weight:400;font-size:11px;color:var(--muted)">选插件 → 填目标 → 分派 → 能力配置 → 测试 → 配置下发</span>', function(){
           var h = '<div style="display:grid;gap:12px;font-size:13px;max-width:560px">';
@@ -1096,7 +1234,7 @@ function mdRender(md) {
           h += '<div id="ob-receipt"></div>';
           h += '</div>';
           return h;
-        }, true, renderTargets);
+        }, true, backFn || renderTargets);
         obLoadGroupList();
         });
       }
@@ -1170,7 +1308,7 @@ function mdRender(md) {
                 + '<div style="margin-top:4px">'+line2+'</div>'
                 + '<div style="margin-top:4px">📦 配置已写入分派 Agent 期望配置，Agent 下次心跳（≤30s）自动拉取生效</div>'
                 + (ok ? '<div style="margin-top:6px;color:var(--muted)">💡 采集开始后，可在插件仪表盘（约 2-5 分钟）看到该目标曲线；若持续无数据，SLO 页断采清单会出现该目标</div>' : '<div style="margin-top:6px;color:var(--muted)">💡 网络不通不影响配置下发；修复网络后采集自动开始</div>')
-                + '<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-o btn-sm" onclick="closeOverlay();renderTargets()">完成</button></div></div>';
+                + '<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-o btn-sm" onclick="closeOverlay()">完成</button></div></div>';
             });
           });
         }).catch(function(e){
@@ -1180,7 +1318,8 @@ function mdRender(md) {
       // ---- 指标中心：多渠道治理视图（D9 五渠道 × 层级树 × 渠道/分组/归属过滤） ----
       var _CHANNEL_LABELS = {builtin:'内置采集', exporter:'Exporter', script:'自定义脚本', sql:'SQL/JDBC', log:'日志转指标', '':'未归类'};
       var _OWNERSHIP_LABELS = {preset:'预置（可停用）', custom:'自定义', '':'-'};
-      function renderMetricsCatalog() {
+      function renderMetricsCatalog(hostId) {
+        var host = hostId || 'main-content';
         window._gov = window._gov || {query:'',level:'',major:'',channel:'',grp:'',ownership:'',phase1:false,page:1,ps:15};
         var g = window._gov;
         var html = '<div class="card"><div class="card-hd">📏 指标中心 <span style="font-weight:400;font-size:11px;color:var(--muted)">多渠道统一治理：内置 / Exporter / 自定义脚本 / SQL / 日志转指标</span>';
@@ -1189,7 +1328,7 @@ function mdRender(md) {
         html += '<button class="btn btn-o btn-sm" onclick="openVmModal()">🔍 从 VM 导入</button>';
         html += '</span></div><div class="card-bd" id="metrics-main">';
         html += '<div style="text-align:center;color:var(--muted);padding:20px">⏳ 加载中...</div></div></div>';
-        document.getElementById("main-content").innerHTML = html;
+        document.getElementById(host).innerHTML = html;
         // facets（层级树/渠道/分组计数）+ 数据并行拉取
         fetch(API+'/metrics/gov/facets').then(function(r){return r.json()}).then(function(f){
           window._govFacets = f || {};
@@ -1304,7 +1443,7 @@ function mdRender(md) {
               var phaseBadge = m.phase===2 ? ' <span title="二期规划" style="font-size:9px;color:var(--muted)">二期</span>' : '';
               return '<tr class="metrics-row" data-name="'+escHtml(m.name)+'">'
                 + '<td><input type="checkbox" class="metrics-cb" value="'+escHtml(m.name)+'" onchange="metricsBatchToggle()"></td>'
-                + '<td style="cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="showMetricDetail(\''+escHtml(m.name)+'\')"><span class="badge" style="background:#e8f0fe;color:#2563eb">'+escHtml(m.plugin||'-')+'</span>'+(m.source_ref?'<div style="font-size:10px;color:var(--muted)" title="溯源 '+escHtml(m.source_ref)+'">'+escHtml(m.source_ref)+'</div>':'')+'</td>'
+                + '<td style="cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="showMetricDetail(\''+escHtml(m.name)+'\')"><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(m.plugin||'-')+'</span>'+(m.source_ref?'<div style="font-size:10px;color:var(--muted)" title="溯源 '+escHtml(m.source_ref)+'">'+escHtml(m.source_ref)+'</div>':'')+'</td>'
                 + '<td style="cursor:pointer" onclick="govSet(\'channel\',\''+escHtml(m.channel)+'\');null">'+(_CHANNEL_LABELS[m.channel]||m.channel||'-')+'</td>'
                 + '<td style="cursor:pointer;color:var(--muted)" onclick="showMetricDetail(\''+escHtml(m.name)+'\')">'+escHtml(m.grp||'-')+'</td>'
                 + '<td style="cursor:pointer" onclick="showMetricDetail(\''+escHtml(m.name)+'\')">'+actDot(m.expression||m.name)+nameCell+phaseBadge+'</td>'
@@ -1634,7 +1773,7 @@ function mdRender(md) {
             if (targets.length===0) { h += '<div style="padding:8px 12px;color:var(--muted)">暂无分派目标</div>'; }
             else {
               h += '<table style="font-size:12px;width:100%"><thead><tr style="color:var(--muted);text-align:left"><th style="padding:4px 12px">插件</th><th style="padding:4px 12px">目标</th><th style="padding:4px 12px">地址</th></tr></thead><tbody>';
-              targets.forEach(function(t){ h += '<tr><td style="padding:4px 12px"><span class="badge" style="background:#e8f0fe;color:#2563eb">'+escHtml(t.plugin||'-')+'</span></td><td style="padding:4px 12px">'+escHtml(t.target||'-')+'</td><td style="padding:4px 12px"><code>'+escHtml(t.address||'-')+'</code></td></tr>'; });
+              targets.forEach(function(t){ h += '<tr><td style="padding:4px 12px"><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(t.plugin||'-')+'</span></td><td style="padding:4px 12px">'+escHtml(t.target||'-')+'</td><td style="padding:4px 12px"><code>'+escHtml(t.address||'-')+'</code></td></tr>'; });
               h += '</tbody></table>';
             }
             h += '</div>';
@@ -1886,7 +2025,7 @@ function mdRender(md) {
         target.forEach(function(a) {
           fetch(API+"/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:a.id,action:action})}).then(function(r){return r.json()}).then(function(d){
             done++; if(d.success) ok++;
-            if(done===target.length){ toast("完成: "+ok+"/"+target.length+" 成功", ok===target.length?"ok":"err"); refresh(); }
+            if(done===target.length){ toast("完成: "+ok+"/"+target.length+" 成功", ok===target.length?"ok":"err"); refresh(); if (typeof window.resRefreshAfterBatch==='function') window.resRefreshAfterBatch(); }
           });
         });
       }
@@ -1929,7 +2068,7 @@ function mdRender(md) {
         var p = {
           id: name, icon: '🧩', name: document.getElementById('np-label').value || name,
           cat: document.getElementById('np-cat').value, metricKey: name,
-          ver: 'v1.0.0', type: document.getElementById('np-type').value, enabled: true,
+          type: document.getElementById('np-type').value, enabled: true,
           desc: document.getElementById('np-desc').value || '用户自定义插件',
           params: [], modes: [{name:'默认', config: name+':\n  enabled: true', note:'默认配置'}],
           links: {}, iconFile: '', scriptFile: ''
@@ -1961,4 +2100,211 @@ function mdRender(md) {
       function renderTenants() {
         var html = '<div class="card"><div class="card-hd">🏢 租户管理</div><div class="card-bd"><p style="color:var(--muted);font-size:13px">多租户功能开发中...<br><br>支持按租户划分 Agent、配置告警隔离、指标权限控制。</p></div></div>';
         document.getElementById("main-content").innerHTML = html;
+      }
+
+      // ===================================================================
+      //  PAGE: 系统设置（平台参数 / 租户与权限）
+      //  原「租户管理」菜单收进本页，避免占位菜单独立成项
+      // ===================================================================
+      function renderSettings() {
+        siteCfg(function(cfg) {
+          var html = '<div class="card"><div class="card-hd">⚙️ 平台参数</div><div class="card-bd">';
+          html += '<table><thead><tr><th style="width:220px">参数</th><th>值</th><th style="width:280px">来源</th></tr></thead><tbody>';
+          html += '<tr><td>指标查询地址（浏览器可达）</td><td><code>' + (cfg.vm_url || '-') + '</code></td><td>环境变量 <code>VM_PUBLIC_URL</code>，未配置时按访问地址推导</td></tr>';
+          html += '<tr><td>Grafana 地址</td><td><code>' + (cfg.grafana_url || '-') + '</code></td><td>环境变量 <code>GRAFANA_PUBLIC_URL</code></td></tr>';
+          html += '</tbody></table>';
+          html += '<p style="color:var(--muted);font-size:12px;margin-top:10px">服务端监听地址、Agent 容器前缀、CORS 白名单等由容器环境变量注入（见 <code>deploy/docker/.env.example</code>），不在界面暴露以免误改生产配置。</p>';
+          html += '</div></div>';
+          html += '<div class="card" style="margin-top:14px"><div class="card-hd">🏢 租户与权限 <button class="btn btn-o btn-sm" style="float:right" onclick="tenantNewPrompt()">＋ 新建租户</button></div><div class="card-bd"><div id="tenant-root" style="min-height:20px;color:var(--muted)">加载租户…</div></div></div>';
+          html += '</div></div>';
+          // 平台自监控（架构文档 3.3 · 前端效果设计第 6 章）：消费 /api/selfmon，展示平台自身运行态，纯只读
+          html += '<div class="card" style="margin-top:14px"><div class="card-hd">🩺 平台自监控 <button class="btn btn-o btn-sm" style="float:right" onclick="selfMonRefresh()">↻ 刷新</button></div><div class="card-bd"><div id="selfmon-root" style="min-height:40px;color:var(--muted)">加载运行态…</div></div></div>';
+          // 告警中心（架构 D6/G5）：主动告警，默认纯内部；外发 webhook 按 env 启用
+          html += '<div class="card" style="margin-top:14px"><div class="card-hd">🚨 告警中心 <button class="btn btn-o btn-sm" style="float:right" onclick="alertCenterRefresh()">↻ 刷新</button></div><div class="card-bd"><div id="alert-root" style="min-height:30px;color:var(--muted)">加载告警…</div></div></div>';
+          document.getElementById("main-content").innerHTML = html;
+          if (typeof selfMonRender === 'function') selfMonRender();
+          if (typeof alertCenterRender === 'function') alertCenterRender();
+          if (typeof tenantRender === 'function') tenantRender();
+        });
+      }
+
+      // 平台自监控渲染：消费 /api/selfmon，展示 L0 自身运行态（只读，数据缺失降级提示，不造假）
+      function selfMonFetch() {
+        if (window.selfMonXhr) window.selfMonXhr.abort();
+        var xhr = window.selfMonXhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/selfmon", true);
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          var root = document.getElementById("selfmon-root");
+          if (!root) return;
+          if (xhr.status !== 200) { root.innerHTML = '<span style="color:var(--error)">自监控接口不可用（HTTP ' + xhr.status + '）</span>'; return; }
+          var d;
+          try { d = JSON.parse(xhr.responseText); } catch (e) { root.innerHTML = '<span style="color:var(--error)">自监控数据解析失败</span>'; return; }
+          root.innerHTML = selfMonHTML(d);
+        };
+        xhr.send();
+      }
+      function selfMonRefresh() { selfMonFetch(); }
+      function selfMonRender() { selfMonFetch(); }
+      function selfMonHTML(d) {
+        var up = d.uptime_sec || 0;
+        var upStr = up < 60 ? up + 's' : (up < 3600 ? Math.floor(up/60) + 'm' + (up%60) + 's' : Math.floor(up/3600) + 'h' + Math.floor((up%3600)/60) + 'm');
+        var a = d.agents || {};
+        var cat = d.catalog || {};
+        var cfg = d.config || {};
+        function chip(label, val, ok) {
+          var c = ok === false ? 'var(--error)' : (ok === true ? 'var(--success)' : 'var(--text)');
+          return '<div style="flex:1;min-width:140px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;color:var(--muted)">' + label + '</div><div style="font-size:15px;font-weight:600;color:' + c + '">' + val + '</div></div>';
+        }
+        var h = '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">平台自启动于 ' + (d.started_at ? d.started_at.replace('T',' ').replace('Z','') : '-') + ' · ' + (d.go_version || '-') + '</div>';
+        h += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">'
+          + chip('运行时长', upStr, d.goroutines > 0)
+          + chip('Agent 注册', (a.total||0) + ' · 在线 ' + (a.online||0), true)
+          + chip('edge/proxy', (a.edge||0) + '/' + (a.proxy||0), null)
+          + chip('goroutine', d.goroutines||0, null)
+          + chip('catalog 库', (cat.reachable ? '可达' : '不可达'), cat.reachable)
+          + chip('插件/指标', (cat.plugins||0) + '/' + (cat.metrics||0), cat.reachable)
+          + chip('租户数', (cat.tenants||1), cat.reachable)
+          + '</div>';
+        h += '<table><thead><tr><th style="width:200px">运行配置</th><th>值</th></tr></thead><tbody>';
+        var rows = [['监听地址', cfg.listen_addr], ['Agent HTTP 端口', cfg.agent_http_port], ['Agent 容器前缀', cfg.agent_container_pre], ['SAgent 版本', cfg.sagent_version], ['VM 基地址', cfg.vm_url], ['接入停滞阈值', cfg.onboard_stall_sec + 's'], ['隧道远端端口', cfg.tunnel_remote_port], ['演示种子', cfg.seed_demo_agents === 'true' ? '开启' : '关闭']];
+        rows.forEach(function(rd){ h += '<tr><td>' + rd[0] + '</td><td><code>' + (rd[1]||'-') + '</code></td></tr>'; });
+        h += '</tbody></table>';
+        return h;
+      }
+
+      // ===== 告警中心（架构 D6/G5）：消费 /api/alerts，主动告警 + 默认内部、webhook 按 env =====
+      function alertCenterFetch() {
+        var root = document.getElementById("alert-root");
+        if (!root) return;
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/alerts", true);
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          if (xhr.status !== 200) { root.innerHTML = '<span style="color:var(--error)">告警接口不可用（HTTP ' + xhr.status + '）</span>'; return; }
+          var d;
+          try { d = JSON.parse(xhr.responseText); } catch (e) { root.innerHTML = '<span style="color:var(--error)">告警数据解析失败</span>'; return; }
+          root.innerHTML = alertCenterHTML(d);
+        };
+        xhr.send();
+      }
+      function alertCenterRefresh() { alertCenterFetch(); }
+      function alertCenterRender() { alertCenterFetch(); }
+      function alertCenterHTML(d) {
+        var list = (d && d.alerts) || [];
+        var firing = d.firing || 0;
+        var badgeColor = firing > 0 ? 'var(--error)' : 'var(--success)';
+        var h = '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">当前告警 ' + firing + ' 条'
+          + (d.webhook_gated ? ' · 外发未启用（ALERT_WEBHOOK_URL 为空，纯内部）' : ' · 外发 webhook 已启用')
+          + '</div>';
+        if (!list.length) { h += '<span style="color:var(--muted)">暂无告警事件</span>'; return h; }
+        h += '<table><thead><tr><th style="width:120px">时间</th><th style="width:200px">规则</th><th style="width:70px">级别</th><th style="width:80px">状态</th><th>标题</th></tr></thead><tbody>';
+        list.forEach(function(a) {
+          var sev = a.severity === 'critical' ? '<span style="color:var(--error);font-weight:600">CRIT</span>'
+            : '<span style="color:var(--warning,#f59e0b);font-weight:600">WARN</span>';
+          var st = a.state === 'firing' ? '<span style="color:var(--error)">● firing</span>' : '<span style="color:var(--success)">○ resolved</span>';
+          h += '<tr><td style="white-space:nowrap">' + a.time + '</td><td><code>' + a.source + '</code></td><td>' + sev + '</td><td>' + st + '</td>'
+            + '<td><div>' + a.title + '</div><div style="font-size:12px;color:var(--muted)">' + (a.detail||'') + '</div></td></tr>';
+        });
+        h += '</tbody></table>';
+        return h;
+      }
+
+      // ===== 多租户（架构 D3 骨架）：租户列表渲染 + 新建 =====
+      function tenantRender() {
+        var root = document.getElementById("tenant-root");
+        if (!root) return;
+        root.innerHTML = '<span style="color:var(--muted)">加载租户…</span>';
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/tenants", true);
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          if (xhr.status !== 200) { root.innerHTML = '<span style="color:var(--error)">租户接口不可用</span>'; return; }
+          var d;
+          try { d = JSON.parse(xhr.responseText); } catch (e) { root.innerHTML = '<span style="color:var(--error)">租户数据解析失败</span>'; return; }
+          var list = (d && d.tenants) || [];
+          if (!list.length) { root.innerHTML = '<span style="color:var(--muted)">暂无租户</span>'; return; }
+          var h = '<table><thead><tr><th style="width:60px">#</th><th style="width:180px">标识</th><th>名称</th><th>说明</th><th style="width:230px">API 凭证（D3）</th></tr></thead><tbody>';
+          list.forEach(function(t) {
+            h += '<tr><td>' + t.id + '</td><td><code>' + t.code + '</code></td><td>' + t.name + '</td>'
+              + '<td style="color:var(--muted)">' + (t.note||'') + '</td>'
+              + '<td style="white-space:nowrap"><span id="ttok-' + t.code + '" style="font-size:12px;color:var(--muted)">查状态…</span> '
+              + '<button class="btn btn-o btn-sm" onclick="tenantTokenIssue(\'' + t.code + '\')">签发/轮换</button> '
+              + '<button class="btn btn-o btn-sm" onclick="tenantTokenRevoke(\'' + t.code + '\')">吊销</button></td></tr>';
+          });
+          h += '</tbody></table>';
+          root.innerHTML = h;
+          // 逐租户查凭证状态，异步就地回填
+          list.forEach(function(t) { tenantTokenStatus(t.code); });
+        };
+        xhr.send();
+      }
+      function tenantNewPrompt() {
+        var code = prompt("租户标识（唯一，小写字母/数字/-）：", "");
+        if (!code) return;
+        var name = prompt("租户名称：", "");
+        if (!name) return;
+        var note = prompt("说明（可选）：", "");
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/tenants", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try {
+            var d = JSON.parse(xhr.responseText);
+            if (xhr.status === 200 && d.ok) { toast('已新建租户 ' + code, 'ok'); } else { toast((d && d.error) || '新建失败', 'err'); }
+          } catch (e) { toast('新建失败', 'err'); }
+          if (typeof tenantRender === 'function') tenantRender();
+        };
+        xhr.send(JSON.stringify({ code: code, name: name, note: note || '' }));
+      }
+
+      // ===== 租户 API Token（架构 D3 凭证鉴权）：状态 / 签发 / 吊销 =====
+      function tenantTokenStatus(code) {
+        var span = document.getElementById('ttok-' + code);
+        if (!span) return;
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/tenants/" + encodeURIComponent(code) + "/token", true);
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          if (!span) return;
+          if (xhr.status !== 200) { span.textContent = '状态未知(' + xhr.status + ')'; span.style.color='var(--error)'; return; }
+          var d;
+          try { d = JSON.parse(xhr.responseText); } catch (e) { span.textContent = '状态未知'; return; }
+          if (d.has_token) { span.textContent = '已签发'; span.style.color='var(--success)'; }
+          else { span.textContent = '未签发'; span.style.color='var(--muted)'; }
+        };
+        xhr.send();
+      }
+      function tenantTokenIssue(code) {
+        if (!window.confirm('为租户【' + code + '】签发/轮换 API Token？\n\n新 Token 明文仅本次展示一次，替换旧 Token 后旧凭证立即失效。')) return;
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/tenants/" + encodeURIComponent(code) + "/token", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          var d;
+          try { d = JSON.parse(xhr.responseText); } catch (e) { toast('签发失败', 'err'); return; }
+          if (xhr.status === 200 && d.ok) {
+            toast('Token 已签发（明文仅本次可见）', 'ok');
+            var msg = '请立即保存以下 API Token（仅本次返回，库内只存哈希）：\n\n' + d.api_token + '\n\n调用示例：\ncurl -H "X-Tenant-Token: ' + d.api_token + '" /api/agents';
+            window.alert(msg);
+          } else { toast((d && d.error) || '签发失败', 'err'); }
+          tenantTokenStatus(code);
+        };
+        xhr.send('{}');
+      }
+      function tenantTokenRevoke(code) {
+        if (!window.confirm('吊销租户【' + code + '】的 API Token？\n吊销后该凭证立即失效，无法恢复。')) return;
+        var xhr = new XMLHttpRequest();
+        xhr.open("DELETE", "/api/tenants/" + encodeURIComponent(code) + "/token", true);
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          var d;
+          try { d = JSON.parse(xhr.responseText); } catch (e) { toast('吊销失败', 'err'); return; }
+          if (xhr.status === 200 && d.ok) { toast('已吊销 ' + code + ' 的 Token', 'ok'); }
+          else { toast((d && d.error) || '吊销失败', 'err'); }
+          tenantTokenStatus(code);
+        };
+        xhr.send('{}');
       }

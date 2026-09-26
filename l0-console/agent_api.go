@@ -19,7 +19,31 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 	mux.HandleFunc("/api/agents", func(w http.ResponseWriter, r *http.Request) {
 		// 刷新状态
 		refreshAgentStatuses(store)
-		writeJSON(w, store.List())
+		all := store.List()
+		// 多租户(D3) 数据隔离：先做凭证校验（伪 tenant token 一律 401，不许伪装租户），
+		// 再取生效作用域——带合法 token 时用其内置租户强制限定（忽略客户端 ?tenant=），
+		// 无 token 走管理端视图，?tenant= 仅作界面过滤（与前端 tenantVisible 口径一致）。
+		scope, claim, valid := effectiveTenantParam(r, catDB)
+		if claim && !valid {
+			w.WriteHeader(http.StatusUnauthorized)
+			writeJSON(w, map[string]any{"error": "unauthorized: invalid tenant token"})
+			return
+		}
+		if scope != "" {
+			filtered := make([]*Agent, 0, len(all))
+			for _, a := range all {
+				tid := a.TenantID
+				if tid == "" {
+					tid = "default"
+				}
+				if tid == scope {
+					filtered = append(filtered, a)
+				}
+			}
+			writeJSON(w, filtered)
+			return
+		}
+		writeJSON(w, all)
 	})
 
 	// API: 单个 Agent 详情 + 配置管理
@@ -55,6 +79,18 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 		}
 
 		// /api/agents/{id}
+		if r.Method == http.MethodDelete {
+			// 注销 Agent：清内存台账 + DB 行（重装/换机重新接入前清身份）
+			store.Remove(path)
+			deleted, err := catDB.DeleteAgent(path)
+			if err != nil {
+				writeJSON(w, map[string]interface{}{"error": err.Error()})
+				return
+			}
+			addAudit("注销 Agent", path, "Agent 台账", map[bool]string{true: "已删除", false: "记录不存在"}[deleted])
+			writeJSON(w, map[string]interface{}{"ok": true, "deleted": deleted})
+			return
+		}
 		if agent := store.Get(path); agent != nil {
 			writeJSON(w, agent)
 		} else {
@@ -127,6 +163,15 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			CfgVersion int                    `json:"config_version"`
 			CfgHash    string                 `json:"config_hash"`
 			Stats      map[string]interface{} `json:"stats"`
+			// —— 接入中心回报字段（可选，向后兼容：旧 Agent 不发这些也能正常心跳）——
+			AppliedVersion int   `json:"applied_version"` // 已生效的配置版本（修实测的「期望 cfg-N / 生效 None」）
+			ApplyMs        int64 `json:"apply_ms"`        // 配置应用耗时
+			Targets        []struct {
+				Target  string                 `json:"target"`
+				Probe   map[string]interface{} `json:"probe"`
+				Collect map[string]interface{} `json:"collect"`
+				Samples map[string]interface{} `json:"samples"`
+			} `json:"targets"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]interface{}{"error": err.Error()})
@@ -137,13 +182,18 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			writeJSON(w, map[string]interface{}{"error": "unregistered agent", "need_register": true})
 			return
 		}
-		if err := catDB.AgentHeartbeat(req.ID, req.Version, req.CfgHash, req.Stats); err != nil {
+		// 生效配置版本：优先用显式上报的 applied_version，回退 hash（兼容旧 Agent）
+		effective := req.CfgHash
+		if req.AppliedVersion > 0 {
+			effective = fmt.Sprintf("cfg-%d", req.AppliedVersion)
+		}
+		if err := catDB.AgentHeartbeat(req.ID, req.Version, effective, req.Stats); err != nil {
 			writeJSON(w, map[string]interface{}{"error": err.Error()})
 			return
 		}
 		if a := store.Get(req.ID); a != nil {
 			a.LastSeen = time.Now().Unix()
-			a.CfgEffective = req.CfgHash
+			a.CfgEffective = effective
 			a.Stats = req.Stats
 			if req.Version != "" {
 				a.Version = req.Version
@@ -151,7 +201,15 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			a.Status = "healthy"
 		}
 		ver, content, _ := catDB.GetAgentConfig(req.ID)
-		resp := map[string]interface{}{"ok": true, "config_version": ver, "interval": 30}
+		// tasks：G2 通道退役后，「下发式执行器」统一走通道 A（心跳拉取任务）。
+		// 事务内把该 SAgent 名下待执行的 agent-action 任务（pending→dispatched）一次性取回，
+		// 注入心跳响应 tasks 字段；SAgent 拉到后本机执行并回执 /api/l1/task/ack（幂等防重）。
+		rows, _ := catDB.PullAgentActions(req.ID)
+		tasks := make([]interface{}, 0, len(rows))
+		for _, rw := range rows {
+			tasks = append(tasks, rowToL1Task(rw))
+		}
+		resp := map[string]interface{}{"ok": true, "config_version": ver, "interval": 30, "tasks": tasks}
 		if ver > 0 && req.CfgVersion != ver {
 			resp["config"] = content
 			resp["config_changed"] = true
@@ -169,12 +227,35 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			AgentID string `json:"agent_id"`
 			Plugin  string `json:"plugin"`
 			Note    string `json:"note"`
+			Region  string `json:"region"`
 		}
 		switch r.Method {
 		case http.MethodGet:
 			list, err := catDB.ListTargets()
 			if err != nil {
 				writeJSON(w, map[string]interface{}{"error": err.Error()})
+				return
+			}
+			// 多租户(D3) 数据隔离：伪 token 401；带合法 token 只返回其内置租户的目标，
+			// 防止跨租户读到别家采集目标
+			scope, claim, valid := effectiveTenantParam(r, catDB)
+			if claim && !valid {
+				w.WriteHeader(http.StatusUnauthorized)
+				writeJSON(w, map[string]interface{}{"error": "unauthorized: invalid tenant token"})
+				return
+			}
+			if scope != "" {
+				scoped := make([]*storepkg.TargetRow, 0, len(list))
+				for _, t := range list {
+					tid := t.TenantID
+					if tid == "" {
+						tid = "default"
+					}
+					if tid == scope {
+						scoped = append(scoped, t)
+					}
+				}
+				writeJSON(w, scoped)
 				return
 			}
 			writeJSON(w, list)
@@ -189,7 +270,17 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 				writeJSON(w, map[string]interface{}{"error": "agent not found: " + q.AgentID})
 				return
 			}
-			id, err := catDB.InsertTarget(&storepkg.TargetRow{Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note})
+			scope, claim, valid := effectiveTenantParam(r, catDB)
+			if claim && !valid {
+				w.WriteHeader(http.StatusUnauthorized)
+				writeJSON(w, map[string]any{"error": "unauthorized: invalid tenant token"})
+				return
+			}
+			rowTenant := "default"
+			if scope != "" {
+				rowTenant = scope
+			}
+			id, err := catDB.InsertTarget(&storepkg.TargetRow{Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note, TenantID: rowTenant, Region: q.Region})
 			if err != nil {
 				writeJSON(w, map[string]interface{}{"error": err.Error()})
 				return
@@ -209,16 +300,20 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 				writeJSON(w, map[string]interface{}{"error": "agent not found: " + q.AgentID})
 				return
 			}
-			// 找出旧分派，双端同步配置版本
+			// 找出旧分派，双端同步配置版本；保留目标既有租户不变（归属租户由 owner 侧 D3 管）
 			oldAgent := ""
+			itemTenant := "default"
 			if list, _ := catDB.ListTargets(); list != nil {
 				for _, t := range list {
 					if t.ID == q.ID {
 						oldAgent = t.AgentID
+						if t.TenantID != "" {
+							itemTenant = t.TenantID
+						}
 					}
 				}
 			}
-			if err := catDB.UpdateTarget(&storepkg.TargetRow{ID: q.ID, Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note}); err != nil {
+			if err := catDB.UpdateTarget(&storepkg.TargetRow{ID: q.ID, Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note, TenantID: itemTenant, Region: q.Region}); err != nil {
 				writeJSON(w, map[string]interface{}{"error": err.Error()})
 				return
 			}
@@ -306,6 +401,28 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+
+		// G2 通道退役：心跳型真实 SAgent 的动作统一走通道 A（投递 agent-action 任务，
+		// 由 SAgent 心跳拉取、本机执行并回执）；docker 源演示 Agent 保留通道 B（executeAction）。
+		if src, _ := catDB.GetAgentSource(req.AgentID); src == "heartbeat" {
+			tid := fmt.Sprintf("agent-action-%s-%d", req.AgentID, time.Now().UnixNano())
+			row, _, err := catDB.QueueL1Task(storepkg.L1TaskRow{
+				ID:   tid,
+				ControllerID: req.AgentID,
+				Kind: "agent-action",
+				PayloadJSON: storepkg.MarshalPayload(map[string]any{
+					"action": req.Action, "version": req.Version,
+				}),
+				Status: "pending",
+			})
+			if err != nil {
+				writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			addAudit("投递 Agent 动作", req.AgentID, "通道A(心跳拉取)", req.Action+" → "+row.ID)
+			writeJSON(w, map[string]any{"ok": true, "queued": true, "channel": "a", "task_id": row.ID, "action": req.Action, "status": row.Status})
 			return
 		}
 
@@ -429,7 +546,7 @@ func handleAgentConfigRoute(w http.ResponseWriter, r *http.Request, agentID stri
 			return
 		}
 		// 无版本化配置：本机演示容器回退展示文件配置；其余回默认 doc（version=0，可直接 PUT 初始化）
-		configPath := fmt.Sprintf("../deploy/docker/configs/sagent/%s.yaml", agentID)
+		configPath := fmt.Sprintf("%s/%s.yaml", strings.TrimRight(cfgAgentConfDir, "/"), agentID)
 		if data, err := os.ReadFile(configPath); err == nil && src == "docker" {
 			writeJSON(w, map[string]interface{}{
 				"agent_id": agentID, "version": 0, "content": string(data),
@@ -590,10 +707,13 @@ func syncAgentConfig(store *AgentStore, catDB *storepkg.DB, agentID string) {
 	if err != nil {
 		return
 	}
-	list := []map[string]string{}
+	list := []map[string]interface{}{}
 	for _, t := range targets {
 		if t.AgentID == agentID {
-			list = append(list, map[string]string{"plugin": t.Plugin, "target": t.Name, "type": t.Type, "address": t.Address})
+			list = append(list, map[string]interface{}{
+				"id": t.ID, "plugin": t.Plugin, "target": t.Name, "type": t.Type,
+				"address": t.Address, "resource_id": t.ResourceID, "params_json": t.ParamsJSON,
+			})
 		}
 	}
 	doc := map[string]interface{}{"targets": list}
@@ -601,6 +721,18 @@ func syncAgentConfig(store *AgentStore, catDB *storepkg.DB, agentID string) {
 	// （parseAgentConfigDoc 兼容旧格式纯数组 content，避免解析失败导致配置段丢失）
 	if _, content, err := catDB.GetAgentConfig(agentID); err == nil && content != "" {
 		if hm, ok := parseAgentConfigDoc(content)["host_metrics"]; ok && hm != nil {
+			doc["host_metrics"] = hm
+		}
+	}
+	// 平台设备硬规则（PLAN §2.6）：承载平台能力的机器 host_metrics 强制开启、不可关闭——
+	// 界面配置轨道里被关掉的，重算时在这里兜底拉起
+	if rid, err := catDB.GetAgentResourceID(agentID); err == nil && rid != "" {
+		if res, err := catDB.GetResource(rid); err == nil && res != nil && res.Role == "platform_device" {
+			hm, ok := doc["host_metrics"].(map[string]interface{})
+			if !ok || hm == nil {
+				hm = defaultHostMetricsCfg()
+			}
+			hm["enabled"] = true
 			doc["host_metrics"] = hm
 		}
 	}

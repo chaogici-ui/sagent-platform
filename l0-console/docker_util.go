@@ -212,7 +212,7 @@ func dockerCmdOut(args ...string) (string, error) {
 	return runCmd("../deploy/docker", "docker", args...)
 }
 
-// rowToAgent SQLite 行转内存 Agent
+// rowToAgent 目录库行转内存 Agent
 
 func runCmd(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)

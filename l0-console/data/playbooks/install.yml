@@ -1,0 +1,52 @@
+# SAgent 安装 playbook（外置：改安装动作不动代码；l0-console 启动时加载，@TOKEN@ 由平台渲染）
+# 可用占位符：@BIN_SRC@ 平台二进制绝对路径 | @BIN_SHA@ 版本清单 sha256
+#             @CFG_SRC@ 渲染好的配置文件路径 | @DEST_HOME@ 目标机用户家目录
+# 任务名使用中文：界面逐任务展示时用户可直接读懂（PLAY RECAP 是 ansible 固定输出，前端不做翻译）
+# 注意：file/copy/setup 模块要求目标机有 Python（vm-host 靶机已预装 python3）
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 停止旧 Agent 进程（如存在）
+      shell: "pkill -f 'bin/SAgent --config' || true"
+      failed_when: false
+
+    - name: 创建目录骨架
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "@DEST_HOME@/SAgent/bin"
+        - "@DEST_HOME@/SAgent/conf"
+        - "@DEST_HOME@/SAgent/data"
+        - "@DEST_HOME@/SAgent/logs"
+        - "@DEST_HOME@/SAgent/run"
+
+    - name: 分发 SAgent 二进制
+      copy:
+        src: "@BIN_SRC@"
+        dest: "@DEST_HOME@/SAgent/bin/SAgent"
+        mode: "0755"
+
+    - name: 校验二进制 sha256（目标机实测）
+      shell: "sha256sum @DEST_HOME@/SAgent/bin/SAgent"
+      register: binsum
+
+    - name: 断言 sha256 与版本清单一致
+      command: /bin/true
+      changed_when: false
+      failed_when: binsum.stdout.split()[0] != "@BIN_SHA@"
+
+    - name: 下发 SAgent 配置
+      copy:
+        src: "@CFG_SRC@"
+        dest: "@DEST_HOME@/SAgent/conf/SAgent.yaml"
+        mode: "0644"
+
+    - name: 启动 Agent 并验证进程存活
+      shell: |
+        cd @DEST_HOME@/SAgent
+        nohup ./bin/SAgent --config conf/SAgent.yaml >> logs/stdout.log 2>&1 &
+        echo $! > run/SAgent.pid
+        sleep 2
+        kill -0 $(cat run/SAgent.pid)

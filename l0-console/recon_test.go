@@ -12,11 +12,7 @@ import (
 
 func newReconTestDB(t *testing.T) *storepkg.DB {
 	t.Helper()
-	db, err := storepkg.Open(t.TempDir() + "/recon-test.db")
-	if err != nil {
-		t.Fatalf("open recon test db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestCatalog(t)
 
 	// 目录夹具：host_metrics 3 条（cpu×2 + memory×1，phase=1）+ test 插件 2 条。
 	// 插件名模拟真实约定：目录行不带 _probe/_exporter 后缀（ResolvePluginID 会剥后缀匹配），

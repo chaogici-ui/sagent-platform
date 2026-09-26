@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib" // 目录库唯一驱动：PostgreSQL（架构 D1）
 )
 
 // Plugin 插件定义（配置化，来源：夜莺移植 / 用户新建）
@@ -43,16 +43,16 @@ type Metric struct {
 	CreatedAt  time.Time `json:"created_at"`
 
 	// ---- 多渠道治理字段（D9）：KPI 种子填充，用户不可编辑（预置语义） ----
-	Level           string `json:"level"`            // 资源层级：基础资源层/中间层…
-	Major           string `json:"major"`            // 资源大类：主机设备类/容器类/数据库…
-	Category        string `json:"category"`         // 资源名称：主机/Docker/MySQL…
-	Grp             string `json:"grp"`              // 采集分组 key（配置开关用，与 Agent 注册表一致）
-	Channel         string `json:"channel"`          // 来源渠道：builtin/exporter/script/sql/log
-	Ownership       string `json:"ownership"`        // 归属：preset（只读可停用）/ custom（可增删改）
-	SourceRef       string `json:"source_ref"`       // 溯源：产出插件/脚本/任务标识
+	Level           string `json:"level"`             // 资源层级：基础资源层/中间层…
+	Major           string `json:"major"`             // 资源大类：主机设备类/容器类/数据库…
+	Category        string `json:"category"`          // 资源名称：主机/Docker/MySQL…
+	Grp             string `json:"grp"`               // 采集分组 key（配置开关用，与 Agent 注册表一致）
+	Channel         string `json:"channel"`           // 来源渠道：builtin/exporter/script/sql/log
+	Ownership       string `json:"ownership"`         // 归属：preset（只读可停用）/ custom（可增删改）
+	SourceRef       string `json:"source_ref"`        // 溯源：产出插件/脚本/任务标识
 	MinAgentVersion string `json:"min_agent_version"` // 需要的最低 Agent 版本
-	Phase           int    `json:"phase"`            // 1=本期已实现 2=二期规划
-	Freq            string `json:"freq,omitempty"`   // 建议采集频率（KPI 表原文）
+	Phase           int    `json:"phase"`             // 1=本期已实现 2=二期规划
+	Freq            string `json:"freq,omitempty"`    // 建议采集频率（KPI 表原文）
 	// Plugin 为只读展示字段：LEFT JOIN plugins 得到的目录插件名
 	Plugin string `json:"plugin,omitempty"`
 }
@@ -66,21 +66,21 @@ type Dashboard struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// DB SQLite 封装
+// DB 存储封装（目录库唯一载体：PostgreSQL）
 type DB struct {
-	db *sql.DB
+	db *pgDB
 }
 
-// Open 打开（不存在则创建）SQLite 库并初始化表结构
-func Open(path string) (*DB, error) {
-	d, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+// OpenPostgres 打开 PostgreSQL 目录库并初始化表结构。
+// dsn 例如 postgres://user:pass@host:5432/db?sslmode=disable
+func OpenPostgres(dsn string) (*DB, error) {
+	raw, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}
-	d.SetMaxOpenConns(1)
-	s := &DB{db: d}
+	s := &DB{db: &pgDB{db: raw}}
 	if err := s.init(); err != nil {
-		d.Close()
+		raw.Close()
 		return nil, err
 	}
 	return s, nil
@@ -89,10 +89,41 @@ func Open(path string) (*DB, error) {
 // Close 关闭连接
 func (s *DB) Close() error { return s.db.Close() }
 
+// insertID 执行一条 INSERT 并返回自增 id。
+// PG 不支持 LastInsertId，统一追加 RETURNING id 经 QueryRow 取回。
+func (s *DB) insertID(query string, args ...any) (int64, error) {
+	var id int64
+	if err := s.db.QueryRow(query+" RETURNING id", args...).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// tableColumns 返回指定表的列名集合（幂等迁移用）。
+// 按 current_schema() 限定：生产为 public，单测为每用例独立 schema，
+// 不限定会把同名表在其它 schema 的列一并捞回来（重复列名污染迁移判断）。
+func (s *DB) tableColumns(table string) (map[string]bool, error) {
+	cols := map[string]bool{}
+	rows, err := s.db.Query(`SELECT column_name FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name=$1`, table)
+	if err != nil {
+		return cols, err
+	}
+	defer rows.Close()
+	var name string
+	for rows.Next() {
+		if err := rows.Scan(&name); err != nil {
+			return cols, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
 func (s *DB) init() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS plugins (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			name TEXT NOT NULL UNIQUE,
 			display_name TEXT DEFAULT '',
 			category TEXT DEFAULT '',
@@ -101,10 +132,10 @@ func (s *DB) init() error {
 			version TEXT DEFAULT '',
 			collect_doc_md TEXT DEFAULT '',
 			source TEXT DEFAULT 'builtin',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS metrics (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			plugin_id INTEGER NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
 			name TEXT NOT NULL,
 			unit TEXT DEFAULT '',
@@ -112,20 +143,20 @@ func (s *DB) init() error {
 			expression TEXT DEFAULT '',
 			metric_type TEXT DEFAULT 'gauge',
 			source TEXT DEFAULT 'builtin',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS dashboards (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			plugin_id INTEGER NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
 			name TEXT DEFAULT '',
 			configs_json TEXT DEFAULT '{}',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_metrics_plugin ON metrics(plugin_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_dashboards_plugin ON dashboards(plugin_id)`,
 		// M2-⑪ 审计落库：操作审计持久化（重启不丢）
 		`CREATE TABLE IF NOT EXISTS audit_log (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			time TEXT DEFAULT '',
 			operator TEXT DEFAULT '',
 			action TEXT DEFAULT '',
@@ -134,52 +165,68 @@ func (s *DB) init() error {
 			result TEXT DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(id DESC)`,
+		// 多租户（架构 D3）：租户维度骨架。存量 Agent/资源默认归 default 租户，不破坏既有单租户行为。
+		`CREATE TABLE IF NOT EXISTS tenants (
+			id SERIAL PRIMARY KEY,
+			code TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			note TEXT DEFAULT '',
+			api_token_hash TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`INSERT INTO tenants (code, name, note) VALUES ('default', '默认租户', '存量资源归属的默认租户') ON CONFLICT DO NOTHING`,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("init: %w", err)
 		}
 	}
+	if err := s.migrateTenantToken(); err != nil {
+		return fmt.Errorf("init migrate tenant token: %w", err)
+	}
 	if err := s.migrateMetricsV2(); err != nil {
 		return err
 	}
-	return s.migrateMetricsV3()
+	if err := s.migrateMetricsV3(); err != nil {
+		return err
+	}
+	return s.initVersions()
+}
+
+// migrateTenantToken 追加式迁移：为存量 tenants 表补 auth 凭证列（架构 D3 凭证鉴权）。
+// 新库由 CREATE TABLE 直接含列，无需再 ALTER；旧库无损加列，存量 token_hash 为空=未签发。
+func (s *DB) migrateTenantToken() error {
+	cols, err := s.tableColumns("tenants")
+	if err != nil {
+		return err
+	}
+	if cols["api_token_hash"] {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE tenants ADD COLUMN api_token_hash TEXT DEFAULT ''`); err != nil {
+		return err
+	}
+	return nil
 }
 
 // migrateMetricsV3 多渠道治理列（D9）：level/major/category/grp/channel/ownership/
 // source_ref/min_agent_version/phase/freq —— 追加式迁移，旧库数据保留
 func (s *DB) migrateMetricsV3() error {
-	rows, err := s.db.Query(`PRAGMA table_info(metrics)`)
+	cols, err := s.tableColumns("metrics")
 	if err != nil {
 		return err
 	}
-	cols := map[string]bool{}
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt interface{}
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		cols[name] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
 	add := map[string]string{
-		"level":            `ALTER TABLE metrics ADD COLUMN level TEXT DEFAULT ''`,
-		"major":            `ALTER TABLE metrics ADD COLUMN major TEXT DEFAULT ''`,
-		"category":         `ALTER TABLE metrics ADD COLUMN category TEXT DEFAULT ''`,
-		"grp":              `ALTER TABLE metrics ADD COLUMN grp TEXT DEFAULT ''`,
-		"channel":          `ALTER TABLE metrics ADD COLUMN channel TEXT DEFAULT ''`,
-		"ownership":        `ALTER TABLE metrics ADD COLUMN ownership TEXT DEFAULT ''`,
-		"source_ref":       `ALTER TABLE metrics ADD COLUMN source_ref TEXT DEFAULT ''`,
+		"level":             `ALTER TABLE metrics ADD COLUMN level TEXT DEFAULT ''`,
+		"major":             `ALTER TABLE metrics ADD COLUMN major TEXT DEFAULT ''`,
+		"category":          `ALTER TABLE metrics ADD COLUMN category TEXT DEFAULT ''`,
+		"grp":               `ALTER TABLE metrics ADD COLUMN grp TEXT DEFAULT ''`,
+		"channel":           `ALTER TABLE metrics ADD COLUMN channel TEXT DEFAULT ''`,
+		"ownership":         `ALTER TABLE metrics ADD COLUMN ownership TEXT DEFAULT ''`,
+		"source_ref":        `ALTER TABLE metrics ADD COLUMN source_ref TEXT DEFAULT ''`,
 		"min_agent_version": `ALTER TABLE metrics ADD COLUMN min_agent_version TEXT DEFAULT ''`,
-		"phase":            `ALTER TABLE metrics ADD COLUMN phase INTEGER DEFAULT 1`,
-		"freq":             `ALTER TABLE metrics ADD COLUMN freq TEXT DEFAULT ''`,
+		"phase":             `ALTER TABLE metrics ADD COLUMN phase INTEGER DEFAULT 1`,
+		"freq":              `ALTER TABLE metrics ADD COLUMN freq TEXT DEFAULT ''`,
 	}
 	for name, ddl := range add {
 		if cols[name] {
@@ -209,24 +256,8 @@ func (s *DB) migrateMetricsV3() error {
 // migrateMetricsV2 统一指标存储：metrics 表放开 plugin_id 可空约束并增加
 // cat/labels/status/plugin_name/updated_at 列（旧库一次性重建迁移，数据保留）
 func (s *DB) migrateMetricsV2() error {
-	rows, err := s.db.Query(`PRAGMA table_info(metrics)`)
+	cols, err := s.tableColumns("metrics")
 	if err != nil {
-		return err
-	}
-	cols := map[string]bool{}
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt interface{}
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		cols[name] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if cols["cat"] && cols["plugin_name"] {
@@ -239,7 +270,7 @@ func (s *DB) migrateMetricsV2() error {
 	defer tx.Rollback()
 	stmts := []string{
 		`CREATE TABLE metrics_v2 (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			plugin_id INTEGER REFERENCES plugins(id) ON DELETE CASCADE,
 			name TEXT NOT NULL,
 			unit TEXT DEFAULT '',
@@ -252,7 +283,7 @@ func (s *DB) migrateMetricsV2() error {
 			status TEXT DEFAULT '',
 			plugin_name TEXT DEFAULT '',
 			updated_at TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`INSERT INTO metrics_v2(id, plugin_id, name, unit, note, expression, metric_type, source, created_at)
 			SELECT id, COALESCE(plugin_id,0) AS plugin_id, name, unit, note, expression, metric_type, source, created_at FROM metrics`,
@@ -271,23 +302,13 @@ func (s *DB) migrateMetricsV2() error {
 
 // UpsertPlugin 移植器用：按 name 冲突时只更新元数据，保留用户可能改过的 collect_doc_md
 func (s *DB) UpsertPlugin(p *Plugin) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO plugins(name, display_name, category, type, icon, version, collect_doc_md, source)
+	q := `INSERT INTO plugins(name, display_name, category, type, icon, version, collect_doc_md, source)
 		VALUES(?,?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET display_name=excluded.display_name, category=excluded.category,
 		type=excluded.type, version=excluded.version,
-		icon=CASE WHEN excluded.icon!='' THEN excluded.icon ELSE plugins.icon END`,
-		p.Name, p.DisplayName, p.Category, p.Type, p.Icon, p.Version, p.CollectDocMD, p.Source)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil || id > 0 {
-		return id, err
-	}
-	// conflict path: query existing id
-	row := s.db.QueryRow(`SELECT id FROM plugins WHERE name=?`, p.Name)
-	var existing int64
-	return existing, row.Scan(&existing)
+		icon=CASE WHEN excluded.icon!='' THEN excluded.icon ELSE plugins.icon END`
+	// INSERT..ON CONFLICT DO UPDATE RETURNING id：插入与更新两条路径都返回该行 id，无需回查
+	return s.insertID(q, p.Name, p.DisplayName, p.Category, p.Type, p.Icon, p.Version, p.CollectDocMD, p.Source)
 }
 
 // UpdatePluginIcon 移植器用：为图标为空的插件回填静态服务路径
@@ -353,12 +374,8 @@ func (s *DB) GetPlugin(id int64) (*Plugin, error) {
 
 // InsertMetric 新增指标（builtin 移植与 custom 共用）
 func (s *DB) InsertMetric(m *Metric) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO metrics(plugin_id, name, unit, note, expression, metric_type, source)
+	return s.insertID(`INSERT INTO metrics(plugin_id, name, unit, note, expression, metric_type, source)
 		VALUES(?,?,?,?,?,?,?)`, m.PluginID, m.Name, m.Unit, m.Note, m.Expression, m.MetricType, m.Source)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
 }
 
 // DeleteMetric 删除指标（前端仅允许删 custom）
@@ -589,19 +606,19 @@ func (s *DB) BackfillMetricNote(name, note string) error {
 }
 
 // M2-⑪ 审计落库
-// InsertAudit 写入一条操作审计；超量裁剪保留最近 auditKeep 条
+// InsertAudit 写入一条操作审计；超量裁剪保留最近 AuditKeep 条
 func (s *DB) InsertAudit(time, operator, action, target, scope, result string) error {
 	if _, err := s.db.Exec(`INSERT INTO audit_log(time, operator, action, target, scope, result)
 		VALUES(?,?,?,?,?,?)`, time, operator, action, target, scope, result); err != nil {
 		return err
 	}
-	// 裁剪：仅保留最近 auditKeep 条（低频操作，简单 DELETE 即可）
-	_, err := s.db.Exec(`DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?`, auditKeep)
+	// 裁剪：仅保留最近 AuditKeep 条（低频操作，简单 DELETE 即可）
+	_, err := s.db.Exec(`DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?`, AuditKeep)
 	return err
 }
 
-// auditKeep 审计落库保留条数
-const auditKeep = 5000
+// AuditKeep 审计落库保留条数（导出：/api/audit 的 limit 参数以此为读取上限）
+const AuditKeep = 5000
 
 // AuditRow 落库审计行（与 main.go 的 AuditEntry 字段一一对应）
 type AuditRow struct {
@@ -662,7 +679,7 @@ func (s *DB) ReplacePluginMetrics(pluginName string, keep []string) (int64, erro
 
 // ListPluginMetricExprs 返回插件的指标英文 key 集合（expression 优先，回退 name），供对账引擎做 VM 探测
 func (s *DB) ListPluginMetricExprs(pluginID int64) ([]string, error) {
-	rows, err := s.db.Query(`SELECT IFNULL(expression,''), name FROM metrics WHERE plugin_id=?`, pluginID)
+	rows, err := s.db.Query(`SELECT COALESCE(expression,''), name FROM metrics WHERE plugin_id=?`, pluginID)
 	if err != nil {
 		return nil, err
 	}
@@ -928,7 +945,8 @@ func (s *DB) MetricGovFacets() (*GovFacets, error) {
 }
 
 // MetricTypes 插件下指标类型去重（前端过滤下拉用）
-func (s *DB) MetricTypes(pluginID int64) ([]string, error) {	return s.distinct(`SELECT DISTINCT metric_type FROM metrics WHERE plugin_id=? AND metric_type<>'' ORDER BY 1`, pluginID)
+func (s *DB) MetricTypes(pluginID int64) ([]string, error) {
+	return s.distinct(`SELECT DISTINCT metric_type FROM metrics WHERE plugin_id=? AND metric_type<>'' ORDER BY 1`, pluginID)
 }
 
 // MetricUnits 插件下指标单位去重
@@ -955,12 +973,8 @@ func (s *DB) distinct(q string, pluginID int64) ([]string, error) {
 
 // InsertDashboard 插入仪表盘
 func (s *DB) InsertDashboard(d *Dashboard) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO dashboards(plugin_id, name, configs_json) VALUES(?,?,?)`,
+	return s.insertID(`INSERT INTO dashboards(plugin_id, name, configs_json) VALUES(?,?,?)`,
 		d.PluginID, d.Name, d.ConfigsJSON)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
 }
 
 // ListDashboards 仪表盘列表（不含大 JSON，避免列表页过重）

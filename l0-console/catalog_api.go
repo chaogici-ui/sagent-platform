@@ -18,7 +18,7 @@ import (
 
 var catalogDB *store.DB
 
-// registerCatalogRoutes 注册插件能力目录（SQLite 配置库）相关 API
+// registerCatalogRoutes 注册插件能力目录（目录库 PG）相关 API
 func registerCatalogRoutes(mux *http.ServeMux, db *store.DB) {
 	catalogDB = db
 

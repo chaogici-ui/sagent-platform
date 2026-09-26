@@ -1,0 +1,121 @@
+# 卸载 SAgent：把一台已接入主机上的 SAgent 卸干净，并清空平台侧全部登记。
+# 与「边缘采集」同构 —— 同样是一条可观测的流水线（每步有状态、证据、分级诊断），
+# 不是一个"点一下就当成功"的按钮：卸载失败必须暴露，不能谎报。
+#
+# internal: true —— 本模板不出现在「新建接入」向导的模式选择里。
+#   入口语义是「既有接入的逆操作」：由接入中心已接入资源的行内「卸载」按钮拉起。
+#
+# 顺序不是随便排的，每一步都有它必须在前/在后的理由：
+#   ① 扫描（只读）—— 先看清楚会动到什么。清单必须来自目标机实测，
+#      人工手抄的清单不能作为"要不要继续"的依据
+#   ② 人工确认    —— 确认的意义全在于它基于①的实测结果；人点头才继续
+#   ③ 卸采集插件  —— 必须早于卸 SAgent：SAgent 一旦先死，它托管的插件子进程会变孤儿
+#      继续采集；而直接杀插件又会被 SAgent 的崩溃自愈在 2 秒后拉回来，所以由 SAgent 自己停
+#   ④ 清自愈自启  —— 必须早于卸 SAgent：run.sh 守护会在 SAgent 退出后 3 秒把它拉回来，
+#      带着守护去删安装目录只会得到"删了又出现"
+#   ⑤ 卸 SAgent   —— 此时已无人会阻止它退场，停进程 / 删目录 / 目标机自证核对
+#   ⑥ 注销平台登记 —— 目标机清完再清平台账：反过来做的话，中途失败会留下
+#      "平台已注销、机器上还在采集"的黑洞（指标还在上报，台账里却查不到它）
+id: offboard
+name: 卸载 SAgent
+internal: true
+description: 卸载目标机上的 SAgent 并清空平台登记：扫描采集插件与自愈来源 → 人工确认影响范围 → 卸载采集插件并核验进程消失 → 清理 run.sh 守护与 crontab → 停 SAgent、删安装目录并自证核对 → 注销 Agent 台账 / 抓取登记 / 采集目标
+steps:
+  - id: pick_object
+    atom: pick_object
+    title: 选择资源对象
+    scope: platform
+    hint: 按资源台账定位待卸载主机。资源对象与 SSH 凭据**保留**——卸载只清"采集接入"的产物，卸载后可原样重新接入
+
+  - id: scan_collectors
+    atom: scan_collectors
+    title: 扫描采集插件与自愈来源
+    scope: external
+    requires: [pick_object]
+    hint: 只读扫描：数出目标机上部署了几个采集插件（进程内建 / 独立子进程 / 脚本）、各有没有独立进程在跑，以及有没有自愈守护与指向 SAgent 的 crontab 条目。**本环节不改动目标机任何东西**——扫描与执行分开，扫描失败不该动目标机
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} '
+        AG=~/SAgent
+        echo "--- 配置里启用的插件 ---"
+        sed -n "/^plugins:/,/^[^[:space:]]/p" $AG/conf/SAgent.yaml 2>/dev/null || echo "无配置"
+        echo "--- 安装目录下的插件产物 ---"
+        ls -1 $AG/plugins 2>/dev/null || echo "无 plugins 目录"
+        echo "--- 有独立进程的插件 ---"
+        for e in /proc/[0-9]*/exe; do t=$(readlink $e 2>/dev/null); case "$t" in $AG/plugins/*) echo "$e -> $t";; esac; done
+        echo "--- 自愈守护 ---"
+        ls -l $AG/run.sh 2>/dev/null || echo "无 run.sh 守护脚本"
+        echo "--- crontab 中的 SAgent 条目 ---"
+        crontab -l 2>/dev/null | grep SAgent || echo "crontab 无 SAgent 条目"'
+
+  - id: confirm_uninstall
+    atom: confirm_uninstall
+    title: 确认卸载影响范围
+    scope: platform
+    requires: [scan_collectors]
+    hint: 把上一步的实测清单摊开给操作人员：会删什么、会留什么、哪些插件会被连带停掉。**人确认之后才继续**——这不是装饰性的确认弹窗，确认内容是目标机实测结果
+
+  - id: uninstall_plugins
+    atom: uninstall_plugins
+    title: 卸载采集插件
+    scope: external
+    requires: [confirm_uninstall]
+    gate: blocker
+    hint: 先让 SAgent 通过 control.sock 自己停插件（它会同时置停止标记，插件不会被崩溃自愈拉回来），再兜底终止残留进程，最后拿目标机自己的口径核验插件进程是否真的消失，没消失即失败。插件产物由后面的「卸载 SAgent」随安装目录一并清除
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} '
+        AG=~/SAgent
+        # 先让 SAgent 自己停插件：直接杀进程会被它的崩溃自愈在 2 秒后拉回来
+        [ -S $AG/run/control.sock ] && (cd $AG && ./bin/SAgent -ctl stop)
+        sleep 3
+        for e in /proc/[0-9]*/exe; do t=$(readlink $e 2>/dev/null); case "$t" in $AG/plugins/*) p=${e#/proc/}; kill "${p%/exe}" 2>/dev/null;; esac; done
+        sleep 3
+        n=0; for e in /proc/[0-9]*/exe; do t=$(readlink $e 2>/dev/null); case "$t" in $AG/plugins/*) n=$((n+1));; esac; done
+        if [ "$n" -eq 0 ]; then echo "插件进程已全部停止"; else echo "插件进程仍剩 $n 个，需人工终止"; fi'
+
+  - id: cleanup_autostart
+    atom: cleanup_autostart
+    title: 清理自愈守护与定时任务
+    scope: external
+    requires: [uninstall_plugins]
+    gate: blocker
+    hint: 终止 run.sh 自愈守护并删除守护脚本，删除 crontab 中指向 SAgent 的条目（其余条目原样保留）。不做这步的话，SAgent 一退出就会被守护或定时任务拉回来。**守护发 SIGKILL 而不是 SIGTERM**：run.sh 的 TERM trap 会拿 pid 文件当进程组去 kill，号码被回收时会误杀无关进程
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} '
+        AG=~/SAgent
+        # 守护必须 KILL：run.sh 的 TERM trap 会 kill -9 -$(cat pid)，pid 复用时会误杀无关进程组
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr "\0" " " < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && kill -9 $p 2>/dev/null;; esac
+        done
+        rm -f $AG/run.sh
+        if command -v crontab >/dev/null 2>&1; then
+          c=$(crontab -l 2>/dev/null)
+          if [ -n "$c" ]; then printf "%s\n" "$c" | grep -v SAgent | crontab - && echo "crontab 中 SAgent 条目已清理"; else echo "crontab 为空"; fi
+        fi
+        echo "自愈守护与 crontab 清理完成"'
+
+  - id: uninstall_agent
+    atom: uninstall_agent
+    title: 卸载 SAgent
+    scope: external
+    requires: [cleanup_autostart]
+    gate: blocker
+    hint: 平台持有凭据时由 ansible 自动执行：先确认进程真的退出（TERM 超时转 KILL），再删安装目录，最后拿目标机自己的口径核对（目录/进程）并断言，核对不过即失败。幂等：没装过的主机同样安全通过
+    # 兜底执行包（无凭据 / 平台 ansible 不可用时下发）：结果态与平台执行的 playbook 一致。
+    # 端口必须显式带上（`ssh user@ip` 默认走 22，正是"连错端口却看着像成功"的根源）；
+    # 顺序不能颠倒（实测踩过）：**先等进程真的退出再删目录** —— SAgent 收 SIGTERM 后要优雅
+    #   关停几秒，期间它的写盘（日志与配置落盘都带 MkdirAll）会把刚删的目录重建出来；
+    # 进程判定按 /proc/<pid>/exe 精确匹配安装路径，不用 pkill -f（它的 -f 会匹配到执行本行的
+    #   sh 自身，历史踩坑），也不按 pid 文件盲杀（pid 可能已被回收成别的进程）
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} '
+        for e in /proc/[0-9]*/exe; do t=$(readlink "$e" 2>/dev/null); case "$t" in "$HOME"/SAgent/bin/SAgent*) p=${e#/proc/}; kill "${p%/exe}" 2>/dev/null;; esac; done
+        sleep 5   # 等 SAgent 优雅关停退出：它还在写盘时删目录，目录会被重新建出来
+        rm -rf ~/SAgent
+        test -d ~/SAgent && echo "卸载未完成：安装目录仍存在" || echo "卸载完成：安装目录已删除"'
+
+  - id: cleanup_platform
+    atom: cleanup_platform
+    title: 注销平台登记
+    scope: platform
+    requires: [uninstall_agent]
+    hint: 注销 Agent 台账（内存 + 目录库 + 期望配置）→ 删除 vmagent file_sd 抓取登记 → 删除该资源的采集目标，每项删后复查并全程审计留痕

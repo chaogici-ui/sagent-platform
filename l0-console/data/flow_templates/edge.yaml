@@ -1,0 +1,83 @@
+# 边缘采集：SAgent 装在被采主机上，采本机指标
+# 原子能力（atom）写死在 Go 里，本文件只做编排。改流程不改代码。
+id: edge
+name: 边缘采集
+description: 在目标主机上安装 SAgent，采集该主机的指标与日志
+steps:
+  - id: pick_object
+    atom: pick_object
+    title: 选择资源对象
+    scope: platform
+    hint: 手填 IP 或资源 ID；台账没有 OS/架构时留空，由主机探路实测回填
+
+  - id: pick_ability
+    atom: pick_ability
+    title: 选择采集能力
+    scope: platform
+    requires: [pick_object]
+    hint: 采集能力是需求声明，前置到资源选择之后——先说清"要采什么"，探路才知道要按哪些参数核对。日志转指标 / 自定义脚本在此一并配置
+
+  - id: collect_params
+    atom: collect_params
+    title: 采集参数
+    scope: platform
+    requires: [pick_ability]
+    when: abilities_requires_params
+    hint: 表单字段由各插件的 params.yaml 声明，平台不写死；字段的 probe 绑定同时决定主机探路要核对哪些项
+
+  - id: preflight_host
+    atom: preflight_host
+    title: 主机探路
+    scope: external
+    requires: [collect_params]
+    gate: blocker
+    hint: 一次探完两类事——① 主机事实：OS/架构/内核/磁盘/端口/是否已有 SAgent（决定装哪个版本）；② 能力可行性：按所选能力的参数声明核对目标可达性（账号/权限类由 Agent 侧在配置下发后验证）。平台持有 SSH 凭据时由 ansible 代执行并自动回填台账；无凭据时下发执行包由人工执行回报
+    # 兜底执行包（平台 ansible 不可用/无凭据时下发）：{{.ip}} / {{.port}} 由平台按资源台账渲染。
+    # 端口必须显式带上：`ssh user@ip` 默认走 22，正是"连错端口却看着像成功"的根源
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} "uname -s; uname -m; uname -r; free -m | sed -n 2p; df -BG / | tail -1; ss -ltn 2>/dev/null | head -1"
+      # 能力可行性：按所选能力填写的参数逐条核对，结论随探路结果一并回报
+      #   目标地址/端口可达性、依赖是否就位、采集账号能否登录（口令类只回报"通过/失败"，不回报口令原文）
+
+  - id: pick_version
+    atom: pick_version
+    title: 选择 SAgent 版本
+    scope: platform
+    requires: [preflight_host]
+    hint: 按主机探路实测的 OS/架构匹配镜像 tag（人工决策点，选择留痕审计）
+
+  - id: install_agent
+    atom: install_agent
+    title: 安装 SAgent
+    scope: external
+    requires: [pick_version]
+    when: "!agent_exists"
+    hint: 按人工选定版本，平台 ansible 分发二进制（sha256 校验）→ 写配置 → 启动；装完 SAgent 自动注册回平台。无凭据时下发安装执行包由人工执行
+
+  - id: self_metrics
+    atom: observe_collect
+    title: 主机自监控生效
+    scope: agent
+    requires: [install_agent]
+    hint: SAgent 存活的唯一证据，也是后续所有环节的可观测性前提。装完即观测，不再加 when 条件——否则执行器上报早于 Agent 注册时会被误判跳过且不可重来
+
+  - id: sync_config
+    atom: sync_config
+    title: 生成并下发配置
+    scope: platform
+    requires: [preflight_host]
+    hint: 渲染成 SAgent 配置段后随心跳下发，版本 +1
+
+  - id: verify_probe
+    atom: verify_probe
+    title: 连通验证
+    scope: agent
+    requires: [sync_config, install_agent]
+    hint: 真连一次、取回一条指标——「配置下发成功」不等于「真能采到」
+
+  - id: observe_collect
+    atom: observe_collect
+    title: 采集入库
+    scope: agent
+    requires: [sync_config, install_agent]
+    hint: 指标进入 VictoriaMetrics，接入中心可看样本

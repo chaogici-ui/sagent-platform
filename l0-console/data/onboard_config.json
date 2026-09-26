@@ -1,17 +1,279 @@
 {
-  "agent_types": [
-    {"id": "edge", "name": "📡 边缘采集 Agent", "desc": "部署在主机上，采集 CPU/内存/磁盘/网络、日志指标、运行巡检脚本", "plugins": ["host_metrics", "log_metrics", "custom_scripts"]},
-    {"id": "proxy", "name": "🔗 Collector Proxy", "desc": "部署在 Proxy 节点，远程采集 MySQL/Redis/Kafka 等中间件指标", "plugins": ["mysql_probe", "prometheus_scrape"]},
-    {"id": "custom", "name": "⚙️ 自定义", "desc": "按需选择组件，适用于特殊场景", "plugins": []}
-  ],
-  "manageable_plugins": ["log_metrics", "mysql_probe", "custom_scripts"],
-  "onboard_plugins": [
-    {"name": "MySQL", "probe": "mysql_probe", "port": "3306"},
-    {"name": "Redis", "probe": "redis_probe", "port": "6379"},
-    {"name": "Kafka", "probe": "kafka_exporter", "port": "9092"},
-    {"name": "Elasticsearch", "probe": "elasticsearch_exporter", "port": "9200"},
-    {"name": "ClickHouse", "probe": "clickhouse_exporter", "port": "9363"},
-    {"name": "HTTP 拨测", "probe": "http_response", "port": "443"},
-    {"name": "自定义脚本", "probe": "custom_scripts", "port": ""}
-  ]
+ "agent_types": [
+  {
+   "id": "edge",
+   "name": "📡 边缘采集 Agent",
+   "desc": "部署在主机上，采集 CPU/内存/磁盘/网络、日志指标、运行巡检脚本",
+   "plugins": [
+    "host_metrics",
+    "log_metrics",
+    "custom_scripts"
+   ]
+  },
+  {
+   "id": "proxy",
+   "name": "🔗 Collector Proxy",
+   "desc": "部署在 Proxy 节点，远程采集 MySQL/Redis/Kafka 等中间件指标",
+   "plugins": [
+    "mysql_probe",
+    "prometheus_scrape"
+   ]
+  },
+  {
+   "id": "custom",
+   "name": "⚙️ 自定义",
+   "desc": "按需选择组件，适用于特殊场景",
+   "plugins": []
+  }
+ ],
+ "manageable_plugins": [
+  "log_metrics",
+  "mysql_probe",
+  "custom_scripts"
+ ],
+ "onboard_plugins": [
+  {
+   "name": "MySQL",
+   "probe": "mysql_probe",
+   "port": "3306",
+   "scope": "remote",
+   "params": "MySQL/params.yaml"
+  },
+  {
+   "name": "Redis",
+   "probe": "redis_probe",
+   "port": "6379",
+   "scope": "remote",
+   "params": "Redis/params.yaml"
+  },
+  {
+   "name": "Kafka",
+   "probe": "kafka_exporter",
+   "port": "9092",
+   "scope": "remote",
+   "params": "Kafka/params.yaml"
+  },
+  {
+   "name": "Elasticsearch",
+   "probe": "elasticsearch_exporter",
+   "port": "9200",
+   "scope": "remote",
+   "params": "Elasticsearch/params.yaml"
+  },
+  {
+   "name": "ClickHouse",
+   "probe": "clickhouse_exporter",
+   "port": "9363",
+   "scope": "remote",
+   "params": "ClickHouse/params.yaml"
+  },
+  {
+   "name": "HTTP 拨测",
+   "probe": "http_response",
+   "port": "443",
+   "scope": "remote",
+   "params": "HTTP_Response/params.yaml"
+  },
+  {
+   "name": "日志转指标",
+   "probe": "log_metrics",
+   "port": "",
+   "scope": "agent",
+   "params": "log_metrics/params.yaml"
+  }
+ ],
+ "agent_abilities": [
+  {
+   "id": "host_metrics",
+   "name": "主机指标",
+   "desc": "CPU / 内存 / 磁盘 / 网络 / 进程，平台设备的地基指标",
+   "scope": "agent",
+   "locked": true
+  },
+  {
+   "id": "custom_scripts",
+   "name": "自定义脚本",
+   "desc": "定时执行脚本，stdout 按行协议产出指标（脚本本体在「采集插件 → 自定义脚本」维护）",
+   "scope": "agent",
+   "params_inline": [
+    {
+     "name": "script_name",
+     "label": "脚本标识",
+     "type": "string",
+     "required": true,
+     "help": "对应采集插件里维护的脚本名"
+    },
+    {
+     "name": "interval",
+     "label": "执行间隔",
+     "type": "duration",
+     "default": "30s"
+    },
+    {
+     "name": "timeout",
+     "label": "超时时间",
+     "type": "duration",
+     "default": "10s"
+    },
+    {
+     "name": "output_format",
+     "label": "输出协议",
+     "type": "enum",
+     "options": [
+      "line",
+      "json"
+     ],
+     "default": "line",
+     "help": "line：metric_name{label=value} 1.0；json：{\"name\":..,\"value\":..}"
+    }
+   ]
+  },
+  {
+   "id": "port_checker",
+   "name": "端口探测",
+   "desc": "周期性探测目标端口可用性，产出 up 指标",
+   "scope": "agent",
+   "params_inline": [
+    {
+     "name": "targets",
+     "label": "探测目标",
+     "type": "textarea",
+     "required": true,
+     "help": "每行一个 host:port"
+    },
+    {
+     "name": "interval",
+     "label": "探测间隔",
+     "type": "duration",
+     "default": "30s"
+    }
+   ]
+  },
+  {
+   "id": "prometheus_scrape",
+   "name": "抓取 exporter",
+   "desc": "拉取外部 Prometheus 端点（通用 exporter 接入方式）",
+   "scope": "agent",
+   "params_inline": [
+    {
+     "name": "url",
+     "label": "抓取地址",
+     "type": "string",
+     "required": true,
+     "placeholder": "http://10.20.30.50:9100/metrics",
+     "probe": "http"
+    },
+    {
+     "name": "interval",
+     "label": "抓取间隔",
+     "type": "duration",
+     "default": "30s"
+    }
+   ]
+  }
+ ],
+ "step_timeouts": {
+  "default": {
+   "run_sec": 3600,
+   "idle_sec": 3600,
+   "retry": 0,
+   "retry_delay_sec": 15
+  },
+  "preflight_host": {
+   "run_sec": 600,
+   "idle_sec": 150,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "install_agent": {
+   "run_sec": 900,
+   "idle_sec": 240,
+   "retry": 1,
+   "retry_delay_sec": 15
+  },
+  "uninstall_agent": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "scan_collectors": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "uninstall_plugins": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "cleanup_autostart": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "preflight_ability": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "sync_config": {
+   "run_sec": 600,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "register_platform_device": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "verify_probe": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "observe_collect": {
+   "run_sec": 900,
+   "idle_sec": 600,
+   "retry": 1,
+   "retry_delay_sec": 30
+  },
+  "self_metrics": {
+   "run_sec": 300,
+   "idle_sec": 180,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "preflight_upgrade": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "upgrade_agent": {
+   "run_sec": 600,
+   "idle_sec": 180,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "preflight_service": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  },
+  "service_execute": {
+   "run_sec": 300,
+   "idle_sec": 120,
+   "retry": 1,
+   "retry_delay_sec": 10
+  }
+ }
 }

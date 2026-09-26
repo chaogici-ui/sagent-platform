@@ -1,0 +1,37 @@
+# 日志转指标参数声明（内置采集能力，目录已存在于插件包中）
+plugin: log_metrics
+title: 日志转指标参数
+fields:
+  - name: log_paths
+    label: 日志路径
+    type: textarea
+    required: true
+    placeholder: |
+      /var/log/order/*.log
+      /data/app/logs/app.log
+    help: 每行一个路径，支持通配符。Vector 引擎按此建 source
+
+  - name: pattern
+    label: 解析正则
+    type: string
+    required: false
+    probe: regex
+    help: 未填则按 JSON 行解析；填了按命名捕获组提取字段
+
+  - name: metric_prefix
+    label: 指标前缀
+    type: string
+    default: log_
+    required: true
+    help: 产出指标名统一加该前缀，进入指标中心 log 渠道
+
+  - name: level_field
+    label: 日志级别字段
+    type: string
+    default: level
+    help: 用于生成分级别计数指标
+
+  - name: interval
+    label: 聚合窗口
+    type: duration
+    default: 30s

@@ -23,9 +23,9 @@ type MetricDef struct {
 	Expression string `json:"expression,omitempty"` // 原始指标名（VM 活跃度匹配用）
 }
 
-// registerMetricRoutes 注册指标中心 API（统一存储：SQLite catalog.db）
+// registerMetricRoutes 注册指标中心 API（统一存储：catalog 库 / PG）
 func registerMetricRoutes(mux *http.ServeMux) {
-	// API: 指标目录（统一存储：SQLite catalog.db；data/metrics.json 仅作首次种子）
+	// API: 指标目录（统一存储：catalog 库 / PG；data/metrics.json 仅作首次种子）
 	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().Format("2006-01-02 15:04")
 

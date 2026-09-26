@@ -3,39 +3,40 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SAgent MVP</title>
-    <link rel="stylesheet" href="css/style.css" />
+    <title>SAgent 采集平台</title>
+    <link rel="stylesheet" href="css/style.css?v=14" />
   </head>
   <body>
     <!-- Sidebar -->
     <nav>
-      <div class="logo">⚡ SAgent MVP</div>
-      <div class="nav-section">📏 能力中心</div>
-      <a data-page="plugins-mart" onclick="goPage('plugins-mart')"
-        >🔌 采集插件</a
-      >
-      <a data-page="metrics-catalog" onclick="goPage('metrics-catalog')"
-        >📏 指标中心</a
-      >
-      <div class="nav-section">🤖 采集管理</div>
-      <a data-page="slo" onclick="goPage('slo')">🏠 SLO 仪表盘</a>
-      <a data-page="agent-list" onclick="goPage('agent-list')">📋 Agent 清单</a>
-      <a data-page="targets" onclick="goPage('targets')">🎯 采集目标</a>
-      <a data-page="versions" onclick="goPage('versions')">🚀 批量升级</a>
-      <a data-page="add" onclick="goPage('add')">🤖 安装部署</a>
-      <div class="nav-section">⚙️ 运营</div>
-      <a data-page="metrics-browse" onclick="goPage('metrics-browse')"
-        >📊 分析大屏</a
-      >
+      <div class="logo">SAgent 采集平台<small>Collect · Govern · Observe</small></div>
+      <!-- 菜单按「平台治理叙事」分 4 组（2026-09-23 前端效果设计定稿，对齐架构文档）：
+           采集平台的核心能力在菜单里看得见：工作台/实时总览/采集健康/资源接入/采集能力/
+           分析大屏/版本/审计/设置。旧 page id 仍可由 goPage 深链访问（utils.js 保留兜底）。 -->
+      <div class="nav-section">监控治理</div>
+      <a data-page="overview" onclick="goPage('overview')">◧ 工作台</a>
+      <a data-page="targets" onclick="goPage('targets')">▤ 实时总览</a>
+      <a data-page="slo" onclick="goPage('slo')">◫ 采集健康</a>
+      <div class="nav-section">采集接入</div>
+      <a data-page="resources" onclick="goPage('resources')">▦ 资源与接入</a>
+      <a data-page="capabilities" onclick="goPage('capabilities')">🔌 采集策略</a>
+      <div class="nav-section">数据观测</div>
+      <a data-page="metrics-browse" onclick="goPage('metrics-browse')">📈 分析大屏</a>
+      <div class="nav-section">系统</div>
+      <a data-page="versions" onclick="goPage('versions')">🧬 版本与兼容</a>
+      <a data-page="changes" onclick="goPage('changes')">📋 变更中心</a>
       <a data-page="audit" onclick="goPage('audit')">📜 审计日志</a>
-      <a data-page="tasks" onclick="goPage('tasks')">📋 任务历史</a>
-      <div class="nav-section">👤 系统</div>
-      <a data-page="tenants" onclick="goPage('tenants')">🏢 租户管理</a>
+      <a data-page="settings" onclick="goPage('settings')">⚙️ 平台设置</a>
+      <div class="nav-foot"><span id="nav-user">toptea@l0</span> · <span id="nav-ver">v0.4.0</span></div>
     </nav>
 
     <!-- Main -->
     <main>
       <div class="top">
+        <div class="search" style="flex:0 0 auto">
+          <label for="tenant-switch" style="font-size:11px;color:var(--muted);margin-right:6px">租户</label>
+          <select id="tenant-switch" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-size:12px;cursor:pointer" onchange="window.changeTenant(this.value)"></select>
+        </div>
         <div class="search">
           <input
             type="text"
@@ -103,11 +104,15 @@
       </div>
     </div>
 
-    <script src="js/utils.js?v=7"></script>
-    <script src="js/api.js?v=7"></script>
-    <script src="js/fleet.js?v=7"></script>
-    <script src="js/panel.js?v=7"></script>
-    <script src="js/app.js?v=7"></script>
+    <script src="js/utils.js?v=26"></script>
+    <script src="js/api.js?v=16"></script>
+    <script src="js/fleet.js?v=16"></script>
+    <script src="js/panel.js?v=26"></script>
+    <script src="js/onboard.js?v=44"></script>
+    <script src="js/version.js?v=2"></script>
+    <script src="js/resources.js?v=16"></script>
+    <script src="js/overview.js?v=4"></script>
+    <script src="js/app.js?v=17"></script>
     <script>
       console.log("SAgent MVP v4 loaded @ " + new Date().toLocaleTimeString());
     </script>

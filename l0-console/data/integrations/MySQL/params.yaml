@@ -1,0 +1,52 @@
+# MySQL 采集参数声明（L3 层：随插件包走，平台读它渲染表单）
+# 字段的 probe 绑定同时驱动「能力探路」的检查项生成，一处声明三处复用：
+#   ① 接入向导表单渲染  ② 探路检查项生成  ③ 配置下发时的字段映射
+plugin: mysql_probe
+title: MySQL 采集参数
+fields:
+  - name: address
+    label: 目标地址
+    type: string
+    required: true
+    placeholder: 10.20.30.40 或 mysql-prod-1
+    probe: tcp
+    help: 从代理机可达的地址，不是从浏览器可达
+
+  - name: port
+    label: 端口
+    type: int
+    default: 3306
+    required: true
+    probe: tcp
+
+  - name: mode
+    label: 部署形态
+    type: enum
+    options: [single, cluster]
+    default: single
+    help: 集群形态下地址填 VIP 或任一可达节点
+
+  - name: username
+    label: 采集账号
+    type: string
+    required: true
+    default: exporter
+    probe: mysql_auth
+    help: 需要 PROCESS 与 REPLICATION CLIENT 权限
+
+  - name: password
+    label: 口令
+    type: secret
+    required: true
+    help: 口令只用于生成 Agent 侧 DSN，平台不落库明文
+
+  - name: interval
+    label: 采集频率
+    type: duration
+    default: 30s
+    help: 不低于 5s
+
+  - name: extra_labels
+    label: 附加标签
+    type: kv
+    help: 形如 env=prod,app=order，逗号分隔

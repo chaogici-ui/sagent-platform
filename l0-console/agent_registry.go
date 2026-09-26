@@ -25,6 +25,7 @@ type Agent struct {
 	CfgDesired   int                    `json:"cfg_desired,omitempty"`   // 服务端期望配置版本
 	CfgEffective string                 `json:"cfg_effective,omitempty"` // Agent 上报的生效配置版本
 	Stats        map[string]interface{} `json:"stats,omitempty"`         // 心跳携带的采集成败统计
+	TenantID     string                 `json:"tenant_id,omitempty"`     // 多租户(D3)：归属租户，default=默认租户
 }
 
 // AgentStore 管理所有 Agent
@@ -43,17 +44,31 @@ func NewAgentStore() *AgentStore {
 func seedDemoAgentsInMemory(store *AgentStore) {
 	demo := []*Agent{
 		{ID: "sagent-1", Name: "Edge Collector 1", Type: "edge",
-			Status: "unknown", Host: "sagent-1", Port: 19090,
+			Status: "unknown", Host: "sagent-1", Port: agentHTTPPortNum(),
 			Plugins: []string{"host_metrics", "log_metrics", "custom_scripts"},
-			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"}},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"},
+			TenantID: "default"},
 		{ID: "sagent-2", Name: "Edge Collector 2", Type: "edge",
-			Status: "unknown", Host: "sagent-2", Port: 19090,
+			Status: "unknown", Host: "sagent-2", Port: agentHTTPPortNum(),
 			Plugins: []string{"host_metrics", "log_metrics", "custom_scripts"},
-			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"}},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"},
+			TenantID: "default"},
 		{ID: "sagent-proxy", Name: "Collector Proxy", Type: "proxy",
-			Status: "unknown", Host: "sagent-proxy", Port: 19090,
+			Status: "unknown", Host: "sagent-proxy", Port: agentHTTPPortNum(),
 			Plugins: []string{"mysql_probe"},
-			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"}},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-a", "env": "prod"},
+			TenantID: "default"},
+		// 多租户(D3)演示：两台边缘采集器归属 tenant-a，用于界面租户切换隔离演示
+		{ID: "sagent-3", Name: "租户A · Edge Collector", Type: "edge",
+			Status: "unknown", Host: "sagent-3", Port: agentHTTPPortNum(),
+			Plugins: []string{"host_metrics", "custom_scripts"},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-b", "env": "prod"},
+			TenantID: "tenant-a"},
+		{ID: "sagent-4", Name: "租户A · Log Collector", Type: "edge",
+			Status: "unknown", Host: "sagent-4", Port: agentHTTPPortNum(),
+			Plugins: []string{"log_metrics"},
+			Version: "v0.4.0", Labels: map[string]string{"idc": "idc-b", "env": "prod"},
+			TenantID: "tenant-a"},
 	}
 	for _, a := range demo {
 		store.agents[a.ID] = a
@@ -76,6 +91,14 @@ func (s *AgentStore) Get(id string) *Agent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.agents[id]
+}
+
+// Remove 注销一个 Agent（重装/换机重新接入前清身份用）。
+// 只清内存台账，DB 行由 DeleteAgent 负责
+func (s *AgentStore) Remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.agents, id)
 }
 
 // Update 更新 Agent 状态
@@ -122,11 +145,16 @@ func detectVersion(agentID string) string {
 
 func rowToAgent(r *storepkg.AgentRow) *Agent {
 	st := "healthy"
+	// 空租户视为 default：注册链路不带租户信息，默认归属默认租户（D3 兼容存量）
+	tid := r.TenantID
+	if tid == "" {
+		tid = "default"
+	}
 	return &Agent{
 		ID: r.ID, Name: r.Name, Type: r.Type, Host: r.Host, Port: r.Port,
 		Plugins: r.Plugins, Version: r.Version, Labels: r.Labels,
 		Source: r.Source, LastSeen: r.LastSeen, CfgDesired: r.CfgDesired,
-		CfgEffective: r.CfgEffective, Stats: r.Stats, Status: st,
+		CfgEffective: r.CfgEffective, Stats: r.Stats, Status: st, TenantID: tid,
 	}
 }
 

@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +37,7 @@ func addAudit(action, target, scope, result string) {
 	auditMu.Lock()
 	auditLog = append(auditLog, AuditEntry{
 		Time:     ts,
-		Operator: "admin",
+		Operator: cfgAuditOperator,
 		Action:   action,
 		Target:   target,
 		Scope:    scope,
@@ -72,6 +74,11 @@ var (
 	cfgCORSOrigin        string // 允许的 CORS 源           CORS_ORIGIN（空=回显请求 Origin，即同源部署）
 	cfgSeedDemoAgents    bool   // 是否注入演示 Agent 种子   SEED_DEMO_AGENTS=1（生产部署必须留空）
 	cfgAuditOperator     string // 审计记录操作者标识        AUDIT_OPERATOR（默认 admin，生产建议改为真实账号体系标识）
+	cfgSAVersion         string // SAgent 镜像版本          SA_VERSION（默认 0.4.0；镜像 tag 由实测 OS/架构 + 本值拼出）
+	cfgOnboardStallSec   int    // 接入流水线停滞判定阈值（秒）  ONBOARD_STALL_SEC（默认 300）
+	cfgAgentHomeRoot     string // 目标机 Agent 安装根目录   AGENT_HOME_ROOT（默认 /home；实际安装到 <root>/<ssh_user>/SAgent）
+	cfgAgentConfDir      string // 本机演示 Agent 配置文件目录 AGENT_CONF_DIR（默认 ../deploy/docker/configs/sagent）
+	cfgTunnelRemotePort  int    // 反向隧道目标机侧端口      TUNNEL_REMOTE_PORT（默认 18080）
 )
 
 func init() {
@@ -83,6 +90,21 @@ func init() {
 	cfgCORSOrigin = os.Getenv("CORS_ORIGIN")
 	cfgSeedDemoAgents = os.Getenv("SEED_DEMO_AGENTS") == "1"
 	cfgAuditOperator = envOr("AUDIT_OPERATOR", "admin")
+	cfgSAVersion = envOr("SA_VERSION", "0.4.0")
+	cfgOnboardStallSec = envIntOr("ONBOARD_STALL_SEC", 300)
+	cfgAgentHomeRoot = envOr("AGENT_HOME_ROOT", "/home")
+	cfgAgentConfDir = envOr("AGENT_CONF_DIR", "../deploy/docker/configs/sagent")
+	cfgTunnelRemotePort = envIntOr("TUNNEL_REMOTE_PORT", 18080)
+}
+
+// envIntOr 读整数环境变量，缺失或非法时用默认值
+func envIntOr(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func envOr(key, def string) string {
@@ -92,21 +114,101 @@ func envOr(key, def string) string {
 	return def
 }
 
+// openCatalogDB 打开目录库（架构 D1：唯一载体 PostgreSQL）。
+// CATALOG_DSN 必填 —— 目录库已全面切 PG，不保留 SQLite 回退：
+// 缺配置就快速失败，避免「悄悄落回本地文件库」这类最难排查的部署事故。
+func openCatalogDB() (*storepkg.DB, error) {
+	dsn := os.Getenv("CATALOG_DSN")
+	if dsn == "" {
+		return nil, fmt.Errorf("CATALOG_DSN 未配置：目录库唯一载体为 PostgreSQL（示例 postgres://user:pass@host:5432/db?sslmode=disable）")
+	}
+	fmt.Println("Catalog DB: PostgreSQL")
+	return storepkg.OpenPostgres(dsn)
+}
+
 // agentContainerName Agent 的本机演示容器名（前缀可配，生产集群形态下不依赖 docker 探测）
 func agentContainerName(agentID string) string {
 	return cfgAgentContainerPre + agentID
 }
 
+// agentHTTPPortNum Agent HTTP 端口的整数形式（演示种子/端口探测等需要 int 的场景）
+func agentHTTPPortNum() int {
+	if n, err := strconv.Atoi(cfgAgentHTTPPort); err == nil && n > 0 {
+		return n
+	}
+	return 19090
+}
+
+// platformPort 平台自身 HTTP 端口：从 LISTEN_ADDR 解析（反向隧道远端要转发到这里）
+func platformPort() int {
+	addr := cfgListenAddr
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		if n, err := strconv.Atoi(addr[i+1:]); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 8080
+}
+
+// destHomeFor 目标机 Agent 安装根目录：<AGENT_HOME_ROOT>/<ssh_user>。
+// root 等自定义家目录场景改 AGENT_HOME_ROOT 即可，不再写死 /home
+func destHomeFor(cred *sshCred) string {
+	root := strings.TrimRight(cfgAgentHomeRoot, "/")
+	if root == "" {
+		root = "/home"
+	}
+	user := ""
+	if cred != nil {
+		user = cred.User
+	}
+	return root + "/" + user
+}
+
 func main() {
-	onboardCfg := loadOnboardConfig("data/onboard_config.json")
+	// 独立 L1 Package Cache 进程（架构 D5 IN1）：`l0-console -package-cache`。
+	// 不建 DB、不起 console，仅加载版本清单(文件口径) + 起 package-cache HTTP 服务阻塞。
+	pkgCacheDaemon := flag.Bool("package-cache", false, "run as standalone L1 Package Cache daemon")
+	// 独立 L1 Gateway 控制通道中继进程（架构 D5 IN2）：`l0-console -gateway`。
+	// 不建 DB、不起 console，仅起控制通道汇聚中继（注册/心跳/接入证据转发 L0）阻塞。
+	gatewayDaemon := flag.Bool("gateway", false, "run as standalone L1 Gateway relay daemon")
+	// 独立 L1 Controller 任务拉取/分流/回执进程（架构 D5 IN3）：`l0-console -controller`。
+	// 不建 DB、不起 console，仅反向连接 L0 拉任务 → 分流决策 → 回执 循环阻塞。
+	controllerDaemon := flag.Bool("controller", false, "run as standalone L1 Controller task-pull/ack daemon")
+	// 独立 L1 Ansible Runner 执行进程（架构 D5 IN4）：`l0-console -ansible-runner`。
+	// 不建 DB、不起 console，仅反向连接 L0 拉安装任务 → 本地执行 playbook → 回执终态。
+	ansibleRunnerDaemon := flag.Bool("ansible-runner", false, "run as standalone L1 Ansible Runner install executor")
+	flag.Parse()
+	if *pkgCacheDaemon {
+		loadVersionCatalog("data/versions.yaml", nil)
+		runPackageCacheDaemon()
+		return
+	}
+	if *gatewayDaemon {
+		runGatewayDaemon()
+		return
+	}
+	if *controllerDaemon {
+		runControllerDaemon()
+		return
+	}
+	if *ansibleRunnerDaemon {
+		runAnsibleRunnerDaemon()
+		return
+	}
+	// 滚动日志基础设施：data/logs/app.log，10MB 滚动 + gzip 归档 + 保留最近 10 份 + 异步，
+	// 业务 log.Printf 调用点零改动（见 logging.go 头部说明）。输出不变更可见，仅落盘与归档。
+	logCleanup := initLogging()
+	defer logCleanup()
+	onboardCfg = loadOnboardConfig("data/onboard_config.json")
 	store := NewAgentStore()
 	if cfgSeedDemoAgents {
 		seedDemoAgentsInMemory(store)
 		fmt.Println("Demo agents seeded (SEED_DEMO_AGENTS=1)")
 	}
 
-	// 插件能力目录库（SQLite）：打开 + 夜莺集成包增量同步
-	catDB, err := storepkg.Open("data/catalog.db")
+	// 插件能力目录库（架构 D1：唯一载体 PostgreSQL）：
+	// CATALOG_DSN 必填（postgres://user:pass@host:5432/db），缺失即启动失败。
+	catDB, err := openCatalogDB()
 	if err != nil {
 		log.Fatalf("open catalog db: %v", err)
 	}
@@ -130,6 +232,26 @@ func main() {
 	if err := catDB.InitFleet(); err != nil {
 		log.Fatalf("init fleet tables: %v", err)
 	}
+	// 接入中心三表（resources/onboard_flow/onboard_event）：数据地基，先于任何接入动作建好
+	if err := catDB.InitOnboard(); err != nil {
+		log.Fatalf("init onboard tables: %v", err)
+	}
+	// L1 任务源表（l1_tasks）：任务投递/拉取/回执持久化真相源
+	if err := catDB.InitL1Tasks(); err != nil {
+		log.Fatalf("init l1 tasks table: %v", err)
+	}
+	// HA-3 跨 L1 归属迁移记录表（relocations）：迁移证据 + 冷却判定来源
+	if err := catDB.InitRelocations(); err != nil {
+		log.Fatalf("init relocations table: %v", err)
+	}
+	// 流程模板（模式模板，L2 层）：编排数据化，引擎只认原子能力
+	if tpls, err := loadFlowTemplates(defaultFlowTemplateDir); err != nil {
+		log.Printf("flow templates load warning (%s): %v", defaultFlowTemplateDir, err)
+	} else {
+		fmt.Printf("Flow templates loaded: %d (%s)\n", len(tpls), defaultFlowTemplateDir)
+	}
+	// SAgent 版本清单：data/versions.yaml 为种子，catalog 库为权威源（界面可编辑兼容矩阵）
+	loadVersionCatalog("data/versions.yaml", catDB)
 	seedBuiltinAgents(store, catDB) // 内部仅处理内存已有的 Agent，空注册表时为 no-op
 	hydrateAgents(store, catDB)
 	// 为尚无版本化配置的 Agent 引导出结构化期望配置（targets 展开 + host_metrics 默认段）
@@ -141,7 +263,7 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// 插件能力目录 API（SQLite 配置库驱动）
+	// 插件能力目录 API（catalog 库驱动）
 	registerCatalogRoutes(mux, catDB)
 
 	// CORS middleware
@@ -151,6 +273,25 @@ func main() {
 	registerAgentRoutes(mux, store, catDB)
 	registerMetricRoutes(mux)
 	registerMiscRoutes(mux, onboardCfg)
+	registerOnboardRoutes(mux, store, catDB)
+	registerVersionRoutes(mux, catDB)
+	registerPackageCacheRoutes(mux, catDB)
+	registerCollectStatsRoutes(mux)          // 资源页采集实况（VM 侧，按 resource_id 标签）
+	registerSelfMonRoutes(mux, store, catDB) // 平台自监控（可运维·可观测）
+	registerMetricsRoute(mux, store, catDB)  // 平台自身 Prometheus /metrics（供 L0 侧 VM 抓取）
+	registerTenantRoutes(mux, catDB)         // 多租户管控（架构 D3 骨架：租户清单 + 新建）
+	registerTenantTokenRoutes(mux, catDB)    // 租户 API Token 签发/吊销/状态（架构 D3 凭证鉴权）
+	registerHealthRoute(mux, store, catDB)   // 平台健康自检汇总（架构 3.3 可运维·相与规划）
+	registerAlertRoutes(mux, store, catDB)   // 告警中心（架构 D6/G5：查询式→主动告警，外发按 env）
+	registerL1TaskRoutes(mux, catDB)         // L1 任务源（架构 D5 IN3：Controller 拉取/回执，持久化 pg 任务表）
+	registerRelocateRoutes(mux, store, catDB) // HA-3 跨 L1 归属迁移（评审/执行/历史证据）
+	registerCollectorRoutes(mux, store, catDB) // R2 采集机选机（池候选 + 承载数 + 自动挑机 + 人工改选）
+	startRelocateAuto(store, catDB)           // HA-3 自动调度（RELOCATE_AUTO=1 启用，默认关）
+
+	// 接入流水线超时清扫：running 步骤到点自动重试（有限次）或判死。
+	// 由平台侧定时器驱动，不依赖"有人开着页面" —— 这是「不能无底线等待」的保证
+	startTimeoutSweeper(catDB, store)
+	startTunnelKeeper(catDB)
 
 	// 静态文件（强制正确的 Content-Type）
 	fs := http.FileServer(http.Dir("static"))
@@ -172,14 +313,13 @@ func main() {
 
 func ensureSystemPlugins(catDB *storepkg.DB) {
 	sys := []storepkg.Plugin{
-		{Name: "host_metrics", DisplayName: "主机指标", Category: "主机", Type: "builtin", Version: "v1.0.0", Source: "builtin"},
-		{Name: "docker_metrics", DisplayName: "Docker 指标", Category: "Docker", Type: "builtin", Version: "v1.0.0", Source: "builtin"},
-		{Name: "custom_scripts", DisplayName: "自定义脚本", Category: "脚本", Type: "script", Version: "v1.0.0", Source: "builtin"},
+		{Name: "host_metrics", DisplayName: "主机指标", Category: "主机", Type: "builtin", Source: "builtin"},
+		{Name: "docker_metrics", DisplayName: "Docker 指标", Category: "Docker", Type: "builtin", Source: "builtin"},
+		{Name: "custom_scripts", DisplayName: "自定义脚本", Category: "脚本", Type: "script", Source: "builtin"},
 	}
+	// 平台自有的三个插件每次启动都对齐定义：upsert 只覆盖元数据（说明文档等用户编辑保留），
+	// 这样历史遗留的编造版本号（旧移植器统一写死 v1.0.0）也能被清掉
 	for _, p := range sys {
-		if _, err := catDB.GetPluginByName(p.Name); err == nil {
-			continue
-		}
 		pv := p
 		if _, err := catDB.UpsertPlugin(&pv); err != nil {
 			log.Printf("ensure system plugin %s: %v", p.Name, err)
@@ -189,7 +329,7 @@ func ensureSystemPlugins(catDB *storepkg.DB) {
 	}
 }
 
-// seedBuiltinAgents 首次启动把 3 个演示 Agent 写入 SQLite（source=docker）
+// seedBuiltinAgents 首次启动把 3 个演示 Agent 写入目录库（source=docker）
 func seedBuiltinAgents(store *AgentStore, catDB *storepkg.DB) {
 	for _, a := range store.List() {
 		src, _ := catDB.GetAgentSource(a.ID)
@@ -199,12 +339,12 @@ func seedBuiltinAgents(store *AgentStore, catDB *storepkg.DB) {
 		_ = catDB.UpsertAgentRow(&storepkg.AgentRow{
 			ID: a.ID, Name: a.Name, Type: a.Type, Host: a.Host, Port: a.Port,
 			Plugins: a.Plugins, Version: a.Version, Labels: a.Labels,
-			Source: "docker", LastSeen: time.Now().Unix(),
+			Source: "docker", LastSeen: time.Now().Unix(), TenantID: a.TenantID,
 		})
 	}
 }
 
-// hydrateAgents 启动时把 SQLite 里的 Agent 全部装回内存
+// hydrateAgents 启动时把目录库里的 Agent 全部装回内存
 func hydrateAgents(store *AgentStore, catDB *storepkg.DB) {
 	rows, err := catDB.ListAgentRows()
 	if err != nil {
@@ -214,7 +354,7 @@ func hydrateAgents(store *AgentStore, catDB *storepkg.DB) {
 	for _, r := range rows {
 		store.Put(rowToAgent(r))
 	}
-	fmt.Printf("Agents hydrated: %d (from sqlite)\n", len(rows))
+	fmt.Printf("Agents hydrated: %d (from catalog)\n", len(rows))
 }
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")

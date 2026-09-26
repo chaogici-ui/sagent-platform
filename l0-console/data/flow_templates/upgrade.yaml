@@ -1,0 +1,64 @@
+# 升级 SAgent：把一台已接入主机上的 SAgent 换成指定版本，全程可观测、可回滚。
+# 与「卸载 SAgent」同构 —— internal: true，入口在接入中心已接入资源的行内「升级」按钮。
+#
+# 顺序不是随便排的：
+#   ① 预检（只读）—— 当前版本、守护形态、插件状态、磁盘空间必须来自目标机实测；
+#      决定停法分支（守护协议 / 直杀）与备份文件名（带当前版本）
+#   ② 选目标版本 —— 复用接入的选版范式：兼容清单过滤 + 人工选定，留痕到人。
+#      允许降级（用户拍板 2026-09-22）：降级时决策卡显眼提示
+#   ③ 人工确认 —— 基于预检实测结果摊开影响：升级期间采集中断、conf/data/logs/plugins 不动
+#   ④ 执行升级 —— ansible：停插件 → 停进程 → 备份旧二进制 → 分发新包 → sha256 断言
+#      → 启动 → 自证核对（进程存活 + 落盘 sha 与清单一致 + control 通道可用）
+#   验证内嵌在执行 playbook 的自证核对里（与卸载各步同范式）：核对不过即失败，
+#   旧二进制备份（SAgent.bak-<旧版本>）留在目标机，可手工回滚
+id: upgrade
+name: 升级 SAgent
+internal: true
+description: 升级目标机上的 SAgent 到指定版本：预检当前版本与守护形态 → 人工选定目标版本（允许降级，留痕）→ 人工确认影响 → ansible 停插件/停进程/备份/换包/sha256 断言/启动/自证核对。配置与数据全程不动
+steps:
+  - id: pick_object
+    atom: pick_object
+    title: 选择资源对象
+    scope: platform
+    hint: 按资源台账定位待升级主机。升级只换二进制，配置、数据、插件产物、平台登记全部保持不变
+
+  - id: preflight_upgrade
+    atom: preflight_upgrade
+    title: 升级前预检
+    scope: external
+    requires: [pick_object]
+    hint: 只读探测：当前二进制 sha（对照版本清单反查当前版本）、run.sh 守护形态（决定停/启分支）、暂停标记、control.sock 插件状态、磁盘可用空间。**本环节不改动目标机任何东西**
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} '
+        AG=~/SAgent
+        sha="-"; [ -f "$AG/bin/SAgent" ] && sha=$(sha256sum "$AG/bin/SAgent" | awk "{print \$1}")
+        guard="no"; for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr "\0" " " < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac; done
+        stopped="no"; [ -f "$AG/run/stopped" ] && stopped="yes"
+        pid="-"; [ -f "$AG/run/SAgent.pid" ] && { p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; }
+        plugins="-"; [ -S "$AG/run/control.sock" ] && plugins=$(cd "$AG" && timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1)
+        dfm=$(df -Pm "$AG" 2>/dev/null | awk "NR==2{print \$4}")
+        echo "UPGRADE_PRE sha=$sha guard=$guard guard_pid=- stopped=$stopped pid=$pid plugins=$plugins disk_free_mb=${dfm:-0}"
+        echo "UPGRADE_PRE_END"'
+
+  - id: pick_version
+    atom: pick_version
+    title: 选定目标版本
+    scope: platform
+    requires: [preflight_upgrade]
+    hint: 按实测 OS/架构给出兼容清单，人工选定目标版本。**允许降级**——选低版本时决策卡会显眼提示，决策留痕到人。平台不用 latest 兜底
+
+  - id: confirm_upgrade
+    atom: confirm_upgrade
+    title: 确认升级影响
+    scope: platform
+    requires: [pick_version]
+    hint: 把预检实测与升级方案摊开给操作人员：当前版本 → 目标版本（含降级提示）、升级期间采集中断约数十秒、哪些东西不动。**人确认之后才继续**——确认内容全部来自目标机实测
+
+  - id: upgrade_agent
+    atom: upgrade_agent
+    title: 执行升级
+    scope: external
+    requires: [confirm_upgrade]
+    gate: blocker
+    hint: 平台 ansible 自动执行：ctl 停插件 → 停进程（守护协议优先，无守护直杀）→ 备份旧二进制为 SAgent.bak-<旧版本> → 分发新包 → sha256 与版本清单断言 → 启动 → 自证核对（进程存活 + 落盘 sha 一致 + control 通道可用）。核对不过即失败；conf/data/logs/plugins 全程不动

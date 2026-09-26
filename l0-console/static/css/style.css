@@ -1,15 +1,32 @@
 :root {
-  --bg: #f5f6fa;
-  --card: #fff;
-  --text: #1a1a2e;
-  --muted: #8e8e9a;
-  --border: #e8e8f0;
-  --primary: #2563eb;
-  --success: #10b981;
-  --warn: #f59e0b;
-  --error: #ef4444;
-  --radius: 10px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --bg: #f5f7f8;
+  --card: #ffffff;
+  --panel: #ffffff;  /* 右侧详情滑出面板：必须实色不透明，否则透出底层页面 */
+  --text: #172c36;
+  --muted: #5c7280;
+  --border: #e3eaee;
+  --primary: #087d75;
+  --primary-dk: #0a5f59;
+  --success: #1c8a5a;
+  --warn: #d97706;
+  --error: #d64545;
+  --radius: 12px;
+  --shadow: 0 1px 3px rgba(23, 44, 54, 0.08);
+  --sidebar: #142a34;
+  --sidebar-2: #0e1f27;
+  --on-dark: #d7e6e6;
+  --on-dark-muted: #7d9a9a;
+  /* 前端效果设计 2.1 令牌补齐（与既有语义色并存，字段/状态徽章二义性解耦） */
+  --surface: #ffffff;   /* 设计令牌——表面，别名 --card */
+  --ink: #172c36;       /* 设计令牌——正文，别名 --text */
+  --line: #e1e7eb;      /* 设计令牌——分隔线 */
+  --teal: #087d75;      /* 设计令牌——主色，别名 --primary */
+  --teal-soft: #e9f5f2; /* teal 浅底 */
+  --amber: #946011;     /* 警示/未知 文字 */
+  --amber-soft: #fff5df;/* 警示 浅底 */
+  --red: #ae3c38;       /* 失败 文字 */
+  --red-soft: #fff0ee;  /* 失败 浅底 */
+  --blue: #345e95;      /* 辅助信息 */
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -20,26 +37,63 @@ body {
 
 /* Sidebar */
 nav {
-  width: 200px; background: var(--card);
-  border-right: 1px solid var(--border);
-  padding: 16px 0; display: flex; flex-direction: column; flex-shrink: 0;
+  width: 220px; background: linear-gradient(180deg, var(--sidebar) 0%, var(--sidebar-2) 100%);
+  color: var(--on-dark); padding: 18px 0; display: flex; flex-direction: column; flex-shrink: 0;
 }
 nav .logo {
   padding: 0 16px 16px; font-weight: 700; font-size: 15px;
-  color: var(--primary); border-bottom: 1px solid var(--border); margin-bottom: 8px;
+  color: #ffffff; letter-spacing: .5px; border-bottom: 1px solid rgba(255,255,255,.08); margin-bottom: 8px;
+}
+nav .logo small { display: block; color: #70d6cc; font-weight: 500; font-size: 11px; letter-spacing: .5px; margin-top: 2px; }
+nav .nav-section {
+  padding: 14px 16px 5px; font-size: 10px; color: var(--on-dark-muted);
+  text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600;
 }
 nav a {
-  display: block; padding: 10px 16px; font-size: 13px;
-  color: var(--text); text-decoration: none; cursor: pointer;
-  border-left: 3px solid transparent; transition: 0.15s;
+  display: block; padding: 9px 16px; font-size: 13px;
+  color: var(--on-dark); text-decoration: none; cursor: pointer;
+  border-left: 3px solid transparent; transition: 0.15s; position: relative;
 }
-nav a:hover, nav a.active {
-  background: #f0f4ff; color: var(--primary); border-left-color: var(--primary);
+nav a:hover { background: rgba(255,255,255,.05); color: #fff; }
+nav a.active {
+  background: rgba(8,125,117,.16); color: #fff; font-weight: 600;
+  border-left-color: var(--primary);
 }
 nav .nav-badge {
-  float: right; background: var(--error); color: #fff;
-  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  float: right; background: var(--warn); color: #fff;
+  font-size: 10px; padding: 1px 7px; border-radius: 10px; margin-top: 1px;
 }
+nav .nav-foot {
+  margin-top: auto; padding: 12px 16px; font-size: 11px;
+  color: var(--on-dark-muted); border-top: 1px solid rgba(255,255,255,.08);
+}
+
+/* 证据链概要条：五段串行链路 + 汇总门（已应用 ≠ 已入库） */
+.ev-chain {
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px;
+  background: #f2f6f7; border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+}
+.ev-node {
+  flex: 1 1 auto; min-width: 108px; display: flex; flex-direction: column;
+  gap: 3px; background: #fff; border-radius: 8px; padding: 8px 10px;
+  border: 1px solid var(--border); border-left-width: 3px;
+}
+.ev-ic { font-size: 13px; font-weight: 700; }
+.ev-lb { font-size: 11px; color: var(--muted); font-weight: 600; }
+.ev-dt { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-node.ev-ok { border-left-color: var(--success); }
+.ev-node.ev-ok .ev-ic { color: var(--success); }
+.ev-node.ev-bad { border-left-color: var(--error); }
+.ev-node.ev-bad .ev-ic { color: var(--error); }
+.ev-node.ev-unknown { border-left-color: #b4c1c7; }
+.ev-node.ev-unknown .ev-ic { color: #8aa0aa; }
+.ev-node.ev-gate {
+  justify-content: center; flex: 0 1 auto;
+  background: linear-gradient(135deg, var(--sidebar), var(--sidebar-2));
+  color: #cde0df; font-size: 12px; font-weight: 600; border-left-width: 1px; min-width: 130px;
+}
+.ev-node.ev-gate .ev-dt { color: #8fb0ad; font-weight: 400; }
 
 /* Main layout */
 main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
@@ -84,7 +138,7 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-hei
   font-size: 12px; font-weight: 400; color: var(--muted); transition: 0.15s;
 }
 .card-hd .tabs span.active { background: var(--primary); color: #fff; }
-.card-bd { padding: 16px 20px; }
+.card-bd { padding: 16px 20px; overflow-x: auto; }
 
 /* Group grid */
 .group-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
@@ -296,3 +350,80 @@ tr:hover td { background: #fafbfc; }
 .tenant-card{border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;justify-content:space-between;align-items:center}
 /* Num input */
 .num-input{width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px}
+/* ---- 资源页 / 总览（2026-09-22 用户评审，图 2/图 3） ---- */
+.res-chip{display:inline-block;padding:2px 8px;border:0.5px solid var(--border);border-radius:99px;font-size:11px;margin:0 6px 6px 0;background:var(--bg)}
+.res-filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.res-f{border:0.5px solid var(--border);border-radius:99px;padding:3px 12px;font-size:12px;cursor:pointer;background:#fff}
+.res-f.on{background:var(--primary);border-color:var(--primary);color:#fff}
+.res-st-ok{color:var(--success);font-weight:600}
+.res-st-warn{color:#b45309;font-weight:600}
+.res-st-bad{color:var(--error);font-weight:600}
+.res-st-stop{color:var(--muted);font-weight:600}
+.res-st-off{color:var(--muted)}
+.res-ev{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-left:3px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px;background:var(--bg)}
+.res-ev.ok{border-color:#10b981}
+.res-ev.fail{border-color:#ef4444}
+.res-ev.wait{border-color:#93c5fd}
+.res-ev.run{border-color:#f59e0b}
+.res-ev .t{flex:1}
+.res-ev .m{color:var(--muted);font-size:11px}
+/* 正文是白话，机器核对值退到「技术细节」尾巴里；待复核条数单独着色，别埋在长串里 */
+.res-ev .det{color:#8aa0aa}
+.res-ev .warn{color:#b45309;font-weight:600}
+.res-drawer-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:8999;opacity:0;pointer-events:none;transition:opacity .18s ease}
+.res-drawer-mask.open{opacity:1;pointer-events:auto}
+.res-drawer{position:fixed;top:0;right:0;bottom:0;width:955px;max-width:94vw;background:var(--panel);border-left:0.5px solid var(--border);box-shadow:-8px 0 24px rgba(0,0,0,.08);z-index:9000;transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
+.res-drawer.open{transform:translateX(0)}
+.res-drawer-hd{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:0.5px solid var(--border)}
+.res-drawer-bd{flex:1;overflow:auto;padding:14px 16px}
+.res-sec{margin-bottom:14px}
+.res-sec-hd{font-size:12px;font-weight:600;margin-bottom:6px}
+/* 过程记录（资源抽屉）：一台机器的每一次流水线按时间倒序列出，每行可进对应向导。
+   存在意义——接入成功后被后来的卸载/启停顶掉时，接入过程仍能从这里回看 */
+.res-proc{border:0.5px solid var(--border);border-radius:8px;overflow:hidden}
+.res-proc-row{display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:12px;cursor:pointer;border-top:0.5px solid var(--border)}
+.res-proc-row:first-child{border-top:0}
+.res-proc-row:hover{background:var(--bg)}
+.res-proc-row .k{white-space:nowrap;font-weight:600}
+.res-proc-row .tm,.res-proc-row .st{color:var(--muted);white-space:nowrap}
+/* 导航琥珀徽标（前端效果设计第 1 章信息架构）：待处理/断采计数，醒目但克制 */
+.nav-badge{display:inline-block;float:right;min-width:18px;height:18px;line-height:18px;margin-top:4px;padding:0 5px;border-radius:9px;background:#b45309;color:#fff;font-size:11px;font-weight:600;text-align:center}
+
+/* ---- 采集策略（前端效果设计 3.4 阶段2)——令牌化替代内联 ---- */
+.pol-note{font-size:11px;color:var(--muted);margin-bottom:10px}
+.pol-note code{background:var(--bg);border:0.5px solid var(--border);border-radius:4px;padding:0 4px}
+.pol-group{flex:1 1 46%;min-width:360px}
+.pol-gt{font-size:13px;font-weight:600;margin:2px 0 2px}
+.pol-gs{font-weight:400;font-size:11px;color:var(--muted)}
+.pol-card{border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin:8px 0;background:var(--surface)}
+.pol-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pol-name{font-size:13px;font-weight:700}
+.pol-id{font-size:11px;color:var(--muted)}
+.pol-desc{font-size:12px;color:var(--muted);margin-top:4px}
+/* 策略徽章（令牌软底） */
+.pol-badge{padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.pol-badge.scope-agent{background:var(--teal-soft);color:var(--teal)}
+.pol-badge.scope-remote{background:var(--teal-soft);color:var(--teal)}
+.pol-badge.lock{background:var(--amber-soft);color:var(--amber)}
+.pol-intv{margin-left:auto;font-size:12px;color:var(--muted);white-space:nowrap}
+.pol-intv b{color:var(--ink)}
+.pol-impact{background:var(--teal-soft);color:var(--teal)}
+
+/* ---- 变更中心（前端效果设计 3.5 阶段3)——令牌化状态徽章 ---- */
+.ch-code{font-size:11px}
+.ch-type{padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;background:var(--teal-soft);color:var(--teal)}
+.ch-badge{padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
+.ch-badge.run{background:var(--amber-soft);color:var(--amber)}
+.ch-badge.stall{background:var(--amber-soft);color:var(--amber)}
+.ch-badge.done{background:#f0fdf4;color:var(--success)}
+.ch-badge.failed{background:var(--red-soft);color:var(--red)}
+.ch-badge.unk{background:#e9ecef;color:var(--muted)}
+.ch-ev{font-size:12px;white-space:normal;overflow-wrap:anywhere;color:var(--ink)}
+/* 变更中心表：证据列被前五列 nowrap 顶窄过（auto 布局下长内容会把 nowrap 列撑宽，
+   反过来把唯一可换行的证据列挤到最窄）。改 fixed 布局——宽度才是权威值，
+   长内容一律省略号截断（单元格 title 可悬停看全），省下的宽度全给证据列 */
+.ch-scroll{overflow-x:auto}
+.ch-tab{table-layout:fixed;min-width:1180px}
+.ch-tab td,.ch-tab th{overflow:hidden;text-overflow:ellipsis}
+.ch-tab td.ch-ev{white-space:normal;overflow:visible;overflow-wrap:anywhere}
+.ch-steps{color:var(--muted);font-size:11px}

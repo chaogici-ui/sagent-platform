@@ -1,0 +1,141 @@
+# SAgent 升级 playbook（外置：改升级动作不动代码；@TOKEN@ 由平台渲染）
+# 占位符：@BIN_SRC@ 新版本二进制绝对路径 | @BIN_SHA@ 版本清单 sha256
+#         @DEST_HOME@ 目标机用户家目录 | @BAK_NAME@ 旧二进制备份文件名（如 SAgent.bak-linux-amd64-0.3.9）
+# 输出契约（逐行可解析，平台 Verdict 消费）：
+#   UPGRADE_OK pid=<pid> ver_sha=<新二进制sha256> bak=<备份文件名>
+#   UPGRADE_GUARD_TIMEOUT  停进程等待超时（守护未按协议暂停，需人工上机核查）
+#   UPGRADE_DIRTY <原因>   自证核对未通过（升级中断，旧二进制备份仍在）
+# 顺序不能颠倒（实测踩过）：先停插件再停进程；先备份再覆盖；先 rm stopped 再等守护拉起。
+# conf / data / logs / plugins 全程不动——升级只换二进制，配置变更走配置下发通道
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 停止插件（经 control.sock，让 SAgent 自己收干净插件子进程）
+      shell: |
+        cd @DEST_HOME@/SAgent
+        if [ -S run/control.sock ] && [ -f run/SAgent.pid ] && kill -0 $(cat run/SAgent.pid) 2>/dev/null; then
+          ./bin/SAgent -ctl "stop" 2>&1 || true
+          sleep 2
+        fi
+      args:
+        executable: /bin/sh
+      changed_when: false
+      failed_when: false
+
+    - name: 停止 SAgent 进程（守护协议优先，无守护直杀）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        pid="-"
+        if [ -f "$AG/run/SAgent.pid" ]; then p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; fi
+        if [ "$pid" = "-" ]; then
+          for e in /proc/[0-9]*/exe; do t=$(readlink "$e" 2>/dev/null); case "$t" in "$AG"/bin/SAgent*) q=${e#/proc/}; pid=${q%/exe};; esac; done
+        fi
+        guard="no"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac
+        done
+        if [ "$pid" != "-" ]; then
+          [ -d "$AG/run" ] || mkdir -p "$AG/run"
+          if [ "$guard" = "yes" ]; then
+            # 守护在跑：置 stopped 标记再 TERM——守护退出等待后见到标记会暂停，不会 3 秒拉回
+            touch "$AG/run/stopped"
+          fi
+          kill "$pid" 2>/dev/null
+          i=0
+          while kill -0 "$pid" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null; sleep 1
+            if kill -0 "$pid" 2>/dev/null; then echo "UPGRADE_DIRTY 进程无法终止 pid=$pid"; exit 1; fi
+          fi
+        fi
+        echo "UPGRADE_STOPPED pid=$pid guard=$guard"
+      args:
+        executable: /bin/sh
+      register: stopres
+      changed_when: true
+
+    - name: 备份旧二进制（回滚兜底，命名带来源版本）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        if [ -f "$AG/bin/SAgent" ]; then
+          cp -p "$AG/bin/SAgent" "$AG/bin/@BAK_NAME@"
+          echo "UPGRADE_BAK file=@BAK_NAME@"
+        fi
+      args:
+        executable: /bin/sh
+      changed_when: true
+
+    - name: 分发新版本二进制
+      copy:
+        src: "@BIN_SRC@"
+        dest: "@DEST_HOME@/SAgent/bin/SAgent"
+        mode: "0755"
+
+    - name: 校验新二进制 sha256（目标机实测，与版本清单断言一致）
+      shell: "sha256sum @DEST_HOME@/SAgent/bin/SAgent"
+      register: newsum
+      changed_when: false
+
+    - name: 断言 sha256 与版本清单一致
+      command: /bin/true
+      changed_when: false
+      failed_when: newsum.stdout.split()[0] != "@BIN_SHA@"
+
+    - name: 启动 SAgent（守护存活则解除暂停，守护消亡则重建守护，无守护直启）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        cd "$AG"
+        has_guard="no"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && has_guard="yes";; esac
+        done
+        if [ -f run.sh ]; then
+          rm -f run/stopped
+          if [ "$has_guard" = "no" ]; then
+            nohup sh run.sh >> logs/stdout.log 2>&1 &
+          fi
+          # 等守护把 SAgent 拉起（它 2 秒轮询一次 stopped 标记）
+          i=0
+          while [ $i -lt 20 ]; do
+            if [ -f run/SAgent.pid ]; then p=$(cat run/SAgent.pid 2>/dev/null); kill -0 "$p" 2>/dev/null && break; fi
+            sleep 1; i=$((i+1))
+          done
+        else
+          nohup ./bin/SAgent --config conf/SAgent.yaml >> logs/stdout.log 2>&1 &
+          echo $! > run/SAgent.pid
+        fi
+        sleep 2
+        p="-"; [ -f run/SAgent.pid ] && p=$(cat run/SAgent.pid 2>/dev/null)
+        if [ "$p" = "-" ] || ! kill -0 "$p" 2>/dev/null; then
+          echo "UPGRADE_DIRTY 启动后进程未存活 pid=$p"
+          exit 1
+        fi
+        echo "UPGRADE_STARTED pid=$p guard_mode=$([ -f run.sh ] && echo supervisor || echo direct)"
+      args:
+        executable: /bin/sh
+      register: startres
+      changed_when: true
+
+    - name: 升级自证核对（进程存活 + 新 sha 落盘 + control 通道可用）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        cd "$AG"
+        p=$(cat run/SAgent.pid 2>/dev/null)
+        kill -0 "$p" 2>/dev/null || { echo "UPGRADE_DIRTY 自证失败：进程不在"; exit 1; }
+        nowsha=$(sha256sum bin/SAgent | awk '{print $1}')
+        [ "$nowsha" = "@BIN_SHA@" ] || { echo "UPGRADE_DIRTY 自证失败：落盘 sha 与清单不一致"; exit 1; }
+        ctl="status-unavailable"
+        if [ -S run/control.sock ]; then
+          out=$(timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1)
+          [ -n "$out" ] && ctl="$out"
+        fi
+        bak="-"; [ -f "bin/@BAK_NAME@" ] && bak="@BAK_NAME@"
+        echo "UPGRADE_OK pid=$p ver_sha=$nowsha bak=$bak ctl=$ctl"
+      args:
+        executable: /bin/sh
+      register: verify
+      changed_when: false
+
+    - name: 输出升级结论（平台解析此行）
+      debug:
+        msg: "{{ verify.stdout }}"

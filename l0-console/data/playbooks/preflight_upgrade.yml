@@ -1,0 +1,46 @@
+# SAgent 升级前预检 playbook（只读，不改动目标机任何东西）
+# 占位符：@DEST_HOME@ 目标机用户家目录
+# 输出契约（逐行可解析，平台 parsePreflightUpgrade 消费）：
+#   UPGRADE_PRE sha=<当前二进制sha256|-> guard=<yes|no> guard_pid=<守护pid|->
+#               stopped=<yes|no> pid=<SAgent进程pid|-> plugins=<ctl status 原文压缩| ->
+#               disk_free_mb=<数据分区可用MB>
+#   UPGRADE_PRE_END
+# 与卸载扫描同一原则：清单必须来自目标机实测，人工手抄不能作为升级决策依据
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 升级前预检（只读：当前版本/守护/进程/插件/磁盘）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        sha="-"
+        [ -f "$AG/bin/SAgent" ] && sha=$(sha256sum "$AG/bin/SAgent" | awk '{print $1}')
+        guard="no"; gpid="-"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes" && gpid=$p;; esac
+        done
+        stopped="no"; [ -f "$AG/run/stopped" ] && stopped="yes"
+        pid="-"
+        if [ -f "$AG/run/SAgent.pid" ]; then p=$(cat "$AG/run/SAgent.pid" 2>/dev/null)
+          kill -0 "$p" 2>/dev/null && pid=$p
+        fi
+        # pid 文件不可靠时按 /proc 兜底核实（exe 精确匹配安装路径，不用 pkill -f）
+        if [ "$pid" = "-" ]; then
+          for e in /proc/[0-9]*/exe; do t=$(readlink "$e" 2>/dev/null); case "$t" in "$AG"/bin/SAgent*) q=${e#/proc/}; pid=${q%/exe};; esac; done
+        fi
+        plugins="-"
+        if [ -S "$AG/run/control.sock" ]; then
+          plugins=$(cd "$AG" && timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1 | tr -d '\n')
+          [ -n "$plugins" ] || plugins="-"
+        fi
+        dfm=$(df -Pm "$AG" 2>/dev/null | awk 'NR==2{print $4}')
+        [ -n "$dfm" ] || dfm=0
+        echo "UPGRADE_PRE sha=$sha guard=$guard guard_pid=$gpid stopped=$stopped pid=$pid plugins=$plugins disk_free_mb=$dfm"
+        echo "UPGRADE_PRE_END"
+      args:
+        executable: /bin/sh
+      register: pre
+      changed_when: false
+
+    - name: 输出预检结果（平台解析此行）
+      debug:
+        msg: "{{ pre.stdout }}"

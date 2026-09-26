@@ -1,0 +1,169 @@
+# SAgent 启停 playbook（外置；@TOKEN@ 由平台渲染，action/target 均经平台白名单校验后注入）
+# 占位符：@DEST_HOME@ 目标机用户家目录
+#         @SVC_ACTION@ start / stop / restart（平台白名单，三选一）
+#         @SVC_TARGET@ process / plugin:<插件名>（插件名平台按 ^[a-z0-9_-]+$ 校验）
+# 输出契约（逐行可解析，平台 Verdict 消费）：
+#   SVC_STOPPED            整个 Agent 已停（进程 0 个，守护已暂停）
+#   SVC_STARTED pid=<pid>  整个 Agent 已启动
+#   SVC_RESTARTED pid=<pid> 整个 Agent 已重启
+#   SVC_ALREADY <状态>      幂等命中（已停/已在跑），未做任何改动
+#   SVC_PLUGIN_STOPPED <name> / SVC_PLUGIN_STARTED <name> <pid>-插件级操作结论
+#   SVC_DIRTY <原因>        核对未通过，需人工上机
+# 守护协议（run.sh）：touch run/stopped → 杀进程 → 守护见到标记暂停不再拉回；
+# rm run/stopped → 守护 2 秒内拉回。无守护时直杀/直启。
+# 插件级走 control.sock（stop <name> / start <name>），进程不动
+- hosts: target
+  gather_facts: false
+  tasks:
+    # ---------- 整个 Agent · stop ----------
+    - name: 停止 SAgent（守护协议 + 进程核实）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        pid="-"
+        if [ -f "$AG/run/SAgent.pid" ]; then p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; fi
+        if [ "$pid" = "-" ]; then
+          for e in /proc/[0-9]*/exe; do t=$(readlink "$e" 2>/dev/null); case "$t" in "$AG"/bin/SAgent*) q=${e#/proc/}; pid=${q%/exe};; esac; done
+        fi
+        if [ "$pid" = "-" ] && [ ! -f "$AG/run/stopped" ]; then echo "SVC_ALREADY already-stopped"; exit 0; fi
+        guard="no"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac
+        done
+        if [ "$pid" != "-" ]; then
+          [ -d "$AG/run" ] || mkdir -p "$AG/run"
+          [ "$guard" = "yes" ] && touch "$AG/run/stopped"
+          kill "$pid" 2>/dev/null
+          i=0
+          while kill -0 "$pid" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null; sleep 1
+            kill -0 "$pid" 2>/dev/null && { echo "SVC_DIRTY 进程无法终止 pid=$pid"; exit 1; }
+          fi
+        fi
+        n=0
+        for e in /proc/[0-9]*/exe; do t=$(readlink "$e" 2>/dev/null); case "$t" in "$AG"/bin/SAgent*) n=$((n+1));; esac; done
+        [ "$n" -eq 0 ] || { echo "SVC_DIRTY 仍有 $n 个 SAgent 进程"; exit 1; }
+        echo "SVC_STOPPED guard=$guard"
+      args:
+        executable: /bin/sh
+      register: stopres
+      changed_when: true
+      when: "'@SVC_ACTION@' == 'stop' and '@SVC_TARGET@' == 'process'"
+
+    # ---------- 整个 Agent · start ----------
+    - name: 启动 SAgent（解除守护暂停 / 重建守护 / 直启）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        cd "$AG"
+        alive="-"
+        if [ -f run/SAgent.pid ]; then p=$(cat run/SAgent.pid 2>/dev/null); kill -0 "$p" 2>/dev/null && alive=$p; fi
+        if [ "$alive" != "-" ]; then echo "SVC_ALREADY already-running pid=$alive"; exit 0; fi
+        has_guard="no"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && has_guard="yes";; esac
+        done
+        if [ -f run.sh ]; then
+          rm -f run/stopped
+          [ "$has_guard" = "no" ] && nohup sh run.sh >> logs/stdout.log 2>&1 &
+          i=0
+          while [ $i -lt 20 ]; do
+            if [ -f run/SAgent.pid ]; then p=$(cat run/SAgent.pid 2>/dev/null); kill -0 "$p" 2>/dev/null && break; fi
+            sleep 1; i=$((i+1))
+          done
+        else
+          nohup ./bin/SAgent --config conf/SAgent.yaml >> logs/stdout.log 2>&1 &
+          echo $! > run/SAgent.pid
+        fi
+        sleep 2
+        p="-"; [ -f run/SAgent.pid ] && p=$(cat run/SAgent.pid 2>/dev/null)
+        { [ "$p" != "-" ] && kill -0 "$p" 2>/dev/null; } || { echo "SVC_DIRTY 启动后进程未存活 pid=$p"; exit 1; }
+        echo "SVC_STARTED pid=$p"
+      args:
+        executable: /bin/sh
+      register: startres
+      changed_when: true
+      when: "'@SVC_ACTION@' == 'start' and '@SVC_TARGET@' == 'process'"
+
+    # ---------- 整个 Agent · restart（先停后启，同一 playbook 内原子完成）----------
+    - name: 重启 SAgent · 停（同 stop 分支逻辑）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        pid="-"
+        if [ -f "$AG/run/SAgent.pid" ]; then p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; fi
+        if [ "$pid" != "-" ]; then
+          guard="no"
+          for d in /proc/[0-9]*; do q=${d#/proc/}; [ -r $d/cmdline ] || continue
+            case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac
+          done
+          [ "$guard" = "yes" ] && touch "$AG/run/stopped"
+          kill "$pid" 2>/dev/null
+          i=0
+          while kill -0 "$pid" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+          kill -0 "$pid" 2>/dev/null && { kill -9 "$pid" 2>/dev/null; sleep 1; }
+        fi
+        echo "RESTART_STOP_PHASE done"
+      args:
+        executable: /bin/sh
+      changed_when: true
+      when: "'@SVC_ACTION@' == 'restart' and '@SVC_TARGET@' == 'process'"
+
+    - name: 重启 SAgent · 启（同 start 分支逻辑）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        cd "$AG"
+        has_guard="no"
+        for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && has_guard="yes";; esac
+        done
+        if [ -f run.sh ]; then
+          rm -f run/stopped
+          [ "$has_guard" = "no" ] && nohup sh run.sh >> logs/stdout.log 2>&1 &
+          i=0
+          while [ $i -lt 20 ]; do
+            if [ -f run/SAgent.pid ]; then p=$(cat run/SAgent.pid 2>/dev/null); kill -0 "$p" 2>/dev/null && break; fi
+            sleep 1; i=$((i+1))
+          done
+        else
+          nohup ./bin/SAgent --config conf/SAgent.yaml >> logs/stdout.log 2>&1 &
+          echo $! > run/SAgent.pid
+        fi
+        sleep 2
+        p="-"; [ -f run/SAgent.pid ] && p=$(cat run/SAgent.pid 2>/dev/null)
+        { [ "$p" != "-" ] && kill -0 "$p" 2>/dev/null; } || { echo "SVC_DIRTY 重启后进程未存活 pid=$p"; exit 1; }
+        echo "SVC_RESTARTED pid=$p"
+      args:
+        executable: /bin/sh
+      register: restartres
+      changed_when: true
+      when: "'@SVC_ACTION@' == 'restart' and '@SVC_TARGET@' == 'process'"
+
+    # ---------- 插件级 ----------
+    - name: 插件级操作（control.sock stop/start，进程不动）
+      shell: |
+        AG=@DEST_HOME@/SAgent
+        cd "$AG"
+        name="@SVC_TARGET@"
+        name="${name#plugin:}"
+        [ -S run/control.sock ] || { echo "SVC_DIRTY control.sock 不存在（Agent 未运行，插件级操作需先启动 Agent）"; exit 1; }
+        out=$(timeout 5 ./bin/SAgent -ctl "@SVC_ACTION@ $name" 2>&1)
+        echo "$out" | grep -q "^OK" || { echo "SVC_DIRTY 控制通道拒绝：$out"; exit 1; }
+        sleep 1
+        st=$(timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1)
+        case "@SVC_ACTION@" in
+          stop)  echo "$st" | grep -q "\"$name\":\"stopped\"" && echo "SVC_PLUGIN_STOPPED $name" || { echo "SVC_DIRTY 核对失败：$st"; exit 1; } ;;
+          start) echo "$st" | grep -q "\"$name\":\"running\"" && echo "SVC_PLUGIN_STARTED $name" || { echo "SVC_DIRTY 核对失败：$st"; exit 1; } ;;
+          restart)
+            ./bin/SAgent -ctl "stop $name" >/dev/null 2>&1; sleep 1
+            out2=$(timeout 5 ./bin/SAgent -ctl "start $name" 2>&1)
+            echo "$out2" | grep -q "^OK" || { echo "SVC_DIRTY 重启插件被拒：$out2"; exit 1; }
+            echo "SVC_PLUGIN_STARTED $name" ;;
+        esac
+      args:
+        executable: /bin/sh
+      register: pluginres
+      changed_when: true
+      when: "'@SVC_TARGET@' != 'process'"
+
+    - name: 输出启停结论（平台解析此行）
+      debug:
+        msg: "{{ [stopres.stdout|default(''), startres.stdout|default(''), restartres.stdout|default(''), pluginres.stdout|default('')] | join('\n') }}"

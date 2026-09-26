@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
+
+	storepkg "github.com/sagent/l0-console/store"
 )
 
 // parseAgentConfigDoc：三种输入形态的解析兜底（legacy 数组 / 结构化 doc / 坏内容）
@@ -52,6 +55,46 @@ func TestParseAgentConfigDocEmptyAndGarbage(t *testing.T) {
 		if _, ok := doc["host_metrics"]; !ok {
 			t.Fatalf("input %q: want default host_metrics", in)
 		}
+	}
+}
+
+func TestSyncAgentConfigPreservesTargetIdentityAndParameters(t *testing.T) {
+	db := testOnboardDB(t)
+	params := `{"interval":"15s","timeout":"3s","collectors":["global_status"]}`
+	id, err := db.InsertTarget(&storepkg.TargetRow{
+		Name: "database-target", Type: "mysql", Address: "database.internal:3306",
+		AgentID: "collector-a", Plugin: "mysql_probe", ResourceID: "database-resource", ParamsJSON: params,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.SetAgentConfig("collector-a", `{"targets":[],"host_metrics":{"enabled":false,"interval":"60s"}}`); err != nil {
+		t.Fatal(err)
+	}
+	syncAgentConfig(NewAgentStore(), db, "collector-a")
+	_, content, err := db.GetAgentConfig("collector-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Targets []struct {
+			ID         int64  `json:"id"`
+			ResourceID string `json:"resource_id"`
+			ParamsJSON string `json:"params_json"`
+		} `json:"targets"`
+		HostMetrics struct {
+			Enabled  bool   `json:"enabled"`
+			Interval string `json:"interval"`
+		} `json:"host_metrics"`
+	}
+	if err := json.Unmarshal([]byte(content), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Targets) != 1 || doc.Targets[0].ID != id || doc.Targets[0].ResourceID != "database-resource" || doc.Targets[0].ParamsJSON != params {
+		t.Fatalf("target identity or parameters missing: %+v", doc.Targets)
+	}
+	if doc.HostMetrics.Enabled || doc.HostMetrics.Interval != "60s" {
+		t.Fatalf("target sync replaced host settings: %+v", doc.HostMetrics)
 	}
 }
 

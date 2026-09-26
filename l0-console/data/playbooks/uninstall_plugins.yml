@@ -1,0 +1,113 @@
+# SAgent 采集插件卸载 playbook（外置：改卸载动作不动代码；l0-console 启动时加载，@TOKEN@ 由平台渲染）
+# 可用占位符：@DEST_HOME@ 目标机用户家目录（与安装/卸载 playbook 同一口径）
+#
+# 定位：卸载 SAgent 之前的「先卸插件」环节。
+#   SAgent 本体被删掉后，它托管的插件子进程（Vector / mysqld_exporter）会成为孤儿继续跑，
+#   一边占用文件句柄一边继续采集。所以顺序是**先卸插件、确认插件真的停了，再动 SAgent**。
+#
+# 关键：不能直接 kill 插件进程。
+#   SAgent 的 subprocess 插件带崩溃自愈（internal/plugin/subprocess 的 monitorLoop：
+#   进程退出后 sleep 2 秒再拉起）。裸杀只会让它在 2 秒后复活，卸载永远做不干净。
+#   正确做法是先通过 control.sock 让 SAgent **自己停插件**——Stop() 会同时置停止标记
+#   与终止子进程，monitorLoop 因此不再拉起。只有 SAgent 已不在时，才退化为直接杀进程。
+#
+# 硬约束：本步骤只停进程，不删插件产物。
+#   插件文件（bin/vector、bin/mysqld_exporter）留在 ~/SAgent/plugins/ 下，
+#   由随后的「卸载 SAgent 本体」统一删安装目录一次性清除 —— 分两处删同一批文件
+#   只会制造"删了一半失败"的中间态，没有额外收益。
+#   真正有安全意义的是**进程停止**，那由本步骤负责并核验。
+#
+# 判定口径与扫描/卸载两侧保持一致：exe 落在 @DEST_HOME@/SAgent/plugins/ 下的进程即插件进程。
+# 不使用 pkill -f（它的 -f 会匹配到执行本脚本的 sh 自身，历史踩坑）。
+#
+# 已知盲区（如实说明，不假装覆盖）：exec 型插件（custom_scripts）以 `sh script.sh` 运行，
+#   脚本自己拉起的后台进程其 exe 不在插件目录下，无法按路径归属。这类残留本步骤报不出来，
+#   由操作人员在扫描环节看到 custom_scripts 时自行判断。
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 让 SAgent 主动停止其托管的采集插件（阻止崩溃自愈把插件拉回来）
+      shell: |
+        AG="@DEST_HOME@/SAgent"
+        # -ctl 走 run/control.sock（相对路径），因此必须先 cd 到安装目录再调用
+        if [ ! -x "$AG/bin/SAgent" ]; then
+          echo "SAgent 二进制不存在：跳过主动停插件，转由兜底直接杀进程"
+          exit 0
+        fi
+        if [ ! -S "$AG/run/control.sock" ]; then
+          echo "control.sock 不存在（SAgent 未运行或已停止）：跳过主动停插件"
+          exit 0
+        fi
+        out=$(cd "$AG" && ./bin/SAgent -ctl "stop" 2>&1); rc=$?
+        echo "control.sock stop 应答（rc=$rc）：$out"
+        exit 0
+      register: plugin_stop
+      changed_when: false
+
+    - name: 终止残留的插件进程（SIGTERM → 超时转 SIGKILL）
+      shell: |
+        AG="@DEST_HOME@/SAgent"
+        # 插件进程清单：exe 精确落在插件目录下。口径与扫描/核对三处一致
+        plugin_pids() {
+          for e in /proc/[0-9]*/exe; do
+            t=$(readlink "$e" 2>/dev/null) || continue
+            case "$t" in
+              "$AG"/plugins/*) p=${e#/proc/}; echo "${p%/exe}" ;;
+            esac
+          done
+        }
+        kill_plugins() {
+          sig="$1"
+          for p in $(plugin_pids); do
+            kill "$sig" "$p" 2>/dev/null || true
+          done
+        }
+        wait_gone() {
+          i=0
+          while [ "$i" -lt "$1" ]; do
+            [ -z "$(plugin_pids)" ] && return 0
+            i=$((i+1)); sleep 1
+          done
+          return 1
+        }
+        if [ -z "$(plugin_pids)" ]; then
+          echo "插件进程：停止前已无独立进程（内建插件随 SAgent 进程生死，此处不产生独立进程）"
+          exit 0
+        fi
+        kill_plugins TERM
+        if wait_gone 10; then
+          echo "插件进程：已优雅退出"
+        else
+          kill_plugins KILL
+          if wait_gone 5; then echo "插件进程：优雅退出超时，已强杀"; else echo "插件进程：强杀后仍未消失"; fi
+        fi
+        exit 0
+      register: plugin_kill
+      changed_when: false
+
+    - name: 插件停止结果核对（目标机口径：还有几个插件进程没停）
+      shell: |
+        AG="@DEST_HOME@/SAgent"
+        left=0
+        for e in /proc/[0-9]*/exe; do
+          t=$(readlink "$e" 2>/dev/null) || continue
+          case "$t" in "$AG"/plugins/*) left=$((left+1)) ;; esac
+        done
+        echo "plugin_process_left=$left"
+        if [ "$left" -eq 0 ]; then
+          echo "PLUGINS_CLEAN"
+        else
+          echo "PLUGINS_DIRTY"
+        fi
+        exit 0
+      register: plugin_check
+      changed_when: false
+
+    - name: 输出插件停止核对结果（界面逐任务可见）
+      debug:
+        msg: "插件核对 {{ plugin_check.stdout }}"
+
+    - name: 断言插件已全部停止
+      command: /bin/true
+      changed_when: false
+      failed_when: "'PLUGINS_CLEAN' not in plugin_check.stdout"

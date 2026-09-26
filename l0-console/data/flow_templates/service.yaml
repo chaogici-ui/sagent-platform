@@ -1,0 +1,58 @@
+# 启停 SAgent：对已接入主机的 SAgent 做停止 / 启动 / 重启，粒度到整个 Agent 或单个插件。
+# 与「卸载 SAgent」同构 —— internal: true，入口在资源页的行内「启动 / 停用」按钮。
+#
+# 动作与目标在拉起时选定（按钮一键下发，审计留痕到人）：action ∈ stop/start/restart，
+# target ∈ process（整个 Agent 进程）/ plugin:<插件名>（control.sock 单插件操作）。
+#
+# 顺序不是随便排的：
+#   ① 预检（只读）—— 进程/守护/暂停标记/插件清单来自目标机实测（control.sock status），
+#      决定停法分支（守护协议 / 直杀），并校验插件目标真实存在
+#   ② 核对（平台）—— 把预检实测与"做什么、影响什么"摊开留痕，挡掉不可能成功的操作；
+#      **核对通过即自动放行，不设人工闸门**（2026-09-24 用户评审："停用，需要我确认？确认什么东西？？？"）
+#      ——启停是可逆轻动作（停→启随时可回），动作与目标拉起时已选定并留痕，不需要二次点头；
+#      而闸门只会把流程卡在半路（前端从来没有启停决策卡，人无从确认，执行环节永不执行）
+#   ③ 执行 —— ansible：停止走 run.sh 守护协议（touch run/stopped + TERM，守护不会 3 秒拉回），
+#      启动解除暂停/重建守护/直启，重启在同一 playbook 内原子完成（停与启之间不留半死状态）
+#   验证内嵌在执行 playbook 的核对里：停=进程 0 个；启=pid 存活；插件=status 核对。
+#   停止完成后资源在平台标「已停止（维护）」——心跳消失是预期，不算失联（用户拍板 2026-09-22）
+id: service
+name: 启停 SAgent
+internal: true
+description: 启停目标机上的 SAgent：预检进程/守护/插件状态 → 核对影响并自动放行 → ansible 执行停止/启动/重启（整个 Agent 或指定插件）并自证核对。停止后资源标维护态，心跳消失不算失联
+steps:
+  - id: pick_object
+    atom: pick_object
+    title: 选择资源对象
+    scope: platform
+    hint: 按资源台账定位目标主机。动作（停止/启动/重启）与目标（整个 Agent/指定插件）在拉起时已选定并留痕
+
+  - id: preflight_service
+    atom: preflight_service
+    title: 启停前预检
+    scope: external
+    requires: [pick_object]
+    hint: 只读探测：SAgent 进程、run.sh 守护形态、暂停标记、control.sock 插件运行状态。**本环节不改动目标机任何东西**；插件级操作会在此核对目标插件真实存在
+    instruction: |
+      ssh -p {{.port}} <user>@{{.ip}} '
+        AG=~/SAgent
+        pid="-"; [ -f "$AG/run/SAgent.pid" ] && { p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; }
+        guard="no"; for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
+          case "$(tr "\0" " " < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac; done
+        stopped="no"; [ -f "$AG/run/stopped" ] && stopped="yes"
+        ctl="-"; [ -S "$AG/run/control.sock" ] && [ "$pid" != "-" ] && ctl=$(cd "$AG" && timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1)
+        echo "SVC_PRE pid=$pid guard=$guard stopped=$stopped ctl=$ctl"
+        echo "SVC_PRE_END"'
+
+  - id: confirm_service
+    atom: confirm_service
+    title: 核对启停影响
+    scope: platform
+    requires: [preflight_service]
+    hint: 把预检实测与即将执行的操作摊开留痕：做什么、影响什么、幂等命中时会发生什么。**核对通过即自动放行**——启停是可逆轻动作，动作与目标拉起时已选定并留痕，不设人工闸门
+
+  - id: service_execute
+    atom: service_execute
+    title: 执行启停
+    scope: external
+    requires: [confirm_service]
+    hint: 平台 ansible 自动执行：停止=守护协议停进程并核实进程归零；启动=解除守护暂停/重建守护/直启并核实 pid 存活；重启=停+启原子完成；插件级=control.sock 操作并按 status 核对。幂等：已停再停/已在跑再启动会如实报告且不做改动

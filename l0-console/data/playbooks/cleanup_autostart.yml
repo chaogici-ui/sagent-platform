@@ -1,0 +1,201 @@
+# SAgent 自愈与自启清理 playbook（外置：改清理动作不动代码；l0-console 启动时加载，@TOKEN@ 由平台渲染）
+# 可用占位符：@DEST_HOME@ 目标机用户家目录（与安装/卸载 playbook 同一口径）
+#
+# 定位：卸载 SAgent 之前必须先把「会把它拉回来的东西」清掉，否则会出现
+#   "杀了它又活" / "删了目录被重建" 的假失败，运维会以为卸载功能坏了。
+#
+# 两类自愈来源（本步骤的清理范围，由操作人员确认过的口径）：
+#   1) run.sh 守护进程 —— SAgent 官方包自带（sagent/run.sh，镜像 ENTRYPOINT）：
+#      while true + wait + sleep 3，SAgent 一退出就重启。它以 `./run.sh` 相对路径启动，
+#      所以判定要看它的身份而不是只看 cmdline（别人家的 run.sh 不该被误杀）。
+#   2) crontab 里指向 SAgent 的条目 —— 定时把 SAgent 拉起来的调度。
+#
+# 为什么对守护发 SIGKILL 而不是先 SIGTERM：
+#   run.sh 里 `trap cleanup TERM INT`，而 cleanup 会执行 `kill -9 -$(cat run/SAgent.pid)`——
+#   拿 pid 文件里的数字当**进程组**去杀。pid 文件可能是陈旧的，那个号码早被别的进程复用，
+#   于是"礼貌地停守护"会顺手杀掉一组无关进程。SIGKILL 不触发 trap，绕开这个坑。
+#   SAgent 本体由下一步按 exe 路径精确匹配停止，不依赖这个 trap。
+#
+# 只改自己的条目：crontab 回写时逐行过滤，只剔除含 SAgent 的行，其余原样保留。
+# 系统级文件（/etc/crontab、/etc/cron.d）本次只由扫描环节报告、不在此清理。
+#
+# 不谎报干净：crontab 读不到时（非 suid、精简容器常见）输出 AUTOSTART_PARTIAL 而不是 CLEAN，
+#   平台侧据此升级为告警让人来确认，而不是替它宣布"没有残留"。
+#   只有「守护确认消失」且「crontab 可读且已无 SAgent 条目」才叫 AUTOSTART_CLEAN。
+#
+# 任务名与注释里一律不许出现判据标记（CLEAN/PARTIAL/DIRTY）：
+#   任务名会随 ansible 的 TASK [...] 框线进入平台的输出解析，
+#   把自己写的标题当成目标机的回报结论（曾经因此把干净的机器判成 PARTIAL）。
+- hosts: target
+  gather_facts: false
+  tasks:
+    - name: 停止自愈守护进程（run.sh，发 SIGKILL 绕开其 trap 的进程组误杀）
+      shell: |
+        AG="@DEST_HOME@/SAgent"
+
+        # ppid_of：从 /proc/<pid>/stat 取父进程号。
+        # 不用 awk '{print $4}'：comm 带括号/空格时字段会错位，
+        # 这里先剥掉 "pid (comm) " 前缀，剩下的第 2 个字段才是 ppid
+        ppid_of() {
+          s=$(cat "/proc/$1/stat" 2>/dev/null) || return
+          s=${s#*) }
+          set -- $s
+          echo "$2"
+        }
+
+        # guard_pids：与扫描环节同源的两路判据，任一命中即认。
+        # 绝不能只认 cwd —— 实测容器里守护被 reparent 到 PID 1 之后
+        #   cwd / exe / environ 全部 Permission denied，
+        # 只认 cwd 会把守护整个漏掉：这一步静默不生效，下一步删了 SAgent 又被它拉回来，
+        # 表现为"卸载功能坏了"的假失败
+        guard_pids() {
+          # (a) 父子关系：守护是 SAgent 本体的父进程（不依赖 cwd 可读）
+          for d in /proc/[0-9]*; do
+            t=$(readlink "$d/exe" 2>/dev/null) || continue
+            case "$t" in "$AG"/bin/SAgent*) ;; *) continue ;; esac
+            pp=$(ppid_of "${d#/proc/}")
+            [ -n "$pp" ] || continue
+            pcl=$(tr '\0' ' ' < "/proc/$pp/cmdline" 2>/dev/null) || continue
+            case "$pcl" in *run.sh*) echo "$pp" ;; esac
+          done
+          # (b) cwd == 安装目录：覆盖"SAgent 刚退出、守护还在 sleep"的空窗期，
+          #     此时没有子进程可依，只能看 cwd
+          for d in /proc/[0-9]*; do
+            p=${d#/proc/}
+            [ -r "$d/cmdline" ] || continue
+            cl=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+            case "$cl" in
+              *run.sh*)
+                cw=$(readlink "$d/cwd" 2>/dev/null) || cw=""
+                [ "$cw" = "$AG" ] && echo "$p"
+                ;;
+            esac
+          done
+        }
+
+        if [ -z "$(guard_pids)" ]; then
+          echo "自愈守护：未在运行"
+        else
+          for p in $(guard_pids); do kill -9 "$p" 2>/dev/null || true; done
+          i=0
+          while [ "$i" -lt 10 ]; do
+            [ -z "$(guard_pids)" ] && break
+            i=$((i+1)); sleep 1
+          done
+          if [ -z "$(guard_pids)" ]; then echo "自愈守护：已终止"; else echo "自愈守护：终止后仍存在"; fi
+        fi
+        exit 0
+      register: guard_stop
+      changed_when: false
+
+    - name: 删除守护脚本文件（run.sh）
+      file:
+        path: "@DEST_HOME@/SAgent/run.sh"
+        state: absent
+
+    - name: 清理 crontab 中指向 SAgent 的条目
+      shell: |
+        if ! command -v crontab >/dev/null 2>&1; then
+          echo "crontab 命令不可用：未做任何改动"
+          echo "cron_state=unavailable"
+          exit 0
+        fi
+        before=$(crontab -l 2>&1); rc=$?
+        if [ "$rc" -ne 0 ]; then
+          case "$before" in
+            *"no crontab"*) echo "crontab 为空：无条目可清"; echo "cron_state=empty" ;;
+            *) echo "crontab 不可读（$before）：未做任何改动，需人工确认"; echo "cron_state=unreadable" ;;
+          esac
+          exit 0
+        fi
+        hits=$(printf '%s\n' "$before" | grep -c -E 'SAgent' 2>/dev/null || true)
+        [ -z "$hits" ] && hits=0
+        if [ "$hits" -eq 0 ]; then
+          echo "crontab 中无 SAgent 条目：未做改动"
+          echo "cron_state=clean"
+          exit 0
+        fi
+        kept=$(printf '%s\n' "$before" | grep -v -E 'SAgent' || true)
+        if printf '%s\n' "$kept" | crontab - 2>/dev/null; then
+          echo "crontab 已删除 $hits 条 SAgent 条目（其余条目原样保留）"
+          echo "cron_state=removed"
+        else
+          echo "crontab 回写失败：条目仍在，需人工清理"
+          echo "cron_state=write_failed"
+        fi
+        exit 0
+      register: cron_clean
+      changed_when: false
+
+    - name: 自启清理结果核对（守护是否消失 / crontab 是否还有 SAgent 条目）
+      shell: |
+        AG="@DEST_HOME@/SAgent"
+        g=no
+
+        ppid_of() {
+          s=$(cat "/proc/$1/stat" 2>/dev/null) || return
+          s=${s#*) }
+          set -- $s
+          echo "$2"
+        }
+
+        # 与 kill 环节同源的两路判据：核对靠什么认定"守护还在"，kill 就得靠什么找它。
+        # 判据不一致会出现"kill 说清了、核对说还在"的自相矛盾，或反之漏杀
+        # (a) 父子关系：还在跑的 SAgent 若仍挂在某个 run.sh 父进程下，说明守护没清掉
+        for d in /proc/[0-9]*; do
+          t=$(readlink "$d/exe" 2>/dev/null) || continue
+          case "$t" in "$AG"/bin/SAgent*) ;; *) continue ;; esac
+          pp=$(ppid_of "${d#/proc/}")
+          [ -n "$pp" ] || continue
+          pcl=$(tr '\0' ' ' < "/proc/$pp/cmdline" 2>/dev/null) || continue
+          case "$pcl" in *run.sh*) g=yes ;; esac
+        done
+        # (b) cwd == 安装目录（覆盖守护的 sleep 空窗期）
+        for d in /proc/[0-9]*; do
+          [ -r "$d/cmdline" ] || continue
+          cl=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+          case "$cl" in
+            *run.sh*)
+              cw=$(readlink "$d/cwd" 2>/dev/null) || cw=""
+              [ "$cw" = "$AG" ] && g=yes
+              ;;
+          esac
+        done
+        [ -f "$AG/run.sh" ] && g=yes
+
+        cron_state=unreadable; n=0
+        if command -v crontab >/dev/null 2>&1; then
+          cout=$(crontab -l 2>&1); crc=$?
+          if [ "$crc" -eq 0 ]; then
+            cron_state=read
+            if [ -n "$cout" ]; then
+              n=$(printf '%s\n' "$cout" | grep -c -E 'SAgent' 2>/dev/null || true)
+              [ -z "$n" ] && n=0
+            fi
+          else
+            case "$cout" in *"no crontab"*) cron_state=read; n=0 ;; esac
+          fi
+        fi
+
+        echo "guard_exists=$g cron_state=$cron_state cron_sagent_lines=$n"
+        if [ "$g" = yes ] || { [ "$cron_state" = read ] && [ "$n" -gt 0 ]; }; then
+          echo "AUTOSTART_DIRTY"
+        elif [ "$cron_state" != read ]; then
+          echo "AUTOSTART_PARTIAL"
+        else
+          echo "AUTOSTART_CLEAN"
+        fi
+        exit 0
+      register: autostart_check
+      changed_when: false
+
+    - name: 输出自启清理核对结果（界面逐任务可见）
+      debug:
+        msg: "自启核对 {{ autostart_check.stdout }}"
+
+    # 任务名里不许出现判据标记（CLEAN/PARTIAL/DIRTY）：它会随 ansible 的 TASK [...] 框线
+    # 一起进到平台解析的输出行里，被当成目标机的回报结论
+    - name: 断言自愈守护与 crontab 已清理（残余只告警不阻断）
+      command: /bin/true
+      changed_when: false
+      failed_when: "'AUTOSTART_DIRTY' in autostart_check.stdout"
