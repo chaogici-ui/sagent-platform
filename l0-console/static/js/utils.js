@@ -93,6 +93,8 @@
           case "agent-list": renderAgentList(); break;
           case "targets": renderTargets(); break;
           case "metrics-browse": renderMetricsBrowse(); break;
+          case "data-gov": renderDataGov(); break;          // 数据治理（platform.js，野指标治理切片）
+          case "platform-health": renderPlatformHealth(); break; // 平台健康（platform.js，/api/health 组件化自检）
           case "slo": renderSLO(); break;
           case "audit": renderAudit(); break;
           case "tasks": renderTasks(); break;      // 读落库审计（/api/tasks → ListAudit），重启不丢

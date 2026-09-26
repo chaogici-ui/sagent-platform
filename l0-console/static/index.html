@@ -13,7 +13,7 @@
       <!-- 菜单按「接入→采集配置→运维观测」闭环叙事分 5 组（2026-09-26 IA 整合设计定稿，
            设计稿：DESIGN-采集平台IA整合设计-菜单与页面规范.html）。改名对照：
            资源与接入→接入中心 / 实时总览→采集目标(降只读) / 采集策略→插件与策略 / 分析大屏→指标大屏。
-           页面 id（data-page）全部不变，goPage 深链与历史链接零影响；数据治理、平台健康两页待 P2 立项。 -->
+           页面 id（data-page）全部不变，goPage 深链与历史链接零影响；数据治理、平台健康两页为 P2 新增（platform.js）。 -->
       <div class="nav-section">总览健康</div>
       <a data-page="overview" onclick="goPage('overview')">◧ 工作台</a>
       <a data-page="slo" onclick="goPage('slo')">◫ 采集健康</a>
@@ -26,7 +26,9 @@
       <a data-page="versions" onclick="goPage('versions')">🧬 版本与兼容</a>
       <div class="nav-section">数据观测</div>
       <a data-page="metrics-browse" onclick="goPage('metrics-browse')">📈 指标大屏</a>
+      <a data-page="data-gov" onclick="goPage('data-gov')">🧹 数据治理</a>
       <div class="nav-section">平台</div>
+      <a data-page="platform-health" onclick="goPage('platform-health')">🩺 平台健康</a>
       <a data-page="settings" onclick="goPage('settings')">⚙️ 平台设置</a>
       <a data-page="audit" onclick="goPage('audit')">📜 审计日志</a>
       <div class="nav-foot"><span id="nav-user">toptea@l0</span> · <span id="nav-ver">v0.4.0</span></div>
@@ -106,14 +108,15 @@
       </div>
     </div>
 
-    <script src="js/utils.js?v=27"></script>
+    <script src="js/utils.js?v=28"></script>
     <script src="js/api.js?v=16"></script>
     <script src="js/fleet.js?v=16"></script>
-    <script src="js/panel.js?v=27"></script>
+    <script src="js/panel.js?v=28"></script>
     <script src="js/onboard.js?v=45"></script>
     <script src="js/version.js?v=2"></script>
     <script src="js/resources.js?v=17"></script>
     <script src="js/overview.js?v=5"></script>
+    <script src="js/platform.js?v=1"></script>
     <script src="js/app.js?v=17"></script>
     <script>
       console.log("SAgent MVP v4 loaded @ " + new Date().toLocaleTimeString());
