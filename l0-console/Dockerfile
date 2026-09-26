@@ -31,8 +31,8 @@ COPY --chown=deploy:deploy data/integrations/ /opt/l0-seed/integrations/
 COPY --chown=deploy:deploy data/flow_templates/ /opt/l0-seed/flow_templates/
 COPY --chown=deploy:deploy data/binaries/ /opt/l0-seed/binaries/
 COPY --chown=deploy:deploy data/playbooks/ /opt/l0-seed/playbooks/
-COPY --chown=deploy:deploy docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x ./docker-entrypoint.sh
+COPY --chown=deploy:deploy docker-entrypoint.sh l1-collector-supervise.sh ./
+RUN chmod +x ./docker-entrypoint.sh ./l1-collector-supervise.sh
 EXPOSE 8080
 ENV VM_URL=http://victoriametrics:8428
 ENTRYPOINT ["./docker-entrypoint.sh"]

@@ -36,5 +36,12 @@ fi
 # 采集目标登记目录（vmagent file_sd 共享目录，安装作业写入）：compose bind mount
 # 挂到这里（l0-console 与 vmagent 双挂），宿主机目录属主天然可写，无需 chown
 # 运行态产物不在 seed 清单内，卷中已有的一律不动
-# forward 额外参数：`docker ... entrypoint -- -package-cache` 可跑独立 L1 Package Cache 进程（架构 D5 IN1）
+# forward 额外参数：
+#   `docker ... entrypoint -- -package-cache` 可跑独立 L1 Package Cache 进程（架构 D5 IN1）
+#   `docker ... entrypoint -- --supervise`    进四进程守护（容器整合 SPEC-L1HA/L1HA-1：
+#                                             一台采集机一个容器，种子同步段与单进程完全共用）
+if [ "${1:-}" = "--supervise" ]; then
+    shift
+    exec ./l1-collector-supervise.sh "$@"
+fi
 exec ./l0-console "$@"

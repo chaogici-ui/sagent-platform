@@ -173,113 +173,69 @@ services:
       - victoriametrics
       - postgres
 
-  # ==================== L1 独立 Package Cache 进程（架构 D5 IN1） ====================
-  # 复用 l0-console 镜像，以 `-package-cache` 模式起独立进程：不建 DB、不起 console，
-  # 只加载版本清单 + 起 package-cache HTTP（/api/package-cache/* + /v1/package-cache/resolve）。
-  # 与 l0-console 共享 catalog-data 卷（data/binaries + versions.yaml 种子 + packages 缓存）。
-  # 网络域：属 L1 采集机（仅 l1-net）——就近取包是 L1 侧执行器经共享卷落盘取用，不走 HTTP 回 L0，
-  # 故 L0 侧无需可达：L1_PACKAGE_CACHE_URL 保持缺省（安装走进程内 resolveInstallBinary，红线语义一致）；
-  # Gateway 白名单亦刻意不含 /api/package-cache/*（避免 Gateway 沦为任意端点代理，见 gateway_test.go）。
-  l1-package-cache:
+  # ==================== L1 采集机（容器整合 · SPEC-L1HA L1HA-1） ====================
+  # 四个控制面进程（controller/gateway/package-cache/ansible-runner）合一为单容器 l1-collector：
+  # 真实部署形态是「一台采集机一个 tar.gz 包、四个 systemd 单元」，四进程同机同网络、同版本轨道、
+  # 同一部署单元——合并后演示拓扑与真实形态一致（守护脚本 l1-collector-supervise.sh = systemd 替身）。
+  # 隔离口径：原「Gateway 只挂 l1-net 不持 L0 可达」的网络域隔离随合并失效，
+  # 由 Gateway 3+2 路径白名单承接（进程级约束，见 SPEC-D5 红线改写）。
+  # 角色矩阵（L1HA 弹性载体）：L1_COLLECTOR_ROLES 声明本机跑哪些角色，缺省全装四角色；
+  # 裁剪部署在 .env 覆盖（如 L1_COLLECTOR_ROLES=controller,gateway）。
+  # 网络别名：保留 l1-controller/l1-gateway/l1-package-cache/l1-ansible-runner 四个 DNS 名，
+  # SAgent 与组件的全部 URL（SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460 等）零改动。
+  # 双挂 l0-net：controller 出网必需（唯一控制面出口）；runner 的 B3 期临时双挂需求随之自然覆盖。
+  l1-collector:
     image: docker-l0-console
-    container_name: l1-package-cache
-    command: ["-package-cache"]
+    container_name: l1-collector
+    command: ["--supervise"]
     networks:
-      - l1-net
+      l0-net:
+      l1-net:
+        aliases:
+          - l1-controller
+          - l1-gateway
+          - l1-package-cache
+          - l1-ansible-runner
     ports:
       - "8450:8450"
-    environment:
-      - PACKAGE_CACHE_LISTEN=:8450
-      - L1_PACKAGE_CACHE=/home/deploy/l0-console/data/packages
-    volumes:
-      - catalog-data:/home/deploy/l0-console/data
-    restart: unless-stopped
-    depends_on:
-      - l0-console
-
-  # ==================== L1 Gateway SAgent 通道汇聚中继（架构 D5 IN2） ====================
-  # 复用 l0-console 镜像，以 `-gateway` 模式起独立进程：无状态反向中继（不建 DB、不起 console），
-  # 把本资源池 SAgent 的注册/心跳/接入证据转发给上游 L1 Controller——
-  # 实现「万台 SAgent 只打通到本采集机、不直连 L0」的网络安全域收敛（控制面汇聚的第一跳）。
-  # 网络域：只挂 l1-net——控制面出口收敛到 Controller 后，面向半可信 SAgent 的中继进程
-  # **不持有 L0 可达**（攻击面分离）。白名单只收 SAgent 通道（/api/agent/* + 证据回报 +
-  # 任务回执 /api/l1/task/ack），数据面不经此。
-  l1-gateway:
-    image: docker-l0-console
-    container_name: l1-gateway
-    command: ["-gateway"]
-    networks:
-      - l1-net
-    ports:
       - "8460:8460"
-    environment:
-      - L1_GATEWAY_LISTEN=:8460
-      - L1_CONTROLLER_URL=http://l1-controller:8461
-    restart: unless-stopped
-    depends_on:
-      - l1-controller
-
-  # ==================== L1 Controller 控制面唯一出口 + 任务分流（架构 D5 IN3） ====================
-  # 复用 l0-console 镜像，以 `-controller` 模式起独立进程：直连 L0 拉任务 → 按 kind 分流决策
-  # （controller 自处理 / ansible→AnsibleRunner(IN4) / agent→经 Gateway 下发）→ 回执终态；
-  # 同时挂中继入口承接 Gateway 汇聚来的 SAgent 通道与 L1 内部组件的任务拉取。
-  # 网络域：**唯一双挂的控制面进程**（l0-net + l1-net）——控制面流量在 L1 侧汇聚后由它出网，
-  # 出口只有一个：Gateway/AnsibleRunner 都只挂 l1-net，上游指本进程。
-  # 执行器（Ansible/Gateway 独立接线）属 IN4/G2。
-  l1-controller:
-    image: docker-l0-console
-    container_name: l1-controller
-    command: ["-controller"]
-    networks:
-      - l0-net
-      - l1-net
-    ports:
       - "8461:8461"
+      - "8462:8462"
     environment:
+      # ---- 角色矩阵（L1HA-1）----
+      - L1_COLLECTOR_ROLES=${L1_COLLECTOR_ROLES:-controller,gateway,package-cache,ansible-runner}
+      # ---- controller（原 l1-controller）----
       - L1_CONTROLLER_ID=l1-controller-1
       - L1_CONTROLLER_LISTEN=:8461
       - L1_CONTROLLER_LOOP_MS=3000
       # 出口直连 L0（不经中继）；该地址同时是中继入口的上游
       - L0_CONSOLE_URL=http://l0-console:8080
-    restart: unless-stopped
-    depends_on:
-      - l0-console
-
-  # ==================== L1 Ansible Runner 安装执行器（架构 D5 IN4） ====================
-  # 复用 l0-console 镜像，以 `-ansible-runner` 模式起独立进程（进程 #4）：反向经 L1 Controller
-  # 拉安装任务 → 本地执行 playbook（就近取包/语法门禁/流式执行与 L0 同语义）→ 回执终态。
-  # 与 l0-console 共享 catalog-data 卷（data/binaries + playbooks + packages 缓存），
-  # 使 Runner 可就近取包安装（L1_PACKAGE_CACHE 与 l0-console 安装侧同根）。
-  # 网络域：正常态只挂 l1-net——拉任务/回执经 L1 Controller 出网（`/api/l1/task/{pull,ack}` 在
-  # controllerControlPaths 白名单内）；且需从 l1-net 直连被管主机（sagent-host）执行安装。
-  #
-  # ⚠ B3 验证期临时偏离（B5 收口即删）：额外双挂 l0-net。
-  # 原因：本阶段 install 已搬 Runner（走 l1-net），而 preflight_host 探路仍在 L0 进程内（走 l0-net），
-  # 台账 `resources` 只有单一 IP 字段——单一地址无法同时被 L0 与 Runner 可达（Docker bridge 互隔离）。
-  # SPEC「主机暂留 l0-net 双挂」不足：主机若搬 l1-net，L0 进程内探路当场断链（探路属 B4 才搬）。
-  # 故验证期改为「主机留在 l0-net + Runner 临时双挂 l0-net」，共享 L0 对同一 IP 的可达性；
-  # 主机 IP/台账零改动，L0 进程内探路不受影响，切回 inprocess 亦可回滚。B5 主机搬 l1-net 后删此行。
-  l1-ansible-runner:
-    image: docker-l0-console
-    container_name: l1-ansible-runner
-    command: ["-ansible-runner"]
-    networks:
-      - l1-net
-      - l0-net
-    ports:
-      - "8462:8462"
-    environment:
+      # ---- gateway / ansible-runner 共用：经网络别名 l1-controller 指向本容器内
+      # controller 进程（与合并前跨容器语义一致）----
+      - L1_CONTROLLER_URL=http://l1-controller:8461
+      # ---- gateway（原 l1-gateway）----
+      - L1_GATEWAY_LISTEN=:8460
+      # ---- package-cache（原 l1-package-cache）----
+      - PACKAGE_CACHE_LISTEN=:8450
+      # ---- ansible-runner（原 l1-ansible-runner）----
       - L1_ANSIBLE_RUNNER_ID=l1-ansible-runner-1
       - L1_ANSIBLE_RUNNER_LISTEN=:8462
       - L1_ANSIBLE_RUNNER_LOOP_MS=3000
-      - L1_CONTROLLER_URL=http://l1-controller:8461
-      - L1_PACKAGE_CACHE=/home/deploy/l0-console/data/packages
       - AGENT_HOME_ROOT=/home
+      # ---- package-cache 与 ansible-runner 共用就近取包目录（原两容器各自声明，现同卷同值）----
+      - L1_PACKAGE_CACHE=/home/deploy/l0-console/data/packages
     volumes:
       - catalog-data:/home/deploy/l0-console/data
+    # 四角色各一个端口；角色矩阵裁剪部署时需同步缩减此探针
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8450 && nc -z 127.0.0.1 8460 && nc -z 127.0.0.1 8461 && nc -z 127.0.0.1 8462"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
     depends_on:
-      - l1-controller
+      - l0-console
 
   # ==================== 目标机（模拟真实业务主机，SAgent 接入靶机） ====================
   # 独立干净主机：sshd + python3，静态 IP 挂 l0-net（平台同网段可达，ansible 直连）；
