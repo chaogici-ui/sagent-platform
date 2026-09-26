@@ -11,17 +11,17 @@ import (
 // collectHostFilesystem 文件系统组：node_filesystem_* 共 6 项，device/mountpoint/fstype 标签
 // 口径：statfs（gopsutil），伪文件系统过滤清单对齐 node_exporter 默认行为；
 // macOS 复用已有的 APFS 快照过滤逻辑。
-func collectHostFilesystem() []Metric {
+func collectHostFilesystem() ([]Metric, error) {
 	parts, err := disk.Partitions(false)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// 容器等无块设备环境：Partitions(false) 按物理设备过滤后为空，
 	// 回退全量挂载表（伪文件系统过滤清单仍兜底，overlay 等真实可 statfs 的保留）
 	if len(parts) == 0 {
 		parts, err = disk.Partitions(true)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 	}
 	var out []Metric
@@ -57,7 +57,7 @@ func collectHostFilesystem() []Metric {
 			Metric{Name: "node_filesystem_device_error", Value: 0, Help: "Whether an error occurred while getting statistics for the filesystem", Type: constants.MetricTypeGauge, Labels: L},
 		)
 	}
-	return out
+	return out, nil
 }
 
 // pseudoFSType 伪文件系统过滤（产品化考虑：清单集中一处，后续可配置化）

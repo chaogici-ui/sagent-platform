@@ -2,8 +2,8 @@ package builtin
 
 import (
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +19,8 @@ import (
 type MySQLProbe struct {
 	targets     []config.MySQLTarget
 	exporter    *subprocess.Plugin
-	exporterBin string          // 存储以便 restart
-	metricsCh   chan<- []Metric // 存储以便 restart
+	exporterBin string             // 存储以便 restart
+	metricsCh   chan<- MetricBatch // 存储以便 restart
 	interval    time.Duration
 	client      *http.Client
 	stopCh      chan struct{}
@@ -35,6 +35,7 @@ func NewMySQLProbe(cfg config.MySQLProbeConfig) *MySQLProbe {
 		targets:  cfg.Targets,
 		interval: 30 * time.Second,
 		stopCh:   make(chan struct{}),
+		client:   &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -62,7 +63,7 @@ func (m *MySQLProbe) Running() bool {
 }
 
 // StartWith 首次启动采集（存入参数供后续 restart 使用）
-func (m *MySQLProbe) StartWith(exporterBin string, metricsCh chan<- []Metric) error {
+func (m *MySQLProbe) StartWith(exporterBin string, metricsCh chan<- MetricBatch) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -169,103 +170,66 @@ func (m *MySQLProbe) Stop() error {
 }
 
 // scrape 抓取 mysqld_exporter 指标，为每个 target 注入 resource_id
-func (m *MySQLProbe) scrape(metricsCh chan<- []Metric) {
+func (m *MySQLProbe) scrape(metricsCh chan<- MetricBatch) {
 	for _, target := range m.targets {
 		hostPort := dsnHostPort(target.DSN)
+		source, healthSource := MySQLSnapshotSources(target)
+		var metrics []Metric
+		var health []Metric
+		var err error
 		if hostPort == "" {
-			continue
+			err = fmt.Errorf("invalid mysql target address")
+		} else {
+			var body string
+			body, err = fetchPrometheusText(m.client, "http://127.0.0.1:19104/probe?target="+url.QueryEscape(hostPort))
+			if err == nil {
+				metrics, err = parseMySQLMetrics(body, target.ResourceID)
+			}
 		}
-
-		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:19104/probe?target=%s", hostPort))
+		business := make([]Metric, 0, len(metrics))
+		for _, metric := range metrics {
+			if metric.Name == "mysql_up" {
+				health = append(health, metric)
+				if metric.Value != 1 {
+					err = fmt.Errorf("mysql collection failed: mysql_up=%v", metric.Value)
+				}
+			} else {
+				business = append(business, metric)
+			}
+		}
 		if err != nil {
-			fmt.Printf("mysql_probe: scrape %s: %v\n", target.ResourceID, err)
-			continue
+			health = []Metric{{Name: "mysql_up", Value: 0, Type: constants.MetricTypeGauge, Help: "Whether the MySQL server is up", Labels: map[string]string{
+				"resource_id": target.ResourceID, "remote_resource_id": target.ResourceID, "resource_type": "mysql",
+			}}}
 		}
-
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			fmt.Printf("mysql_probe: read %s: %v\n", target.ResourceID, err)
-			continue
+		if !sendBatch(metricsCh, m.stopCh, snapshotBatch(source, business, m.interval, err)) {
+			return
 		}
-
-		// 解析 Prometheus 格式，注入 remote resource_id
-		metrics := parseMySQLMetrics(string(body), target.ResourceID)
-		metricsCh <- metrics
+		if !sendBatch(metricsCh, m.stopCh, snapshotBatch(healthSource, health, m.interval, nil)) {
+			return
+		}
 	}
 }
 
-// parseMySQLMetrics 解析 mysqld_exporter 输出的 Prometheus 格式
-func parseMySQLMetrics(body string, remoteResourceID string) []Metric {
-	var metrics []Metric
-	lines := strings.Split(body, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// 解析: metric_name{labels} value
-		parts := strings.SplitN(line, " ", 3)
-		if len(parts) < 2 {
-			continue
-		}
-		name := parts[0]
-		valStr := parts[1]
-
-		// 分离 metric name 和 labels
-		var labels map[string]string
-		if idx := strings.Index(name, "{"); idx >= 0 {
-			labelStr := name[idx+1 : len(name)-1]
-			name = name[:idx]
-			labels = parseLabels(labelStr)
-		}
-		if labels == nil {
-			labels = make(map[string]string)
-		}
-
-		// 注入远程资源 ID
-		labels["resource_id"] = remoteResourceID
-		labels["resource_type"] = "mysql"
-
-		var value float64
-		fmt.Sscanf(valStr, "%f", &value)
-
-		metricType := string(constants.MetricTypeGauge)
-		if strings.HasSuffix(name, "_total") {
-			metricType = string(constants.MetricTypeCounter)
-		}
-
-		// 注入远程资源 ID
-		if labels == nil {
-			labels = make(map[string]string)
-		}
-		labels["remote_resource_id"] = remoteResourceID
-
-		metrics = append(metrics, Metric{
-			Name:   name,
-			Value:  value,
-			Help:   "",
-			Type:   constants.MetricType(metricType),
-			Labels: labels,
-		})
-	}
-	return metrics
+func MySQLSnapshotSources(target config.MySQLTarget) (business, health string) {
+	hostPort := dsnHostPort(target.DSN)
+	return SnapshotSource("mysql_probe", target.ResourceID, hostPort), SnapshotSource("mysql_probe_health", target.ResourceID, hostPort)
 }
 
-// parseLabels 解析 Prometheus 标签字符串
-func parseLabels(s string) map[string]string {
-	labels := make(map[string]string)
-	pairs := strings.Split(s, ",")
-	for _, pair := range pairs {
-		kv := strings.SplitN(pair, "=", 2)
-		if len(kv) == 2 {
-			key := strings.TrimSpace(kv[0])
-			val := strings.Trim(kv[1], "\"")
-			labels[key] = val
+func parseMySQLMetrics(body string, remoteResourceID string) ([]Metric, error) {
+	metrics, err := parsePrometheusText(body)
+	if err != nil {
+		return nil, err
+	}
+	for i := range metrics {
+		metrics[i].Labels["resource_id"] = remoteResourceID
+		metrics[i].Labels["resource_type"] = "mysql"
+		metrics[i].Labels["remote_resource_id"] = remoteResourceID
+		if strings.HasSuffix(metrics[i].Name, "_total") {
+			metrics[i].Type = constants.MetricTypeCounter
 		}
 	}
-	return labels
+	return metrics, nil
 }
 
 // buildExporterConfig 生成 mysqld_exporter 的 my.cnf 多目标配置

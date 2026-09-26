@@ -11,7 +11,7 @@ import (
 // collectHostNetstack 网络协议栈组：host_node_netstat_* 21 项 + host_node_sockstat_* 6 项 + node_sockstat_sockets_used
 // 口径：/proc/net/netstat（IpExt/TcpExt/Ip/Udp）、/proc/net/snmp（Ip6 十六进制）、/proc/net/sockstat；
 // 与 node_exporter 同源同字段名（TCP_mem 页数 ×4096 转字节）。
-func collectHostNetstack() []Metric {
+func collectHostNetstack() ([]Metric, error) {
 	var out []Metric
 
 	// ---- /proc/net/netstat（Ip / Tcp / TcpExt / IpExt）----
@@ -112,7 +112,7 @@ func collectHostNetstack() []Metric {
 	if v, ok := sock["tcp_mem_pages"]; ok {
 		out = append(out, Metric{Name: "host_node_sockstat_tcp_mem_bytes", Value: v * 4096, Help: "TCP socket memory in bytes", Type: constants.MetricTypeGauge})
 	}
-	return out
+	return out, nil
 }
 
 func cn(name string, v float64, help string) Metric {

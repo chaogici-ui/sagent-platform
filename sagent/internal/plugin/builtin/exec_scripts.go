@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +23,7 @@ type ExecScripts struct {
 	wg        sync.WaitGroup
 	mu        sync.Mutex
 	running   bool
-	metricsCh chan<- []Metric // 保存以便重启
+	metricsCh chan<- MetricBatch // 保存以便重启
 }
 
 // NewExecScripts 创建脚本执行器
@@ -56,7 +58,7 @@ func (e *ExecScripts) Running() bool {
 }
 
 // SetMetricsCh 设置指标通道（在首次 Start 前调用）
-func (e *ExecScripts) SetMetricsCh(ch chan<- []Metric) {
+func (e *ExecScripts) SetMetricsCh(ch chan<- MetricBatch) {
 	e.metricsCh = ch
 }
 
@@ -105,7 +107,7 @@ func (e *ExecScripts) Stop() error {
 }
 
 // runLoop 单个脚本的执行循环
-func (e *ExecScripts) runLoop(script config.ExecScript, metricsCh chan<- []Metric) {
+func (e *ExecScripts) runLoop(script config.ExecScript, metricsCh chan<- MetricBatch) {
 	interval := script.Interval
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -132,7 +134,7 @@ func (e *ExecScripts) runLoop(script config.ExecScript, metricsCh chan<- []Metri
 }
 
 // executeOnce 执行一次脚本，解析 stdout 中的 Prometheus 指标
-func (e *ExecScripts) executeOnce(script config.ExecScript, metricsCh chan<- []Metric, timeout time.Duration) {
+func (e *ExecScripts) executeOnce(script config.ExecScript, metricsCh chan<- MetricBatch, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -140,13 +142,14 @@ func (e *ExecScripts) executeOnce(script config.ExecScript, metricsCh chan<- []M
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
+	source := SnapshotSource(e.Name(), script.Name, script.ResourceID)
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("exec_scripts: %s failed: %v\n", script.Name, err)
+		sendBatch(metricsCh, e.stopCh, snapshotBatch(source, nil, script.Interval, err))
 		return
 	}
 
-	// 解析 Prometheus 文本格式
-	metrics := parsePrometheusText(stdout.String())
+	metrics, err := parsePrometheusText(stdout.String())
 
 	// 注入标签
 	resourceID := script.ResourceID
@@ -160,105 +163,173 @@ func (e *ExecScripts) executeOnce(script config.ExecScript, metricsCh chan<- []M
 		}
 	}
 
-	metricsCh <- metrics
+	sendBatch(metricsCh, e.stopCh, snapshotBatch(source, metrics, script.Interval, err))
 }
 
-// parsePrometheusText 解析 Prometheus exposition 格式
-func parsePrometheusText(text string) []Metric {
+// parsePrometheusText 拒绝不完整或非法样本，避免部分 body 刷新快照。
+func parsePrometheusText(text string) ([]Metric, error) {
 	var metrics []Metric
-	lines := strings.Split(text, "\n")
-	var currentHelp string
-	var currentType string
-
-	for _, line := range lines {
+	helps := map[string]string{}
+	types := map[string]constants.MetricType{}
+	for n, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-
 		if strings.HasPrefix(line, "# HELP ") {
-			currentHelp = strings.TrimPrefix(line, "# HELP ")
-			if idx := strings.Index(currentHelp, " "); idx > 0 {
-				currentHelp = currentHelp[idx+1:]
+			name, help, ok := strings.Cut(strings.TrimPrefix(line, "# HELP "), " ")
+			if !ok || !metricNamePattern.MatchString(name) {
+				return nil, fmt.Errorf("invalid HELP at line %d", n+1)
 			}
+			helps[name] = strings.NewReplacer("\\n", "\n", "\\\\", "\\").Replace(help)
 			continue
 		}
 		if strings.HasPrefix(line, "# TYPE ") {
-			typeInfo := strings.TrimPrefix(line, "# TYPE ")
-			parts := strings.Fields(typeInfo)
-			if len(parts) >= 2 {
-				currentType = parts[1]
+			parts := strings.Fields(strings.TrimPrefix(line, "# TYPE "))
+			if len(parts) != 2 || !metricNamePattern.MatchString(parts[0]) {
+				return nil, fmt.Errorf("invalid TYPE at line %d", n+1)
+			}
+			switch parts[1] {
+			case "counter", "gauge", "histogram", "summary", "untyped":
+				types[parts[0]] = constants.MetricType(parts[1])
+			default:
+				return nil, fmt.Errorf("invalid metric type at line %d", n+1)
 			}
 			continue
 		}
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
-
-		// 解析: name{labels} value [timestamp]
 		metric, err := parseMetricLine(line)
 		if err != nil {
-			continue
-		}
-		if metric.Help == "" {
-			metric.Help = currentHelp
-		}
-		if metric.Type == "" {
-			metric.Type = constants.MetricType(currentType)
-		}
-		if metric.Type == "" {
-			metric.Type = constants.MetricTypeGauge
+			return nil, fmt.Errorf("metric line %d: %w", n+1, err)
 		}
 		metrics = append(metrics, metric)
 	}
-
-	return metrics
+	for i := range metrics {
+		metric := &metrics[i]
+		family := metric.Name
+		if _, declared := types[family]; !declared {
+			for _, suffix := range []string{"_bucket", "_sum", "_count"} {
+				if !strings.HasSuffix(metric.Name, suffix) {
+					continue
+				}
+				base := strings.TrimSuffix(metric.Name, suffix)
+				kind := types[base]
+				if kind == "histogram" || kind == "summary" && suffix != "_bucket" {
+					family, metric.Family = base, base
+					break
+				}
+			}
+		}
+		metric.Help, metric.Type = helps[family], types[family]
+		if metric.Type == "" {
+			metric.Type = constants.MetricTypeGauge
+		}
+	}
+	return metrics, nil
 }
 
-// parseMetricLine 解析单行 Prometheus 指标
+var metricNamePattern = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+var labelNamePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
 func parseMetricLine(line string) (Metric, error) {
-	parts := strings.SplitN(line, " ", 3)
-	if len(parts) < 2 {
-		return Metric{}, fmt.Errorf("parse error")
+	idx := strings.IndexAny(line, "{ \t")
+	if idx <= 0 || !metricNamePattern.MatchString(line[:idx]) {
+		return Metric{}, fmt.Errorf("invalid metric name or missing value")
 	}
-
-	namePart := parts[0]
-	valStr := parts[1]
-
-	metric := Metric{}
-
-	// 分离 name 和 labels
-	if idx := strings.Index(namePart, "{"); idx >= 0 {
-		metric.Name = namePart[:idx]
-		labelStr := namePart[idx+1:]
-		if lastBrace := strings.LastIndex(labelStr, "}"); lastBrace >= 0 {
-			labelStr = labelStr[:lastBrace]
+	metric := Metric{Name: line[:idx], Labels: map[string]string{}}
+	rest := line[idx:]
+	if rest[0] == '{' {
+		quoted, escaped, end := false, false, -1
+		for i := 1; i < len(rest); i++ {
+			c := rest[i]
+			if escaped {
+				escaped = false
+			} else if quoted && c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = !quoted
+			} else if !quoted && c == '}' {
+				end = i
+				break
+			}
 		}
-		metric.Labels = parseKeyValueLabels(labelStr)
-	} else {
-		metric.Name = namePart
-		metric.Labels = make(map[string]string)
+		if end < 0 {
+			return Metric{}, fmt.Errorf("unterminated labels")
+		}
+		labels, err := parseKeyValueLabels(rest[1:end])
+		if err != nil {
+			return Metric{}, err
+		}
+		metric.Labels, rest = labels, rest[end+1:]
 	}
-
-	fmt.Sscanf(valStr, "%f", &metric.Value)
-
+	if len(rest) == 0 || rest[0] != ' ' && rest[0] != '\t' {
+		return Metric{}, fmt.Errorf("missing value separator")
+	}
+	parts := strings.Fields(rest)
+	if len(parts) < 1 || len(parts) > 2 {
+		return Metric{}, fmt.Errorf("invalid sample fields")
+	}
+	value, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return Metric{}, fmt.Errorf("invalid sample value")
+	}
+	if len(parts) == 2 {
+		if _, err := strconv.ParseInt(parts[1], 10, 64); err != nil {
+			return Metric{}, fmt.Errorf("invalid sample timestamp")
+		}
+	}
+	metric.Value = value
 	return metric, nil
 }
 
-// parseKeyValueLabels 解析 key="value" 格式的标签
-func parseKeyValueLabels(s string) map[string]string {
-	labels := make(map[string]string)
-	if s == "" {
-		return labels
-	}
-
-	for _, pair := range strings.Split(s, ",") {
-		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-		if len(kv) == 2 {
-			key := kv[0]
-			val := strings.Trim(kv[1], "\"")
-			labels[key] = val
+func parseKeyValueLabels(s string) (map[string]string, error) {
+	labels := map[string]string{}
+	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
+		key, rest, ok := strings.Cut(s, "=")
+		key, rest = strings.TrimSpace(key), strings.TrimSpace(rest)
+		if !ok || !labelNamePattern.MatchString(key) || len(rest) == 0 || rest[0] != '"' {
+			return nil, fmt.Errorf("invalid label")
+		}
+		if _, exists := labels[key]; exists {
+			return nil, fmt.Errorf("duplicate label %s", key)
+		}
+		var value strings.Builder
+		end := -1
+		for i := 1; i < len(rest); i++ {
+			c := rest[i]
+			if c == '"' {
+				end = i
+				break
+			}
+			if c == '\\' {
+				i++
+				if i >= len(rest) {
+					return nil, fmt.Errorf("unfinished label escape")
+				}
+				c = rest[i]
+				switch c {
+				case 'n':
+					c = '\n'
+				case '\\', '"':
+				default:
+					return nil, fmt.Errorf("invalid label escape")
+				}
+			}
+			value.WriteByte(c)
+		}
+		if end < 0 {
+			return nil, fmt.Errorf("unterminated label")
+		}
+		labels[key] = value.String()
+		s = strings.TrimSpace(rest[end+1:])
+		if s != "" {
+			if s[0] != ',' {
+				return nil, fmt.Errorf("missing label separator")
+			}
+			s = s[1:]
 		}
 	}
-	return labels
+	return labels, nil
 }

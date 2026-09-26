@@ -13,7 +13,7 @@ import (
 // collectHostSystem 系统与时间组：node_uname_info / node_time_seconds / node_boot_time_seconds /
 // node_timex_*（仅 Linux）4 项 / node_temperature_celsius / node_hwmon_temp_celsius
 // （周期自检 4 项由编排层在 system 组启用时追加）
-func collectHostSystem() []Metric {
+func collectHostSystem() ([]Metric, error) {
 	var out []Metric
 
 	// uname（信息型指标，value=1，字段在标签）
@@ -51,7 +51,7 @@ func collectHostSystem() []Metric {
 		}
 		out = append(out, Metric{Name: "node_temperature_celsius", Value: max, Help: "Node temperature in celsius (max of sensors)", Type: constants.MetricTypeGauge})
 	}
-	return out
+	return out, nil
 }
 
 // hwmonTemps 遍历 /sys/class/hwmon 温度传感器（非 Linux 时目录不存在返回 false）

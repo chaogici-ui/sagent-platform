@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	stdlog "log"
@@ -8,12 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sagent/core/internal/bus"
 	"github.com/sagent/core/internal/config"
 	"github.com/sagent/core/internal/constants"
+	"github.com/sagent/core/internal/control"
 	"github.com/sagent/core/internal/logger"
 	"github.com/sagent/core/internal/pipeline"
 	"github.com/sagent/core/internal/plugin/builtin"
@@ -23,14 +26,16 @@ import (
 
 // App SAgent 应用实例，组合所有核心组件
 type App struct {
-	cfg        *config.Config
-	log        *logger.Logger
-	pipeline   *pipeline.Pipeline
-	busServer  *bus.Server
-	server     *server.Server
-	pluginMgr  *server.PluginManager
-	subPlugins []*subprocess.Plugin
-	metricsCh  chan []builtin.Metric
+	cfg         *config.Config
+	log         *logger.Logger
+	pipeline    *pipeline.Pipeline
+	busServer   *bus.Server
+	server      *server.Server
+	pluginMgr   *server.PluginManager
+	subPlugins  []*subprocess.Plugin
+	metricsCh   chan builtin.MetricBatch
+	hostRuntime *hostRuntime
+	ctl         *control.Client // OBS-1：控制通道，其通信指标经 server./metrics 暴露
 }
 
 func main() {
@@ -83,7 +88,7 @@ func main() {
 	app := &App{
 		cfg:       cfg,
 		log:       log,
-		metricsCh: make(chan []builtin.Metric, 100),
+		metricsCh: make(chan builtin.MetricBatch, 100),
 	}
 
 	// 初始化各组件
@@ -95,6 +100,45 @@ func main() {
 	// 定期心跳
 	go app.heartbeat()
 
+	// L0 接入中心回传通道（注册/心跳/配置拉取）；未配置 l0_console.url 时不启用
+	if app.cfg.L0Console.URL != "" {
+		labels := map[string]string{
+			constants.TagBusinessSystem: app.cfg.Resource.BusinessSystem,
+			constants.TagEnv:            app.cfg.Resource.Env,
+			constants.TagIDC:            app.cfg.Resource.IDC,
+			constants.TagCluster:        app.cfg.Resource.Cluster,
+		}
+		// 池归属只在登记时带上（空值不写，避免平台侧把空串当成"已登记池"）
+		if p := app.cfg.Resource.Pool; p != "" {
+			labels[constants.TagPool] = p
+		}
+		if r := app.cfg.Resource.Region; r != "" {
+			labels[constants.TagRegion] = r
+		}
+		// 本机自描述与自身 /metrics 地址都从配置来，不再写死：
+		// 注册上报的插件清单 = 实际启用的插件；metricsURL 处理 0.0.0.0/[::] 前缀
+		desc := control.SelfDesc{
+			Type:              app.cfg.Resource.Type,
+			Plugins:           app.cfg.EnabledPluginNames(),
+			HeartbeatInterval: app.cfg.L0Console.HeartbeatInterval, // 0 = 按资源类型取默认（采集机 10s / 其余 30s）
+		}
+		metricsURL := loopbackURL(app.cfg.Server.Listen)
+		applier := control.NewConfigApplier(app.cfg.L0Console.DataDir, app.applyPlatformConfig)
+		if err := applier.Restore(context.Background()); err != nil {
+			log.Warn("Failed to restore last-good platform configuration: %v", err)
+		}
+		// L0 地址合并：endpoints 非空用 endpoints（已含主端点顺序），否则回落单点 URL（兼容存量配置）
+		l0URLs := app.cfg.L0Console.Endpoints
+		if l0URLs == "" {
+			l0URLs = app.cfg.L0Console.URL
+		}
+		ctl := control.NewClient(l0URLs, app.cfg.Resource.ID,
+			constants.Version, labels, metricsURL, desc, log)
+		ctl.SetConfigApplier(applier.Apply)
+		app.ctl = ctl
+		go ctl.Run(context.Background())
+	}
+
 	// 优雅退出
 	app.handleSignals()
 
@@ -104,29 +148,46 @@ func main() {
 	app.run()
 }
 
+// loopbackURL 把 listen 地址转成本机可达的 URL：0.0.0.0 / [::] / 空前缀一律换成 127.0.0.1。
+// 直接拼 "http://127.0.0.1"+listen 在 listen=0.0.0.0:19090 时会生成非法 URL（metrics_confirmed 永不回报）
+func loopbackURL(listen string) string {
+	addr := strings.TrimSpace(listen)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		port = strings.TrimPrefix(addr, ":")
+		host = ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
 // initPipeline 初始化流水线
 func (app *App) initPipeline() {
 	resLabels := server.BuildResourceLabels(&app.cfg.Resource)
 	app.pipeline = pipeline.New(resLabels)
+	go app.consumeMetricBatches()
+}
 
-	go func() {
-		for metrics := range app.metricsCh {
-			app.pipeline.Ingest(metrics)
-		}
-	}()
+func (app *App) consumeMetricBatches() {
+	for batch := range app.metricsCh {
+		app.pipeline.IngestBatch(batch)
+	}
 }
 
 // initPlugins 初始化所有插件
 func (app *App) initPlugins() {
 	cfg := app.cfg
 
-	// ---- builtin ----
+	app.hostRuntime = newHostRuntime(app.pipeline, cfg.Plugins.HostMetrics)
+	app.pluginMgr.Register(app.hostRuntime)
 	if cfg.Plugins.HostMetrics.Enabled {
-		hm := cfg.Plugins.HostMetrics
-		c := builtin.NewHostMetricsCollector(hm.Interval, hm.Groups, hm.ExcludeMetrics)
-		c.Start(app.metricsCh)
-		app.log.Info("Plugin %s started (interval=%s groups=%d exclude=%d)",
-			c.Name(), c.Interval(), len(hm.Groups), len(hm.ExcludeMetrics))
+		if err := app.hostRuntime.Start(); err != nil {
+			app.log.Warn("Failed to start %s: %v", constants.PluginNameHostMetrics, err)
+		} else {
+			app.log.Info("Plugin %s started", constants.PluginNameHostMetrics)
+		}
 	}
 
 	// ---- subprocess: log_metrics (Vector 日志转指标) ----
@@ -181,7 +242,7 @@ func (app *App) initPlugins() {
 	if cfg.Plugins.PortChecker.Enabled {
 		targets := make([]builtin.PortTarget, len(cfg.Plugins.PortChecker.Targets))
 		for i, t := range cfg.Plugins.PortChecker.Targets {
-			targets[i] = builtin.PortTarget{Name: t.Name, Type: t.Type, Address: t.Address, Timeout: t.Timeout, Labels: t.Labels}
+			targets[i] = builtin.PortTarget{Name: t.Name, Type: t.Type, Address: t.Address, Replicas: t.Replicas, Timeout: t.Timeout, Labels: t.Labels}
 		}
 		interval := cfg.Plugins.PortChecker.Interval
 		if interval == 0 {
@@ -196,7 +257,7 @@ func (app *App) initPlugins() {
 	if cfg.Plugins.PrometheusScrape.Enabled {
 		targets := make([]builtin.ScrapeTarget, len(cfg.Plugins.PrometheusScrape.Targets))
 		for i, t := range cfg.Plugins.PrometheusScrape.Targets {
-			targets[i] = builtin.ScrapeTarget{Name: t.Name, URL: t.URL, Timeout: t.Timeout, Labels: t.Labels}
+			targets[i] = builtin.ScrapeTarget{Name: t.Name, URL: t.URL, Replicas: t.Replicas, Timeout: t.Timeout, Labels: t.Labels}
 		}
 		interval := cfg.Plugins.PrometheusScrape.Interval
 		if interval == 0 {
@@ -233,6 +294,10 @@ func (app *App) initBus() {
 // initServer 初始化 HTTP 服务
 func (app *App) initServer() {
 	app.server = server.New(app.cfg, app.pipeline, app.pluginMgr, app.log)
+	// OBS-1：控制通道通信可观测指标接入 /metrics
+	if app.ctl != nil {
+		app.server.AddControlMeter(app.ctl.MetricsText)
+	}
 }
 
 // waitForMetrics 等待首次指标采集完成

@@ -15,7 +15,7 @@ import (
 // 口径：/proc/loadavg、/proc/stat、/proc/<pid>/stat 遍历，与 node_exporter 同源。
 // 说明：node_processes / node_processes_state / node_processes_threads 为 KPI 标准表自定义口径
 //（node_exporter 无此三项），实现为进程总数 / 按状态分布 / 线程总数。
-func collectHostLoadProc() []Metric {
+func collectHostLoadProc() ([]Metric, error) {
 	var out []Metric
 
 	// 负载
@@ -23,26 +23,8 @@ func collectHostLoadProc() []Metric {
 		out = append(out, Metric{Name: "node_load1", Value: avg.Load1, Help: "Load average over 1 minute", Type: constants.MetricTypeGauge})
 	}
 
-	// /proc/stat：forks / ctxt / intr
-	if st := parseProcStat(); st != nil {
-		if v, ok := st["processes"]; ok {
-			out = append(out, Metric{Name: "node_forks_total", Value: v, Help: "Total number of forks", Type: constants.MetricTypeCounter})
-		}
-		if v, ok := st["ctxt"]; ok {
-			out = append(out, Metric{Name: "node_context_switches_total", Value: v, Help: "Total number of context switches", Type: constants.MetricTypeCounter})
-		}
-		if v, ok := st["intr"]; ok {
-			out = append(out, Metric{Name: "node_intr_total", Value: v, Help: "Total number of interrupts serviced", Type: constants.MetricTypeCounter})
-		}
-	}
-
-	// 进程运行/阻塞（/proc/loadavg 第 4 字段 running/total）
-	if running, blocked, ok := loadavgProcs(); ok {
-		out = append(out,
-			Metric{Name: "node_procs_running", Value: running, Help: "Number of processes in runnable state", Type: constants.MetricTypeGauge},
-			Metric{Name: "node_procs_blocked", Value: blocked, Help: "Number of processes blocked waiting for disk IO", Type: constants.MetricTypeGauge},
-		)
-	}
+	// /proc/stat：forks / ctxt / intr / procs_running / procs_blocked
+	out = append(out, procStatMetrics(parseProcStat())...)
 
 	// 进程总数/状态分布/线程总数（Linux 遍历 /proc/[pid]/stat）
 	if total, threads, states, ok := procProcessStats(); ok {
@@ -56,25 +38,32 @@ func collectHostLoadProc() []Metric {
 				Labels: map[string]string{"state": state}})
 		}
 	}
-	return out
+	return out, nil
 }
 
-// parseProcStat 解析 /proc/stat 中关键字段（processes / ctxt / intr / btime）
+// parseProcStat 读 /proc/stat（读取失败返回 nil，调用方按缺数据处置）
 func parseProcStat() map[string]float64 {
-	f, err := os.Open("/proc/stat")
+	b, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	return parseProcStatText(string(b))
+}
+
+// parseProcStatText 解析 /proc/stat 关键字段（纯函数，可单测）。
+// procs_running / procs_blocked 是 node_exporter 同源口径：procs_blocked = 阻塞在
+// 磁盘 IO 上的进程数。不能用 /proc/loadavg 的「总数 - 运行数」冒充——那含 sleeping 进程，
+// 会把"阻塞"长期顶到几百上千
+func parseProcStatText(text string) map[string]float64 {
 	out := map[string]float64{}
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) < 2 {
 			continue
 		}
 		switch fields[0] {
-		case "processes", "ctxt", "intr", "btime":
+		case "processes", "ctxt", "intr", "btime", "procs_running", "procs_blocked":
 			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
 				out[fields[0]] = v
 			}
@@ -83,26 +72,26 @@ func parseProcStat() map[string]float64 {
 	return out
 }
 
-// loadavgProcs /proc/loadavg 第 4 字段 running/total
-func loadavgProcs() (running, blocked float64, ok bool) {
-	b, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		return 0, 0, false
+// procStatMetrics /proc/stat 派生指标（纯函数，可单测）。
+// 未采到的字段不产出——缺数据可见，但绝不用 0 冒充（假数据比缺数据更糟）
+func procStatMetrics(st map[string]float64) []Metric {
+	var out []Metric
+	if v, ok := st["processes"]; ok {
+		out = append(out, Metric{Name: "node_forks_total", Value: v, Help: "Total number of forks", Type: constants.MetricTypeCounter})
 	}
-	fields := strings.Fields(string(b))
-	if len(fields) < 4 {
-		return 0, 0, false
+	if v, ok := st["ctxt"]; ok {
+		out = append(out, Metric{Name: "node_context_switches_total", Value: v, Help: "Total number of context switches", Type: constants.MetricTypeCounter})
 	}
-	parts := strings.Split(fields[3], "/")
-	if len(parts) != 2 {
-		return 0, 0, false
+	if v, ok := st["intr"]; ok {
+		out = append(out, Metric{Name: "node_intr_total", Value: v, Help: "Total number of interrupts serviced", Type: constants.MetricTypeCounter})
 	}
-	r, err1 := strconv.ParseFloat(parts[0], 64)
-	t, err2 := strconv.ParseFloat(parts[1], 64)
-	if err1 != nil || err2 != nil {
-		return 0, 0, false
+	if v, ok := st["procs_running"]; ok {
+		out = append(out, Metric{Name: "node_procs_running", Value: v, Help: "Number of processes in runnable state", Type: constants.MetricTypeGauge})
 	}
-	return r, t - r, true
+	if v, ok := st["procs_blocked"]; ok {
+		out = append(out, Metric{Name: "node_procs_blocked", Value: v, Help: "Number of processes blocked waiting for disk IO", Type: constants.MetricTypeGauge})
+	}
+	return out
 }
 
 // procProcessStats 遍历 /proc/[pid]/stat 统计进程总数、线程总数、状态分布

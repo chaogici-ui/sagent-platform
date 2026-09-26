@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ type Server struct {
 	selfMetrics   *pipeline.SelfMetrics
 	pluginManager *PluginManager
 	log           Logger
+	controlMeters []func() string // OBS-1：控制通道通信可观测指标 provider（client.MetricsText）
 }
 
 // Logger 简单日志接口（避免循环依赖）
@@ -39,6 +41,46 @@ type PluginHandle interface {
 	Start() error
 	Signal(sig os.Signal) error
 	Running() bool
+}
+
+// authOK 校验 /metrics 鉴权：优先 Bearer Header，兼容 ?auth_key= 查询参数。
+// 常量时间比较防时序侧信道（密钥不比对本体传入）
+func authOK(r *http.Request, want string) bool {
+	ah := r.Header.Get("Authorization")
+	if strings.HasPrefix(ah, "Bearer ") && subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(ah, "Bearer ")), []byte(want)) == 1 {
+		return true
+	}
+	if qk := r.URL.Query().Get("auth_key"); qk != "" && subtle.ConstantTimeCompare([]byte(qk), []byte(want)) == 1 {
+		return true
+	}
+	return false
+}
+
+// handleRootRouter 根级兜底路由：识别 vmauth(v1.93 保留前缀转发) 过来的 /sagent-{n}/metrics 请求，
+// 转 handleMetrics 复用同一 Bearer 鉴权逻辑。分割方式避免在 Server Mux 混排通配符与字面量（会 panic）。
+func (s *Server) handleRootRouter(w http.ResponseWriter, r *http.Request) {
+	segs := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(segs) == 2 && strings.HasPrefix(segs[0], "sagent-") && segs[1] == "metrics" {
+		s.handleMetrics(w, r)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+// handleMetrics /metrics 处理器：未配置 auth_key 时开放（兼容存量/演示）；配置后强制鉴权
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Server.MetricsAuthKey != "" && !authOK(r, s.cfg.Server.MetricsAuthKey) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="sagent-metrics"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, s.pipeline.PrometheusText())
+	fmt.Fprint(w, s.selfMetrics.Collect())
+	for _, p := range s.controlMeters {
+		fmt.Fprint(w, p())
+	}
 }
 
 // PluginManager 管理所有插件
@@ -73,17 +115,29 @@ func New(cfg *config.Config, pl *pipeline.Pipeline, pm *PluginManager, log Logge
 	}
 }
 
+// AddControlMeter 注册控制通道通信可观测指标 provider（OBS-1），/metrics 聚合输出。
+func (s *Server) AddControlMeter(provider func() string) {
+	if provider != nil {
+		s.controlMeters = append(s.controlMeters, provider)
+	}
+}
+
 // Start 启动 HTTP 服务
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
-	// /metrics — Prometheus 格式指标（含自监控）
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, s.pipeline.PrometheusText())
-		fmt.Fprint(w, s.selfMetrics.Collect())
-	})
+	// /metrics — Prometheus 格式指标（含自监控）。
+	// D4 安全收敛：配置了 metrics_auth_key 后，未携带正确鉴权的访问一律 401 且不返回任何 metric——
+	// 达成"curl 目标机:19090/metrics 拿不到采集数据"的目标。vmagent 通过 Authorization: Bearer 抓取
+	mux.HandleFunc("/metrics", s.handleMetrics)
+
+	// D4 端口收口（vmauth 单端口收敛）：vmauth 在保留原 path 前缀的前提下把 /sagent-{n}/metrics
+	// 转发到该 SAgent:19090，因此为满足 vmauth(v1.93 不支持剥前缀) 的转发语义，需同时暴露
+	// /sagent-*/metrics 的前缀路由，供 vmauth 按 path 白名单路由到对应 SAgent。
+	// 注意：Go ServeMux 不允许通配符与字面量混排在同一 path 段（"/sagent-{name}/metrics" 会 panic），
+	// 故用根级兜底路由 handleRootRouter 统一识别命中 /sagent-*/metrics 的请求，转 handleMetrics。
+	// 根级路由只对未被更具体路由（/metrics、/health、/plugins 等）匹配的路径生效，不影响其他端点。
+	mux.HandleFunc("/", s.handleRootRouter)
 
 	// /health — 健康检查
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

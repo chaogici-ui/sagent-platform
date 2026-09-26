@@ -16,14 +16,14 @@ const sectorSize = 512
 // collectHostDisk 磁盘 IO 组：node_disk_* 共 11 项，per-device 标签
 // 口径：Linux 直读 /proc/diskstats（与 node_exporter 同源：sectors×512=bytes，ms→s）；
 // macOS 用 gopsutil disk.IOCounters 降级输出存在的子集。
-func collectHostDisk() []Metric {
+func collectHostDisk() ([]Metric, error) {
 	if ms, ok := collectDiskProc(); ok {
-		return ms
+		return ms, nil
 	}
 	// 非 Linux 降级
 	counters, err := disk.IOCounters()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []Metric
 	for _, name := range sortedKeys(counters) {
@@ -43,7 +43,7 @@ func collectHostDisk() []Metric {
 			out = append(out, dm("node_disk_io_time_seconds_total", float64(c.IoTime), "Total disk IO time in seconds", name))
 		}
 	}
-	return out
+	return out, nil
 }
 
 func dm(name string, v float64, help, device string) Metric {

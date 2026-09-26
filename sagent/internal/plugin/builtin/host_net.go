@@ -11,10 +11,13 @@ import (
 // collectHostNetwork 网络设备组：node_network_* 共 10 项，device 标签
 // 口径：与 node_exporter 同源（/proc/net/dev）；MTU/链路/网卡信息 Linux 读 /sys/class/net，
 // macOS 用 gopsutil net.Interfaces 降级（无 carrier）。
-func collectHostNetwork() []Metric {
-	counters, err := net.IOCounters(true)
+var hostNetIOCounters = net.IOCounters
+var hostNetInterfaces = net.Interfaces
+
+func collectHostNetwork() ([]Metric, error) {
+	counters, err := hostNetIOCounters(true)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []Metric
 	for _, c := range counters {
@@ -35,35 +38,37 @@ func collectHostNetwork() []Metric {
 	}
 
 	// MTU / carrier / info：Linux 优先 /sys/class/net，缺失时 gopsutil 降级
-	if infos, err := net.Interfaces(); err == nil {
-		for _, ifc := range infos {
-			L := map[string]string{"device": ifc.Name}
-			if !isDarwin {
-				if mtu, ok := readSysInt("/sys/class/net/" + ifc.Name + "/mtu"); ok {
-					out = append(out, Metric{Name: "node_network_mtu_bytes", Value: float64(mtu), Help: "Network device MTU in bytes", Type: constants.MetricTypeGauge, Labels: L})
-				}
-				if carrier, ok := readSysInt("/sys/class/net/" + ifc.Name + "/carrier"); ok {
-					out = append(out, Metric{Name: "node_network_carrier", Value: float64(carrier), Help: "Network device carrier state (1=linked)", Type: constants.MetricTypeGauge, Labels: L})
-				}
-				operstate := sysFirstLine("/sys/class/net/" + ifc.Name + "/operstate")
-				info := Metric{Name: "node_network_info", Value: 1, Help: "Network device information", Type: constants.MetricTypeGauge,
-					Labels: map[string]string{
-						"device":    ifc.Name,
-						"address":   ifc.HardwareAddr,
-						"operstate": operstate,
-						"mtu":       strconv.Itoa(ifc.MTU),
-					}}
-				out = append(out, info)
-			} else {
-				out = append(out,
-					Metric{Name: "node_network_mtu_bytes", Value: float64(ifc.MTU), Help: "Network device MTU in bytes", Type: constants.MetricTypeGauge, Labels: L},
-					Metric{Name: "node_network_info", Value: 1, Help: "Network device information", Type: constants.MetricTypeGauge,
-						Labels: map[string]string{"device": ifc.Name, "address": ifc.HardwareAddr, "mtu": strconv.Itoa(ifc.MTU)}},
-				)
+	infos, err := hostNetInterfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, ifc := range infos {
+		L := map[string]string{"device": ifc.Name}
+		if !isDarwin {
+			if mtu, ok := readSysInt("/sys/class/net/" + ifc.Name + "/mtu"); ok {
+				out = append(out, Metric{Name: "node_network_mtu_bytes", Value: float64(mtu), Help: "Network device MTU in bytes", Type: constants.MetricTypeGauge, Labels: L})
 			}
+			if carrier, ok := readSysInt("/sys/class/net/" + ifc.Name + "/carrier"); ok {
+				out = append(out, Metric{Name: "node_network_carrier", Value: float64(carrier), Help: "Network device carrier state (1=linked)", Type: constants.MetricTypeGauge, Labels: L})
+			}
+			operstate := sysFirstLine("/sys/class/net/" + ifc.Name + "/operstate")
+			info := Metric{Name: "node_network_info", Value: 1, Help: "Network device information", Type: constants.MetricTypeGauge,
+				Labels: map[string]string{
+					"device":    ifc.Name,
+					"address":   ifc.HardwareAddr,
+					"operstate": operstate,
+					"mtu":       strconv.Itoa(ifc.MTU),
+				}}
+			out = append(out, info)
+		} else {
+			out = append(out,
+				Metric{Name: "node_network_mtu_bytes", Value: float64(ifc.MTU), Help: "Network device MTU in bytes", Type: constants.MetricTypeGauge, Labels: L},
+				Metric{Name: "node_network_info", Value: 1, Help: "Network device information", Type: constants.MetricTypeGauge,
+					Labels: map[string]string{"device": ifc.Name, "address": ifc.HardwareAddr, "mtu": strconv.Itoa(ifc.MTU)}},
+			)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // readSysInt 读取 /sys 有符号数值

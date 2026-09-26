@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"fmt"
 	"log"
 	"runtime"
 	"sort"
@@ -17,20 +18,11 @@ import (
 //   - 指标命名口径与《sagent-host-kpi》标准表对齐：node_* 为主，平台自定义扩展用 host_node_* 与 host_* 前缀
 //   - 平台差异（Linux 全集 / macOS 降级子集）由各组采集器内部处理，文件不存在时静默跳过，绝不输出假 0
 
-// Metric 采集器通用指标结构
-type Metric struct {
-	Name   string
-	Value  float64
-	Help   string
-	Type   constants.MetricType
-	Labels map[string]string
-}
-
 // hostGroupDef 分组注册项
 type hostGroupDef struct {
-	Key     string // 配置/协议里的分组 key（ASCII，平台协议用）
-	Label   string // 中文名（日志与界面展示）
-	Collect func() []Metric
+	Key     string                   // 配置/协议里的分组 key（ASCII，平台协议用）
+	Label   string                   // 中文名（日志与界面展示）
+	Collect func() ([]Metric, error) // 采集函数；返回错误表示该组提供方故障，快照判定为失败并丢弃组内部分产出
 }
 
 // hostMetricGroups 分组注册表（顺序即界面展示顺序）
@@ -150,7 +142,7 @@ func (h *HostMetricsCollector) filter(in []Metric) []Metric {
 }
 
 // Start 启动采集循环
-func (h *HostMetricsCollector) Start(metricsCh chan<- []Metric) {
+func (h *HostMetricsCollector) Start(metricsCh chan<- MetricBatch) {
 	h.wg.Add(1)
 	var cycle uint64
 	go func() {
@@ -176,9 +168,10 @@ func (h *HostMetricsCollector) Start(metricsCh chan<- []Metric) {
 }
 
 // runOnce 执行一轮采集：遍历启用的分组，例外过滤，追加周期自检指标
-func (h *HostMetricsCollector) runOnce(metricsCh chan<- []Metric) {
+func (h *HostMetricsCollector) runOnce(metricsCh chan<- MetricBatch) {
 	start := time.Now()
 	var out []Metric
+	var collectErr error
 	stats := make(map[string]float64, len(hostMetricGroups))
 
 	for _, g := range hostMetricGroups {
@@ -191,9 +184,17 @@ func (h *HostMetricsCollector) runOnce(metricsCh chan<- []Metric) {
 				if r := recover(); r != nil {
 					log.Printf("[host_metrics] group %s panic: %v", g.Key, r)
 					stats[g.Key] = -1
+					collectErr = fmt.Errorf("host group %s panic: %v", g.Key, r)
 				}
 			}()
-			ms := h.filter(g.Collect())
+			ms, err := g.Collect()
+			if err != nil {
+				// 提供方故障：组标记为失败（-1），丢弃组内部分产出，快照判定为失败
+				stats[g.Key] = -1
+				collectErr = err
+				return
+			}
+			ms = h.filter(ms)
 			stats[g.Key] = float64(len(ms))
 			out = append(out, ms...)
 		}()
@@ -223,11 +224,12 @@ func (h *HostMetricsCollector) runOnce(metricsCh chan<- []Metric) {
 	h.lastTotal = len(out)
 	h.lastDurMs = float64(dur.Microseconds()) / 1000.0
 	h.lastSuccess = 1
+	if collectErr != nil {
+		h.lastSuccess = 0
+	}
 	h.mu.Unlock()
 
-	if len(out) > 0 {
-		metricsCh <- out
-	}
+	sendBatch(metricsCh, h.stopCh, snapshotBatch(SnapshotSource(h.Name(), "local"), out, h.interval, collectErr))
 }
 
 // Stop 停止采集

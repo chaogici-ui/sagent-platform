@@ -13,14 +13,19 @@ import (
 // collectHostMemory 内存组：host_node_memory_* 共 17 项（KPI 标准表命名，host_ 前缀为平台扩展）
 // 口径：Linux 直读 /proc/meminfo（kB→×1024 bytes），与 node_exporter 的 MemTotal 等字段同源同名；
 // macOS 用 gopsutil 降级输出存在的子集。
-func collectHostMemory() []Metric {
-	if ms, ok := collectMemoryProc(); ok {
-		return ms
+var hostVirtualMemory = mem.VirtualMemory
+var hostSwapMemory = mem.SwapMemory
+var openMemoryProc = os.Open
+
+func collectHostMemory() ([]Metric, error) {
+	if !isDarwin {
+		// Linux 权威源 /proc/meminfo：读不到即视为内存提供方故障，快照判定失败
+		return collectMemoryProc()
 	}
-	// 非 Linux 降级：gopsutil 子集
-	v, err := mem.VirtualMemory()
+	// macOS 用 gopsutil 降级；任何提供方故障都判定失败，避免静默输出降级/残缺数据
+	v, err := hostVirtualMemory()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	out := []Metric{
 		{Name: "host_node_memory_memtotal_bytes", Value: float64(v.Total), Help: "Total memory in bytes", Type: constants.MetricTypeGauge},
@@ -29,13 +34,15 @@ func collectHostMemory() []Metric {
 	if v.Free > 0 {
 		out = append(out, Metric{Name: "host_node_memory_memfree_bytes", Value: float64(v.Free), Help: "Free memory in bytes", Type: constants.MetricTypeGauge})
 	}
-	if sw, err := mem.SwapMemory(); err == nil {
-		out = append(out,
-			Metric{Name: "host_node_memory_swaptotal_bytes", Value: float64(sw.Total), Help: "Total swap in bytes", Type: constants.MetricTypeGauge},
-			Metric{Name: "host_node_memory_swapfree_bytes", Value: float64(sw.Free), Help: "Free swap in bytes", Type: constants.MetricTypeGauge},
-		)
+	sw, err := hostSwapMemory()
+	if err != nil {
+		return nil, err
 	}
-	return out
+	out = append(out,
+		Metric{Name: "host_node_memory_swaptotal_bytes", Value: float64(sw.Total), Help: "Total swap in bytes", Type: constants.MetricTypeGauge},
+		Metric{Name: "host_node_memory_swapfree_bytes", Value: float64(sw.Free), Help: "Free swap in bytes", Type: constants.MetricTypeGauge},
+	)
+	return out, nil
 }
 
 // meminfoNameMap /proc/meminfo 字段 → host_node_memory_* 指标名
@@ -59,10 +66,10 @@ var meminfoNameMap = map[string]string{
 	"SwapCached":   "host_node_memory_swapcached_bytes",
 }
 
-func collectMemoryProc() ([]Metric, bool) {
-	f, err := os.Open("/proc/meminfo")
+func collectMemoryProc() ([]Metric, error) {
+	f, err := openMemoryProc("/proc/meminfo")
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	defer f.Close()
 
@@ -113,5 +120,5 @@ func collectMemoryProc() ([]Metric, bool) {
 	for _, name := range sortedKeys(vals) {
 		out = append(out, Metric{Name: name, Value: vals[name], Help: helps[name], Type: constants.MetricTypeGauge})
 	}
-	return out, len(out) > 0
+	return out, nil
 }

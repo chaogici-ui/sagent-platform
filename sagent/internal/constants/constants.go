@@ -42,6 +42,10 @@ const (
 	DefaultCrashWindow         = 60 * time.Second
 	DefaultStartupWaitTimeout  = 5 * time.Second
 	DefaultHeartbeatInterval   = 30 * time.Second
+	// CollectorHeartbeatInterval 采集机（远端采集承载端）专用短心跳：采集机是少数派（每池 3-5 台），
+	// 给它单开 10s 心跳，L0/网关负载增量可控，万台普通 SAgent 不受影响；
+	// 故障检测最坏 = 心跳 10s × 阈值 3 ≈ 40s（对比普通 SAgent 的 150s）。
+	CollectorHeartbeatInterval = 10 * time.Second
 )
 
 // ====== 指标类型枚举 ======
@@ -89,6 +93,10 @@ const (
 	TagEnv            = "env"
 	TagIDC            = "idc"
 	TagCluster        = "cluster"
+	// TagPool / TagRegion 采集机池归属（HA 漂移用）：池是漂移的边界，只有同池采集机互为承接方。
+	// 未登记 pool 时平台按 region 回落；两者都空则该采集机不参与池内承接判定。
+	TagPool   = "pool"
+	TagRegion = "region"
 )
 
 // ====== HTTP 端点 ======

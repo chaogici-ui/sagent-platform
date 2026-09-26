@@ -12,7 +12,7 @@ import (
 // collectHostCPU CPU 组：node_cpu_seconds_total / node_cpu_frequency_* / node_cpu_scaling_frequency_hertz
 // 口径：node_cpu_seconds_total 与 node_exporter 完全同源（gopsutil 读 /proc/stat，jiffies→秒）；
 // 频率为全局最大/最小值（KPI 标准表按无标签数值口径使用）。
-func collectHostCPU() []Metric {
+func collectHostCPU() ([]Metric, error) {
 	var out []Metric
 
 	// 每核每模式累计秒（counter）
@@ -82,7 +82,7 @@ func collectHostCPU() []Metric {
 				Help: "Maximum CPU frequency in hertz", Type: constants.MetricTypeGauge})
 		}
 	}
-	return out
+	return out, nil
 }
 
 func isCPUDirNum(s string) bool {

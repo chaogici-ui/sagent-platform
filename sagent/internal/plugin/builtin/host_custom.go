@@ -10,7 +10,7 @@ import (
 
 // collectHostCustom 主机扩展组：host_fd_used / host_nfs_mount_status / host_chronyd_status 共 3 项
 // 原则：有环境才采、没有自动跳过，绝不输出假 0（host_ha_switch_status 口径未定，暂留 custom_scripts）。
-func collectHostCustom() []Metric {
+func collectHostCustom() ([]Metric, error) {
 	var out []Metric
 
 	// fd 已用数：/proc/sys/fs/file-nr 第一字段（Linux）
@@ -43,7 +43,7 @@ func collectHostCustom() []Metric {
 				Help: "chronyd tracking status (1=ok)", Type: constants.MetricTypeGauge})
 		}
 	}
-	return out
+	return out, nil
 }
 
 func b2f(b bool) float64 {

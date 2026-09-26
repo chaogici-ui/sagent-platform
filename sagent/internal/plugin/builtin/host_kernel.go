@@ -12,7 +12,7 @@ import (
 // node_pressure_*（5 条，node_exporter 标准 PSI 命名）/ node_arp_entries
 // 口径：/proc/vmstat、/proc/sys/*、/proc/pressure/*、/proc/net/arp，与 node_exporter 同源；
 // PSI 映射：cpu=some、io=waiting(some)+stalled(full)、memory=waiting(some)+stalled(full)。
-func collectHostKernel() []Metric {
+func collectHostKernel() ([]Metric, error) {
 	var out []Metric
 
 	// /proc/vmstat
@@ -79,7 +79,7 @@ func collectHostKernel() []Metric {
 	if v, ok := countARPPentries("/proc/net/arp"); ok {
 		out = append(out, Metric{Name: "node_arp_entries", Value: v, Help: "ARP entries by device", Type: constants.MetricTypeGauge})
 	}
-	return out
+	return out, nil
 }
 
 // parseKVFile 解析 "key value" 行式文件
