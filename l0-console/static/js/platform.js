@@ -186,10 +186,16 @@
         : '对账引擎不可用 ⚠';
       if (!proxies.length) {
         // 空态（P3）：统一走 stEmpty；rcTxt（对账引擎心跳）保留——它是"当前实况"，不是装饰
-        lb.innerHTML = stEmpty({ icon: '🛰', title: '还没有 L1 采集机', hint: rcTxt });
+        lb.innerHTML = stEmpty({ icon: '🛰', title: '还没有 L1 采集机',
+          hint: rcTxt + '　｜　采集机池化（L1HA）尚未立项，当前为单采集机模式' });
       } else {
         lb.style.textAlign = 'left';
-        lb.innerHTML = rows + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">' + rcTxt + '</div>';
+        // IA 设计稿 ⑫ 要求按「池」展示（池内 N 台 · 在岗 M controller，健康 < 2 只告警不迁移）。
+        // 池化派发属 L1HA-2 待立项，后端没有池的概念——这里明确写出"当前不是池"，
+        // 不放假池名、不假称在岗数：运维若按池的语义读这张卡，会误判"少一台还有冗余"。
+        lb.innerHTML = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">'
+          + '采集机池化（L1HA）尚未立项，当前为单采集机模式 —— 下列是已登记的 L1 采集机个体状态，不构成 HA 池</div>'
+          + rows + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">' + rcTxt + '</div>';
       }
     });
   }

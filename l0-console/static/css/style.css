@@ -403,13 +403,16 @@ tr:hover td { background: #fafbfc; }
 .res-ev .warn{color:#b45309;font-weight:600}
 .res-drawer-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:8999;opacity:0;pointer-events:none;transition:opacity .18s ease}
 .res-drawer-mask.open{opacity:1;pointer-events:auto}
-.res-drawer{position:fixed;top:0;right:0;bottom:0;width:955px;max-width:94vw;background:var(--panel);border-left:0.5px solid var(--border);box-shadow:-8px 0 24px rgba(0,0,0,.08);z-index:9000;transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
-/* 下钻抽屉宽度档位（IA 设计稿 6.1）：S 420 纯只读详情 / M 560 单字段轻编辑 / L 760 复合内容（草案三段、变更预览）。
-   缺省（xl）= 宽详情 955px，用于内容列数多的对象详情——档位是可选项，不写 data-w 时行为与改造前一致。 */
+.res-drawer{position:fixed;top:0;right:0;bottom:0;width:760px;max-width:94vw;background:var(--panel);border-left:0.5px solid var(--border);box-shadow:-8px 0 24px rgba(0,0,0,.08);z-index:9000;transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
+/* 下钻抽屉宽度档位（IA 设计稿 6.1 定案）：只保留三档——S 420 纯只读详情 / M 560 单字段轻编辑 /
+   L 760 复合内容（修复草案三段、变更预览、对象详情）。缺省即 L，第四档一律不出现。 */
 .res-drawer[data-w="s"]{width:420px}
 .res-drawer[data-w="m"]{width:560px}
 .res-drawer[data-w="l"]{width:760px}
-.res-drawer[data-w="xl"]{width:955px}
+/* 叠加抽屉（IA 设计稿 6.2 卸载确认）：压在被打开的详情抽屉之上，自带遮罩 */
+#res-confirm-mask{z-index:9100}
+#res-confirm{z-index:9101}
+.btn:disabled{opacity:.5;cursor:not-allowed}
 .res-drawer.open{transform:translateX(0)}
 .res-drawer-hd{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:0.5px solid var(--border)}
 .res-drawer-bd{flex:1;overflow:auto;padding:14px 16px}

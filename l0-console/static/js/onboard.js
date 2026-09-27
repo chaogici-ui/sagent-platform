@@ -959,6 +959,26 @@ function submitOnboardNew() {
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">网络要求</td><td style="padding:6px 8px">出站 8460 → l1-gateway（VIP）；无需任何入站端口</td></tr>';
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">回退方式</td><td style="padding:6px 8px">接入中心可原样卸载（走卸载流水线，平台侧保留对象档案与历史样本）；全过程变更中心留痕</td></tr>';
     h += '</tbody></table>';
+    // —— 安装前环境自检（IA 设计稿 6.2 屏幕②）——
+    // 诚实口径（重要）：这三项是**目标机**的属性，平台要等「主机探路（preflight_host）」跑完才有真值；
+    // 本向导出现在起流水线【之前】，所以绝不预填 ✅——那等于编造实测。台账里已有探路 facts 的机器
+    // 就把实测值摆出来，没有的写明"安装时核对"，并说清不可用时给替代路径（不硬阻断）。
+    var obProbed = [], obUnprobed = 0;
+    picked.forEach(function (rid) {
+      var row = (typeof resFind === 'function') ? resFind(rid) : null;
+      var fa = (row && row.facts) || {};
+      if (fa.disk_free_gb) obProbed.push('<span class="badge b-h">' + obEscape(rid) + ' 磁盘余 ' + (+fa.disk_free_gb).toFixed(1) + ' GB</span>');
+      else obUnprobed++;
+    });
+    h += '<div style="margin-top:12px;padding:8px 10px;border:1px solid var(--border);border-radius:8px">'
+      + '<div style="font-size:12px;font-weight:600;margin-bottom:4px">安装前环境自检 '
+      + '<span style="font-weight:400;color:var(--muted)">可选执行 · 失败给替代路径，不硬阻断</span></div>'
+      + '<div style="font-size:11.5px;color:var(--muted)">三项由平台在「主机探路」环节自动核对，结果写进该步骤回执：'
+      + '出站可达 l1-gateway:8460 · 磁盘 ≥ 200MB · systemd 可用性（不可用则建议改走远程采集路径）</div>'
+      + (obProbed.length ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' + obProbed.join('') + '</div>' : '')
+      + (obUnprobed ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">'
+        + obUnprobed + ' 台尚无实测探路记录 —— 真值在「主机探路」步骤回执里出，本页不预填，避免把未核对当已核对</div>' : '')
+      + '</div>';
     h += '<div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-p" onclick="doSubmitOnboardNew()">影响确认 · 确认创建</button><button class="btn btn-o" onclick="closeOverlay()">返回修改</button></div>';
     return h;
   }, true);

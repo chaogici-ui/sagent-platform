@@ -522,13 +522,61 @@
 
   window.resOffboard = function (key) {
     var r = resFind(key);
-    var label = r ? (r.res.ip || r.res.id) : key;
     if (!r) { toast('资源不存在（可能已被删除）', 'err'); return; }
+    var label = r.res.ip || r.res.id;
     // 台账缺失、仅有 Agent 登记（演示/直连 Agent，无独立目标机）→ 无法执行主机侧卸载，
     // 退化为注销平台登记（内存 + DB 行），不做 ansible；避免 offboard 因查无资源记录而 "资源对象不存在"
     var agentOnly = !(_resData.resources || []).some(function (x) { return x.id === r.res.id; }) && r.agent != null;
-    if (agentOnly) {
-      if (!confirm('卸载 Agent · ' + label + '\n\n该行仅有平台登记、无资源台账（演示/直连 Agent，无独立目标机），无法执行主机侧卸载。\n将注销该 Agent 的台账登记（内存 + 数据库）。\n\n确认注销？')) return;
+    window._offboardKey = key;
+    window._offboardAgentOnly = agentOnly;
+    // 受影响目标（IA 设计稿 6.2）：把"名下几个采集目标会停止上报"说具体，不写"部分目标"这种糊话
+    var tgts = (_resData.targets || []).filter(function (t) { return t.resource_id === r.res.id || t.agent_id === r.res.id; });
+    var tgtTxt = tgts.length
+      ? '名下 ' + tgts.length + ' 个采集目标停止上报（' + tgts.slice(0, 4).map(function (t) { return rEsc(t.plugin || t.type || '目标'); }).join(' · ') + (tgts.length > 4 ? ' 等' : '') + '）'
+      : '名下暂无采集目标（本次不涉及目标停报）';
+    var will = agentOnly
+      ? ['注销平台侧 Agent 台账登记（内存 + 数据库行）',
+         '该行无资源台账 → 不做主机侧卸载（没有独立目标机）',
+         '资源对象档案保留，可随时重新登记']
+      : ['停止并移除目标机上的 SAgent 进程与服务（安装目录一并删除）',
+         tgtTxt,
+         '资源对象与 SSH 凭据保留，可原样重新接入'];
+    var verb = agentOnly ? '注销' : '卸载';
+    var h = '<div class="res-drawer-hd"><b style="font-size:14px">⚠️ ' + verb + ' ' + rEsc(label) + '</b>'
+      + '<span style="margin-left:auto;cursor:pointer" onclick="closeOffboardConfirm()">✕</span></div>'
+      + '<div class="res-drawer-bd">';
+    h += '<div class="res-sec"><div class="res-sec-hd">将发生</div>';
+    will.forEach(function (t, i) { h += '<div style="font-size:12.5px;padding:2px 0">' + (i + 1) + '. ' + t + '</div>'; });
+    h += '</div>';
+    h += '<div class="res-sec"><div class="res-sec-hd">不会发生</div>'
+      + '<div style="font-size:12.5px;color:var(--muted)">不删除已入库的历史样本；不做任何其他对象的联动操作</div></div>';
+    h += '<div class="res-sec"><div class="res-sec-hd">确认方式 <span style="font-weight:400;color:var(--muted)">输入对象名以确认</span></div>'
+      + '<div style="font-size:12.5px">请输入 <code>' + rEsc(label) + '</code>：</div>'
+      + '<input id="offboard-confirm-input" autocomplete="off" oninput="resOffboardCheck()" placeholder="' + rEsc(label) + '" '
+      + 'style="width:100%;margin-top:6px;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:12.5px">'
+      + '<div class="st-actions" style="margin-top:12px">'
+      + '<button class="btn" id="offboard-go" disabled style="background:var(--red);color:#fff" onclick="resOffboardGo()">发起' + verb + (agentOnly ? '' : '变更') + '</button>'
+      + '<button class="btn btn-o" onclick="closeOffboardConfirm()">取消</button></div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:6px">点击后进变更中心预演 → 批准 → 执行，本抽屉不直接执行</div></div>';
+    h += '</div>';
+    resConfirmShell(h);
+  };
+
+  // type-to-confirm：名字没输对，发起按钮一直是灰的（防手滑点掉一台机器——卸载不可逆）
+  window.resOffboardCheck = function () {
+    var inp = document.getElementById('offboard-confirm-input');
+    var btn = document.getElementById('offboard-go');
+    if (!inp || !btn) return;
+    var r = resFind(window._offboardKey);
+    var label = r ? (r.res.ip || r.res.id) : window._offboardKey;
+    btn.disabled = inp.value.trim() !== label;
+  };
+
+  window.resOffboardGo = function () {
+    var r = resFind(window._offboardKey);
+    if (!r) { closeOffboardConfirm(); toast('资源不存在（可能已被删除）', 'err'); return; }
+    closeOffboardConfirm();
+    if (window._offboardAgentOnly) {
       fetch(API + '/agents/' + encodeURIComponent(r.res.id), { method: 'DELETE' })
         .then(function (resp) { return resp.json(); })
         .then(function (o) {
@@ -539,7 +587,6 @@
         }).catch(function (e) { toast('注销失败：' + (e && e.message || e), 'err'); });
       return;
     }
-    if (!confirm('卸载 SAgent（不可逆：会删除目标机上的 SAgent 安装目录）· ' + label + '\n\n目标机侧：停进程 → 删安装目录 → 自证核对\n平台侧：注销 Agent 台账与期望配置 → 撤抓取登记 → 删采集目标\n保留：资源对象与 SSH 凭据（可原样重新接入）\n\n确认发起？')) return;
     resLaunch('/onboard/flow/offboard', { resource_id: r.res.id }, '已发起卸载流水线');
   };
 
@@ -566,9 +613,9 @@
     var d = document.createElement('div');
     d.id = 'res-drawer';
     d.className = 'res-drawer';
-    // 抽屉宽度档位（IA 设计稿 6.1）：对象详情内容列数多（档案/版本/采集目标/最近数据/动作/过程记录），
-    // 挂 xl 宽详情档；轻量抽屉（修复草案三段、卸载确认）用 l/m 档。
-    d.setAttribute('data-w', w || 'xl');
+    // 抽屉宽度档位（IA 设计稿 6.1 定案三档）：对象详情属复合内容（档案/版本/采集目标/最近数据/
+    // 动作/过程记录）→ L 760；轻量抽屉（卸载确认 / 修复草案三段）用 M 560。不再有第四档。
+    d.setAttribute('data-w', w || 'l');
     d.innerHTML = inner;
     document.body.appendChild(m);
     document.body.appendChild(d);
@@ -606,12 +653,49 @@
       });
       return;
     }
-    resDrawerShell(key, resDrawerHTML(r), 'xl');
+    resDrawerShell(key, resDrawerHTML(r), 'l');
   };
 
   window.closeResourceDrawer = function () {
     var d = document.getElementById('res-drawer');
     var m = document.getElementById('res-drawer-mask');
+    if (d) d.classList.remove('open');
+    if (m) m.classList.remove('open');
+    setTimeout(function () {
+      if (d && d.parentNode) d.parentNode.removeChild(d);
+      if (m && m.parentNode) m.parentNode.removeChild(m);
+    }, 200);
+  };
+
+  // ---------- 卸载确认抽屉（IA 设计稿 6.2：M 档 560px + type-to-confirm） ----------
+  // 为什么不用原生 confirm（改造前就是 confirm）：① 原生弹窗是一坨纯文本，表达不了
+  // 「将发生 / 不会发生」的分层；② 没有「输入对象名」这道防误触——卸载不可逆；
+  // ③ 它说不清"确认之后去哪"：点击只是【发起】，预演→批准→执行在变更中心。
+  // 独立 id + 更高 z-index：它要压在被打开的详情抽屉之上（叠加抽屉），不能顶掉详情。
+  function resConfirmShell(inner) {
+    var m = document.getElementById('res-confirm-mask');
+    var old = document.getElementById('res-confirm');
+    if (m) m.parentNode.removeChild(m);
+    if (old) old.parentNode.removeChild(old);
+    m = document.createElement('div');
+    m.id = 'res-confirm-mask';
+    m.className = 'res-drawer-mask';
+    m.onclick = function () { closeOffboardConfirm(); };
+    var d = document.createElement('div');
+    d.id = 'res-confirm';
+    d.className = 'res-drawer';
+    d.setAttribute('data-w', 'm');
+    d.innerHTML = inner;
+    document.body.appendChild(m);
+    document.body.appendChild(d);
+    requestAnimationFrame(function () { d.classList.add('open'); m.classList.add('open'); });
+    var inp = document.getElementById('offboard-confirm-input');
+    if (inp) inp.focus();
+  }
+
+  window.closeOffboardConfirm = function () {
+    var d = document.getElementById('res-confirm');
+    var m = document.getElementById('res-confirm-mask');
     if (d) d.classList.remove('open');
     if (m) m.classList.remove('open');
     setTimeout(function () {
