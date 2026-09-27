@@ -539,7 +539,7 @@ curl -s http://localhost:8080/ | grep -q 'onboard-center'  # 存在
 | 文件 | 改动 |
 |---|---|
 | `l0-console/static/js/onboard.js` | 🆕 统计条 + 流水线列表 + 单条时间线 + 步骤展开原始数据 |
-| `l0-console/static/js/panel.js` | `renderTargets` 的目标详情增加「查看接入过程」深链；`openOnboardWizard` 改为读模板渲染（替换 `panel.js:14-43` 硬编码） |
+| `l0-console/static/js/panel.js` | `renderTargets` 的目标详情增加「查看接入过程」深链；~~`openOnboardWizard` 改为读模板渲染（替换 `panel.js:14-43` 硬编码）~~ **【已失效，2026-09-27 收口】老向导簇（`openOnboardWizard`/`onboardRun`/`obLoadGroupList`/`obFillPort`）已按「一对象一写入口」整簇删除（commit `ec6b4d2`），目标写入口唯一收敛为接入中心 `openOnboardNew`，本行为批 A 立项期方案、已被取代** |
 | `l0-console/static/js/utils.js` | `goPage()` 补新页面 case（不单独做 `onboardApi()` 加载器，onboard.js 模块自带 fetch，避免多一层全局态） |
 
 #### A5 门禁
