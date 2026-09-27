@@ -1346,9 +1346,13 @@ function mdRender(md) {
       // IA 设计稿 ④ 采集目标「操作流程」定案：本页唯一动作是「看 + 跳」，规则 3 规定目标 CRUD
       // 只在接入中心。这三个函数在表格里已无按钮引用（表格操作列只剩「测试」「接入过程」），
       // 属于可被后来者重新挂上的后门——留着就是给"绕过只读"埋雷，故整簇移除。
-      // 需要写目标时：接入中心「＋接入对象」走接入向导（openOnboardWizard），或用资源抽屉
-      // 的 resNewTarget 扩采集。后端 /api/targets 的 POST/PUT/DELETE 端点保留不动。
-      // ---- M1-⑤ 接入向导：选插件 → 填目标 → 分派 Agent → 连通性测试 → 配置下发回执 ----
+      // 写目标的正确入口（唯一）：接入中心「＋接入对象」→ resources.js 的 openOnboardNew()，
+      // 走接入流水线留痕；资源抽屉的 resNewTarget 亦已收口到同一入口。
+      // 后端 /api/targets 的 POST/PUT/DELETE 端点保留不动。
+      // ⚠️ 下方 openOnboardWizard 簇（含 onboardRun / obFillPort / obLoadGroupList）已无任何调用点：
+      //   它直接 POST /targets、不建流水线、不留审计，属可被后来者重新挂上的后门；其独有的
+      //   「④ 主机指标能力分组配置」UI 尚未在新向导（openOnboardNew）复刻。当前保留待迁移，勿重新挂载。
+      // ---- M1-⑤ 老接入向导（已废弃 · 保留待迁移 · 勿挂载）：选插件 → 填目标 → 分派 → 测试 ----
       // prePlugin 预选插件；preAgentID 预选分派 Agent（从资源抽屉进来时必须带，否则建出来的目标
       // 落在"未分派"，本机清单里看不到）；backFn 关闭后回哪页（默认回采集目标页）
       function openOnboardWizard(prePlugin, preAgentID, backFn) {
