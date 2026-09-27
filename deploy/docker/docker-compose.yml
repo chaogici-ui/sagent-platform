@@ -18,6 +18,9 @@ services:
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.93.0
     container_name: l0-victoriametrics
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l0"
     networks:
       - l0-net
     ports:
@@ -35,6 +38,9 @@ services:
   victoriametrics-ha:
     image: victoriametrics/victoria-metrics:v1.93.0
     container_name: l0-victoriametrics-ha
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l0"
     networks:
       - l0-net  # 不映射宿主端口：写面经 vmagent remoteWrite 内部写入；读面由 l0-console 按需可达
     command:
@@ -52,6 +58,9 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: l0-postgres
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l0"
     networks:
       - l0-net
     ports:
@@ -74,6 +83,9 @@ services:
   grafana:
     image: grafana/grafana:10.2.0
     container_name: l0-grafana
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l0"
     networks:
       - l0-net
     ports:
@@ -101,6 +113,9 @@ services:
   l0-vmalert:
     image: victoriametrics/vmalert:v1.93.0
     container_name: l0-vmalert
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l0"
     networks:
       - l0-net
     ports:
@@ -126,6 +141,9 @@ services:
       context: ../../l0-console
       dockerfile: Dockerfile
     container_name: l0-console
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l0"
     networks:
       - l0-net
     ports:
@@ -178,9 +196,9 @@ services:
       - postgres
 
   # ==================== L1 采集机（容器整合 · SPEC-L1HA L1HA-1） ====================
-  # 四个控制面进程（controller/gateway/package-cache/ansible-runner）合一为单容器 l1-collector：
+  # 四个控制面进程（controller/gateway/package-cache/ansible-runner）合一为单容器 l1-hub：
   # 真实部署形态是「一台采集机一个 tar.gz 包、四个 systemd 单元」，四进程同机同网络、同版本轨道、
-  # 同一部署单元——合并后演示拓扑与真实形态一致（守护脚本 l1-collector-supervise.sh = systemd 替身）。
+  # 同一部署单元——合并后演示拓扑与真实形态一致（守护脚本 l1-hub-supervise.sh = systemd 替身）。
   # 隔离口径：原「Gateway 只挂 l1-net 不持 L0 可达」的网络域隔离随合并失效，
   # 由 Gateway 3+2 路径白名单承接（进程级约束，见 SPEC-D5 红线改写）。
   # 角色矩阵（L1HA 弹性载体）：L1_COLLECTOR_ROLES 声明本机跑哪些角色，缺省全装四角色；
@@ -188,9 +206,12 @@ services:
   # 网络别名：保留 l1-controller/l1-gateway/l1-package-cache/l1-ansible-runner 四个 DNS 名，
   # SAgent 与组件的全部 URL（SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460 等）零改动。
   # 双挂 l0-net：controller 出网必需（唯一控制面出口）；runner 的 B3 期临时双挂需求随之自然覆盖。
-  l1-collector:
+  l1-hub:
     image: docker-l0-console
-    container_name: l1-collector
+    container_name: l1-hub
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l1"
     command: ["--supervise"]
     networks:
       l0-net:
@@ -252,6 +273,9 @@ services:
       context: ./sagent-host
       dockerfile: Dockerfile
     container_name: vm-host-1
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     hostname: vm-host-1
     networks:
       l0-net:
@@ -264,6 +288,9 @@ services:
   vmagent:
     image: victoriametrics/vmagent:v1.93.0
     container_name: l1-vmagent
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l1"
     networks:
       l1-net:
       l0-net:
@@ -296,6 +323,9 @@ services:
   vmagent-ha:
     image: victoriametrics/vmagent:v1.93.0
     container_name: l1-vmagent-ha
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l1"
     networks:
       l1-net:
       l0-net:
@@ -322,6 +352,9 @@ services:
   vmauth:
     image: victoriametrics/vmauth:v1.93.0
     container_name: l1-vmauth
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l1"
     networks:
       - l1-net
     ports:
@@ -345,6 +378,9 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-1
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     hostname: sagent-1
     networks:
       - l1-net
@@ -374,6 +410,9 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-2
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     hostname: sagent-2
     networks:
       - l1-net
@@ -402,6 +441,9 @@ services:
   mysql-1:
     image: mysql:8.0
     container_name: l1-mysql-1
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     networks:
       - l1-net
     environment:
@@ -419,6 +461,9 @@ services:
   mysql-2:
     image: mysql:8.0
     container_name: l1-mysql-2
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     networks:
       - l1-net
     environment:
@@ -439,6 +484,9 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-proxy
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     hostname: sagent-proxy
     networks:
       - l1-net
@@ -469,6 +517,9 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-proxy-2
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     hostname: sagent-proxy-2
     networks:
       - l1-net
@@ -500,6 +551,9 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-proxy-3
+    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+    labels:
+      sagent.layer: "l2"
     hostname: sagent-proxy-3
     networks:
       - l1-net

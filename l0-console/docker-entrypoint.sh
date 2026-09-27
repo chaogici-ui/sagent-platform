@@ -42,6 +42,6 @@ fi
 #                                             一台采集机一个容器，种子同步段与单进程完全共用）
 if [ "${1:-}" = "--supervise" ]; then
     shift
-    exec ./l1-collector-supervise.sh "$@"
+    exec ./l1-hub-supervise.sh "$@"
 fi
 exec ./l0-console "$@"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# l1-collector 四进程守护入口（容器整合，SPEC-L1HA / L1HA-1）
+# l1-hub 四进程守护入口（容器整合，SPEC-L1HA / L1HA-1）
 # 语义：真实部署形态是「一台采集机一个 tar.gz 包、四个 systemd 单元」——四个控制面进程
 # （controller / gateway / package-cache / ansible-runner）同机同网络、同版本轨道、
 # 同一部署单元。本脚本就是演示容器里 systemd 的替身：拉起角色矩阵声明的全部进程、
@@ -40,7 +40,7 @@ start_role() {
     role="$1"
     flag=$(flag_for_role "$role")
     if [ -z "$flag" ]; then
-        echo "[l1-collector] 未知角色: ${role}，跳过"
+        echo "[l1-hub] 未知角色: ${role}，跳过"
         return
     fi
     case "$role" in
@@ -49,23 +49,23 @@ start_role() {
         package-cache)  ./l0-console "$flag" & P_PC=$! ;;
         ansible-runner) ./l0-console "$flag" & P_AR=$! ;;
     esac
-    echo "[l1-collector] 角色 ${role} 已启动 (pid=$!, flag=${flag})"
+    echo "[l1-hub] 角色 ${role} 已启动 (pid=$!, flag=${flag})"
 }
 
 stop_all() {
-    echo "[l1-collector] 收到退出信号，停止全部角色进程"
+    echo "[l1-hub] 收到退出信号，停止全部角色进程"
     for p in $P_CTL $P_GW $P_PC $P_AR; do
         [ -n "$p" ] && kill "$p" 2>/dev/null
     done
     for p in $P_CTL $P_GW $P_PC $P_AR; do
         [ -n "$p" ] && wait "$p" 2>/dev/null
     done
-    echo "[l1-collector] 全部角色进程已退出"
+    echo "[l1-hub] 全部角色进程已退出"
     exit 0
 }
 trap stop_all TERM INT
 
-echo "[l1-collector] 角色矩阵: ${ROLES}"
+echo "[l1-hub] 角色矩阵: ${ROLES}"
 ROLES_LIST=$(printf %s "$ROLES" | tr ',' ' ')
 for r in $ROLES_LIST; do
     start_role "$r"
@@ -77,7 +77,7 @@ while :; do
     for r in $ROLES_LIST; do
         p=$(pid_of_role "$r")
         if [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; then
-            echo "[l1-collector] 角色 ${r} 未在运行 (pid=${p:-无})，重启"
+            echo "[l1-hub] 角色 ${r} 未在运行 (pid=${p:-无})，重启"
             start_role "$r"
         fi
     done
