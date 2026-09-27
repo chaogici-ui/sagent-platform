@@ -40,6 +40,14 @@
 
   function resProblem(st) { return st.key === 'lagging' || st.key === 'nodata' || st.key === 'stopped'; }
 
+  // 配置漂移（A5，2026-09-27）：cfg_desired 与 cfg_effective 不一致——与工作台证据环②同源同口径
+  //（两字段都在才算"已知"，缺任一字段=未知不算漂移，同 overview.js 环②守卫）。
+  // 环②「配置对齐 0/4」下钻直达这里；此前归因到「异常」筛选（采集问题），配置漂移的机器一台也筛不出来。
+  function resCfgDrift(agent) {
+    return !!agent && agent.cfg_desired != null && agent.cfg_effective != null
+      && String(agent.cfg_desired) !== String(agent.cfg_effective);
+  }
+
   // ---------- 行装配：三份数据按 id 对齐；台账没有的 Agent（演示容器）单独成行 ----------
   function resBuildRows(d) {
     var agentByID = {}, flowsByRes = {}, staleByRes = {};
@@ -221,11 +229,12 @@
 
   function resRenderPage() {
     var rows = resBuildRows(_resData);
-    var nAll = rows.length, nOk = 0, nBad = 0, nOff = 0;
+    var nAll = rows.length, nOk = 0, nBad = 0, nOff = 0, nDrift = 0;
     rows.forEach(function (r) {
       if (r.state.key === 'collecting') nOk++;
       else if (r.state.key === 'off') nOff++;
       else nBad++;
+      if (resCfgDrift(r.agent)) nDrift++;
     });
 
     var h = '<div class="card"><div class="card-hd">🖥 接入中心'
@@ -243,6 +252,7 @@
       + resFilterBtn('all', '全部', nAll)
       + resFilterBtn('collecting', '采集中', nOk)
       + resFilterBtn('problem', '异常', nBad)
+      + resFilterBtn('cfgdrift', '配置漂移', nDrift)
       + resFilterBtn('off', '未接入', nOff)
       + '<select onchange="resSetMode(this.value)" title="接入方式：本机 Agent（装 SAgent）/ 远程采集（采集机承载）" '
       + 'style="padding:5px 8px;border:0.5px solid var(--border);border-radius:6px;font-size:12px">'
@@ -328,6 +338,7 @@
     if (_resTenant !== 'all' && r.tenantKey !== _resTenant) return false;
     if (_resFilter === 'collecting') return r.state.key === 'collecting';
     if (_resFilter === 'problem') return resProblem(r.state);
+    if (_resFilter === 'cfgdrift') return resCfgDrift(r.agent);
     if (_resFilter === 'off') return r.state.key === 'off';
     return true;
   }

@@ -255,8 +255,12 @@ globalThis.buildEvidenceChainHTML = function (d) {
     // 数据侧(source/scrape/transport/central)→若在采集健康页由 __sloDrill 就地定位问题卡，否则跳 slo 页。
     var jt = null;
     if (c.ok === false) {
-      if (c.k === 'heartbeat' || c.k === 'config') {
+      if (c.k === 'heartbeat') {
         jt = "resSetFilter('problem');goPage('resources')";
+      } else if (c.k === 'config') {
+        // A5（2026-09-27）：配置漂移下钻走专用「配置漂移」筛选（cfg_desired≠cfg_effective），
+        // 不再混入「异常」——归因错位曾导致环②报 0/4 漂移、下钻却只出 1 台采集问题的机器。
+        jt = "resSetFilter('cfgdrift');goPage('resources')";
       } else {
         // 数据侧缺口：优先就地钻取（本页存在对应问题卡时），否则回退跳采集健康页
         var drillFn = 'window.__sloDrill';

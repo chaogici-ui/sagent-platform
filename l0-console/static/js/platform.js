@@ -84,7 +84,7 @@
             + hotList.slice(0, 5).map(function (m) { return '<code>' + escHtml(m.name) + '</code>（' + m.value + '）'; }).join('、')
           : '当前无 series 数超过 1000 的指标，暂不建议收敛（判定阈值：单指标 series > 1000）')
         + '<div style="color:var(--muted);margin-top:4px">丢弃率影响须由 VM 实测确认，本页不预估具体数值；治理方案确认后走变更中心执行，本页不直接改采集配置。</div>'
-        + (hotList.length ? '<div style="margin-top:6px"><button class="btn btn-p btn-sm" onclick="toast(\'治理提案需人工确认后走变更中心执行 —— 本页不直接改采集配置（规则 3）\',\'ok\')">生成治理变更提案</button></div>' : '')
+        + (hotList.length ? '<div style="margin-top:6px"><button class="btn btn-o btn-sm" onclick="toast(\'治理变更提案需要「变更单 + diff 快照」实体支撑——该实体待立项，暂不落库（不假装生成）。立项后此按钮接变更中心预演→批准→执行\',\'ok\')" title="诚实标注：底层变更单实体未立项，点击不会生成任何数据">生成治理变更提案（待立项，暂不落库）</button></div>' : '')
         + '</div>';
       cb.innerHTML = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">VM 总 series：' + total + ' · 以下为 series 数最多的指标（按指标名 TopN，实测）</div>'
         + top.map(function (m, i) {

@@ -174,21 +174,43 @@ function renderTasks() {
         html += '<div class="card" style="margin-top:16px" id="recon-relocate"><div class="card-hd">↹ HA-3 归属迁移记录 <span style="font-weight:400;font-size:11px;color:var(--muted)">跨 L1 归属故障上收证据：Exporter 归属从失效 SAgent 迁至同租户同地域健康端（冷却期内不重复迁移）</span></div>';
         html += '<div class="card-bd" id="recon-relocate-body" style="text-align:center;color:var(--muted);padding:16px">查询中...</div></div>';
         document.getElementById("main-content").innerHTML = html;
-        // HA-3 归属迁移记录（证据链下钻，独立轻量请求不阻塞对账主链）
-        fetch(API+'/relocations').then(function(r){return r.json()}).catch(function(){return {relocations:[]}}).then(function(rd){
+        // HA-3 归属迁移记录（证据链下钻，独立轻量请求不阻塞对账主链）。
+        // A6（2026-09-27）：迁移报成功 ≠ 数据在流——并行拉 collect-stats 对迁移目标做实测，
+        // 「已迁移但目标无样本」标 amber，不再让绿色"已迁移"静默盖住没数据的事实。
+        Promise.all([
+          fetch(API+'/relocations').then(function(r){return r.json()}).catch(function(){return {relocations:[]}}),
+          fetch(API+'/collect-stats').then(function(r){return r.json()}).catch(function(){return []})
+        ]).then(function(out){
           var rb = document.getElementById('recon-relocate-body');
           if (!rb) return;
-          var rels = rd.relocations || [];
+          var rels = (out[0] && out[0].relocations) || [];
+          var stats = {};
+          (Array.isArray(out[1]) ? out[1] : (out[1] && out[1].stats) || []).forEach(function(s){
+            if (s.resource_id) stats[s.resource_id] = s;
+            if (s.instance) stats[s.instance] = s;
+          });
           if (!rels.length) { rb.innerHTML = '✅ 暂无归属迁移记录（跨 L1 归属稳定，未发生故障上收）'; rb.style.color='var(--muted)'; return; }
           rb.style.textAlign='left';
           rb.innerHTML = '<table style="text-align:left"><thead><tr><th>时间</th><th>目标</th><th>租户</th><th>地域</th><th>原属主</th><th>→ 新属主</th><th>结果</th><th>原因</th></tr></thead><tbody>'
             + rels.map(function(x){
-                var st = x.Status==='moved' ? '<span class="badge" style="background:#e0f2f1;color:#0b6e66">已迁移</span>' : (x.Status==='skipped' ? '<span class="badge" style="background:#fff3cd;color:#8a6d3b">冷却跳过</span>' : '<span class="badge" style="background:#fde8e8;color:#b91c1c">拒绝</span>');
+                var tKey = x.TargetName || x.TargetID;
+                var tStat = stats[tKey] || stats[x.TargetID];
+                var noData = x.Status==='moved' && (!tStat || !tStat.reporting);
+                var st;
+                if (x.Status==='moved') {
+                  st = noData
+                    ? '<span class="badge" style="background:#fff3cd;color:#8a6d3b" title="迁移已执行，但 VM 实测该目标当前无样本——迁移成功≠数据在流，请到接入中心核查新属主采集配置">已迁移 · 未观测到数据</span>'
+                    : '<span class="badge" style="background:#e0f2f1;color:#0b6e66" title="迁移已执行且 VM 实测目标有样本">已迁移</span>';
+                } else if (x.Status==='skipped') {
+                  st = '<span class="badge" style="background:#fff3cd;color:#8a6d3b">冷却跳过</span>';
+                } else {
+                  st = '<span class="badge" style="background:#fde8e8;color:#b91c1c">拒绝</span>';
+                }
                 var ts = x.CreatedAt ? new Date(x.CreatedAt*1000).toLocaleString('zh-CN',{hour12:false}) : '-';
-                return '<tr><td style="white-space:nowrap">'+ts+'</td><td>'+escHtml(x.TargetName||x.TargetID)+'</td><td>'+escHtml(x.TenantID||'default')+'</td><td>'+(x.Region?escHtml(x.Region):'-')+'</td><td>'+(x.FromAgent?escHtml(x.FromAgent):'-')+'</td><td>'+(x.ToAgent?escHtml(x.ToAgent):'-')+'</td><td>'+st+'</td><td style="font-size:11px;color:var(--muted)">'+escHtml(x.Reason||x.Note||'')+'</td></tr>';
+                return '<tr><td style="white-space:nowrap">'+ts+'</td><td>'+escHtml(tKey)+'</td><td>'+escHtml(x.TenantID||'default')+'</td><td>'+(x.Region?escHtml(x.Region):'-')+'</td><td>'+(x.FromAgent?escHtml(x.FromAgent):'-')+'</td><td>'+(x.ToAgent?escHtml(x.ToAgent):'-')+'</td><td>'+st+'</td><td style="font-size:11px;color:var(--muted)">'+escHtml(x.Reason||x.Note||'')+'</td></tr>';
               }).join('')
             + '</tbody></table>'
-            + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">迁移记录经 config 轨接管（先新后旧防双写）+ 冷却终态保护，供审计与排障留痕。</div>';
+            + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">迁移记录经 config 轨接管（先新后旧防双写）+ 冷却终态保护，供审计与排障留痕。「未观测到数据」= VM 实测目标当前无样本（collect-stats 实测，非状态推断）。</div>';
         });
         // 对账结果 + 目标↔资源反查（断采行要给"打开资源"动作）
         Promise.all([
@@ -473,6 +495,8 @@ function renderMetricsBrowse() {
         html += '<select onchange="auditFilter()" id="audit-action" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部操作</option></select>';
         html += '<select onchange="auditFilter()" id="audit-result" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部结果</option><option value="成功">成功</option><option value="失败">失败</option></select>';
         html += '<span style="font-size:11px;color:var(--muted)" id="audit-count"></span>';
+        // B4（2026-09-27）：设计稿 ⑪ 审计页唯一交互 = 筛选与导出——补上导出（全量已加载留痕，不受当前筛选影响）。
+        html += '<button class="btn btn-o btn-sm" style="margin-left:auto" onclick="audExportCsv()" title="导出全部已加载审计留痕为 CSV（UTF-8 BOM，Excel 可直接打开）">⬇ 导出 CSV</button>';
         html += '</div>';
         html += '<table style="font-size:12px;table-layout:fixed;width:100%"><thead><tr><th style="width:170px">时间</th><th style="width:90px">操作人</th><th style="width:150px">操作类型</th><th style="width:101px">目标</th><th style="width:100px">范围</th><th style="width:421px">结果</th></tr></thead><tbody id="audit-tbody">';
         html += '</tbody></table><div id="audit-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px;font-size:12px"></div></div></div>';
@@ -491,6 +515,22 @@ function renderMetricsBrowse() {
       }
       function auditFilter() { window._auditPage = 1; auditRender(); }
       function auditGoPage(d) { window._auditPage = Math.max(1, (window._auditPage||1) + d); auditRender(); }
+      // B4：审计导出——合规底账的原始留痕全量导出（不做筛选裁剪，导出=审计口径，不制造第二份"被筛选的事实"）。
+      function audExportCsv() {
+        var entries = (window._auditData || []).map(auditF);
+        if (!entries.length) { toast('暂无可导出的审计留痕', 'ok'); return; }
+        function csvCell(v) { v = String(v == null ? '' : v); return '"' + v.replace(/"/g, '""') + '"'; }
+        var rows = [['时间', '操作人', '操作类型', '目标', '范围', '结果']];
+        entries.forEach(function(e){ rows.push([e.time, e.operator, e.action, e.target, e.scope, e.result]); });
+        // UTF-8 BOM：Excel 直接打开不乱码；时间列带 T/Z 原样保留（合规留痕不改写）
+        var blob = new Blob(['\uFEFF' + rows.map(function(r){ return r.map(csvCell).join(','); }).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'sagent-audit-' + new Date().toISOString().slice(0, 10) + '.csv';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        toast('已导出 ' + entries.length + ' 条审计留痕（全量，不受筛选影响）', 'ok');
+      }
       // 审计条目字段兼容（API 返回小写 key，旧数据可能为大写）
       function auditF(e) {
         return {
