@@ -587,11 +587,13 @@ window.renderChanges = function () {
   Promise.all([
     fetch(API + '/onboard/flows').then(function (r) { return r.json(); }).catch(function () { return {}; }),
     fetch(API + '/audit?limit=1000').then(function (r) { return r.json(); }).catch(function () { return []; }),
-    fetch(API + '/tasks?limit=1000').then(function (r) { return r.json(); }).catch(function () { return []; })
+    fetch(API + '/tasks?limit=1000').then(function (r) { return r.json(); }).catch(function () { return []; }),
+    fetch(API + '/recon').then(function (r) { return r.json(); }).catch(function () { return {}; })
   ]).then(function (out) {
     var flows = (out[0] && out[0].flows) || [];
     var audit = out[1] || [];
     var tasks = out[2] || [];
+    var recon = out[3] || {};
     var entries = [];
     flows.forEach(function (f) {
       entries.push({
@@ -646,8 +648,29 @@ window.renderChanges = function () {
       else if (x.status === 'failed') nFail++;
       else nUnknown++;
     });
+    // 待人工决策 = 流水线停在 wait_kind=human 的确认点（批准段的口径，与 computeTodos 一致）
+    var nApprovals = 0;
+    flows.forEach(function (f) { if (f && f.wait_kind === 'human') nApprovals++; });
 
-    var h = '<div class="ob-stat">';
+    var h = '';
+    // 四段式进度（IA 设计稿 ⑤ 变更中心：预演→批准→执行→验收，页头一眼看清卡在哪一段）。
+    // 口径全部同源：预演=断采修复草案（recon.stale）；批准=停等人工决策的流水线（wait_kind=human）；
+    // 执行=running/stalled；验收=执行成功——applied ≠ verified，验收以对账同源证据为准，不谎报"已验收"。
+    var sum0 = (recon && recon.summary) || {};
+    var nDrafts = (recon && recon.stale && recon.stale.length) ? recon.stale.length : (sum0.stale || 0);
+    function _chStage(no, name, cnt, hint, hot) {
+      return '<div title="' + hint + '" style="flex:1;min-width:130px;background:var(--card);border:1px solid ' + (hot ? 'var(--primary)' : 'var(--border,#e3eaee)') + ';border-radius:8px;padding:8px 12px">'
+        + '<div style="font-size:11px;color:var(--muted)">' + no + '</div>'
+        + '<div style="font-size:13px;font-weight:600">' + name + ' <span style="font-size:16px;font-weight:700;color:' + (hot ? 'var(--primary)' : 'inherit') + '">' + cnt + '</span></div>'
+        + '<div style="font-size:10.5px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + hint + '</div></div>';
+    }
+    h += '<div style="display:flex;gap:6px;align-items:stretch;margin-bottom:12px;flex-wrap:wrap">';
+    h += _chStage('① 预演', '待复核草案', nDrafts, '断采修复草案待复核（只读预览见下方「修复草案」）——复核在采集健康页完成', nDrafts > 0);
+    h += _chStage('② 批准', '待人工决策', nApprovals, '流水线停在人工决策点，确认后才继续执行', nApprovals > 0);
+    h += _chStage('③ 执行', '执行中', nRun, '流水线执行中（含疑似卡住 stalled）', nRun > 0);
+    h += _chStage('④ 验收', '执行成功', nDone, 'applied ≠ verified：执行成功不代表验收通过，以对账同源证据复核', false);
+    h += '</div>';
+    h += '<div class="ob-stat">';
     h += '<div class="s" title="变更流水线 + 审计聚合的操作记录（启停/动作类），非纯变更单"><div class="n">' + (nRun + nDone + nFail + nUnknown) + '</div><div class="l">变更总数</div></div>';
     h += '<div class="s"><div class="n" style="color:var(--warn)">' + nRun + '</div><div class="l">进行中</div></div>';
     h += '<div class="s"><div class="n" style="color:var(--success)">' + nDone + '</div><div class="l">成功</div></div>';

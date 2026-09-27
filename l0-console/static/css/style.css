@@ -210,7 +210,7 @@ tr:hover td { background: #fafbfc; }
 
 /* Agent detail panel (slide) */
 .detail-panel {
-  position: fixed; top: 0; right: 0; width: 520px; height: 100%;
+  position: fixed; top: 0; right: 0; width: 760px; height: 100%; /* 6.1 三档之 L（原 520px 不在档位内，2026-09-27 收口） */
   background: var(--card); box-shadow: -4px 0 20px rgba(0,0,0,0.1);
   z-index: 100; overflow-y: auto; display: none;
 }

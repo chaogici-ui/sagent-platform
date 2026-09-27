@@ -797,7 +797,11 @@
           + '<td>' + st + '</td></tr>';
       }).join('') + '</table>';
     } else {
-      h += '<div style="font-size:12px;color:var(--muted)">这台机器还没有采集目标——采集目标定义"采什么"（MySQL / Redis / HTTP…），登记后才真的开始采</div>';
+      h += '<div style="font-size:12px;color:var(--muted)">'
+        + (r.stat && r.stat.reporting
+          ? '这台机器还没有登记采集目标——上方"在报 ' + r.stat.metrics + ' 项指标"来自 Agent 本机自采能力（host_metrics 等内置能力不占目标行），两件事不矛盾；要采 MySQL / Redis 等外部目标，先登记目标'
+          : '这台机器还没有采集目标——采集目标定义"采什么"（MySQL / Redis / HTTP…），登记后才真的开始采')
+        + '</div>';
     }
     // 空态引导：扩展采集统一收口到接入中心主入口，走流水线留痕（规则 3：一个对象只有一个可写入口）。
     // 之前这里调 openOnboardWizard → POST /targets 直接建目标，不建 flow、不留变更记录，属绕过变更中心的后门。
@@ -819,15 +823,12 @@
     h += '<div style="margin-top:6px"><button class="btn btn-o btn-sm" onclick="resOpenVMData()">看数据（VMUI）→</button></div>';
     h += '</div>';
 
-    // ⑤ 动作：只留「真会改状态」的动作按钮，一个动作一个按钮、点了就办。
-    // 不再放「查看接入/卸载/启停过程」这类跳转向导的按钮——过程回溯统一收口到下方「过程记录」，
-    // 那里每次流水线都在、按类别标好人话，比在动作区各挂一个"最近一次"入口更不容易看漏（2026-09-24 用户评审）
-    h += '<div class="res-sec"><div class="res-sec-hd">动作</div><div style="display:flex;gap:6px;flex-wrap:wrap">';
+    // ⑤ 变更入口（6.1：详情抽屉只读——不直接放改状态的动作按钮）。
+    // 升级/启停/卸载从列表行或对应流程发起（行按钮 → 确认抽屉/流水线），抽屉保持纯只读；
+    // 之前这里直接放「停用/卸载」按钮，与 6.1 字面冲突（灰区裁决 2026-09-27：收口为只读）。
+    h += '<div class="res-sec"><div class="res-sec-hd">变更入口</div><div style="font-size:12px;color:var(--muted);line-height:1.7">';
     if (r.agent) {
-      if (r.up) h += '<button class="btn btn-p btn-sm" onclick="resUpgrade(\'' + rEsc(r.key) + '\')">升级 Agent（→ ' + rEsc(r.up.version) + '）</button>';
-      if (r.state.key === 'stopped') h += '<button class="btn btn-o btn-sm" onclick="resService(\'' + rEsc(r.key) + '\',\'start\')">启动</button>';
-      else h += '<button class="btn btn-o btn-sm" onclick="resService(\'' + rEsc(r.key) + '\',\'stop\')">停用</button>';
-      h += '<button class="btn btn-d btn-sm" onclick="resOffboard(\'' + rEsc(r.key) + '\')">卸载</button>';
+      h += '升级 / 启停 / 卸载等变更动作从接入中心列表行发起（<a href="javascript:void(0)" onclick="closeResourceDrawer();goPage(\'resources\')" style="color:var(--primary)">回列表 →</a>），每一步走流水线留痕；本抽屉保持只读（IA 设计稿 6.1）。';
     } else {
       h += '<button class="btn btn-p btn-sm" onclick="openOnboardNew()">接入</button>';
     }
@@ -1004,7 +1005,10 @@
       }).join('') : '（无）')
       + '</div></details>';
     h += '<div style="margin-top:6px;font-size:11px;color:var(--muted)">预检未通过的目标单独分组、不计入可执行目标数；diff 快照随变更单持久化，验收用同一快照对照（禁止用当前配置事后反推）。</div>';
-    h += '<div style="margin-top:8px"><button class="btn btn-p btn-sm" onclick="toast(\'预演通过 · 转为变更提案（含 diff 快照）—— 执行走变更中心预演→批准→执行\',\'ok\')">预演通过 · 转为变更提案（含 diff 快照）</button></div>';
+    // B1（2026-09-27 诚实化）：变更单 + diff 快照实体尚待立项，此前按钮文案承诺
+    // 「含 diff 快照 · 执行走变更中心」但点击零网络请求、零落库——是假动作。
+    // 现在如实告知边界：预演结论只读参考，不落库；立项后再接真出口。
+    h += '<div style="margin-top:8px"><button class="btn btn-o btn-sm" onclick="toast(\'预演通过。注意：本预演为只读参考、不落库——「转为变更提案」需变更单 + diff 快照实体，待立项（问题清单 B1）\',\'ok\')" title="变更单实体待立项，当前不产生任何写入">预演通过 · 转为变更提案（待立项，暂不落库）</button></div>';
     out.style.color = '';
     out.innerHTML = h;
   };

@@ -18,7 +18,7 @@
     // 口径覆盖统计（D8：应报口径 = 目录注册集 ∪ Agent 生效配置展开集）
     html += '<div class="slo-grid" style="margin-top:16px" id="dg-stats"></div>';
     // 野指标清单（治理动作面）
-    html += '<div class="card" style="margin-top:16px"><div class="card-hd">🌿 野指标治理 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖 · 判定以采集健康页对账引擎为准</span></div>';
+    html += '<div class="card" style="margin-top:16px"><div class="card-hd">🌿 野指标治理 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖 · 判定以采集健康页对账引擎为准</span><a href="javascript:void(0)" onclick="goPage(\'slo\')" style="font-size:11px;color:var(--primary);margin-left:10px">断采 / 对账全景 → 采集健康</a></div>';
     html += '<div class="card-bd" id="dg-wild" style="text-align:center;color:var(--muted);padding:16px">加载中...</div></div>';
     // 高基数治理（VM TSDB 真实数据）
     html += '<div class="card" style="margin-top:16px"><div class="card-hd">📊 高基数治理 <span style="font-weight:400;font-size:11px;color:var(--muted)">series 按指标名 TopN · 数据源 VM TSDB 状态接口（实测）</span></div>';

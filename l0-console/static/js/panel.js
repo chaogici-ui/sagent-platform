@@ -149,7 +149,7 @@ function renderTasks() {
         html += '<div class="card" style="margin-top:16px" id="recon-draft"><div class="card-hd">🩹 修复草案 <span style="font-weight:400;font-size:11px;color:var(--muted)">只读预览 · 模板建议不是 evidence · 复核与转变更只在变更中心</span></div>';
         html += '<div class="card-bd" id="recon-draft-body" style="text-align:center;color:var(--muted);padding:14px">等对账结果...</div></div>';
         // 对账：野指标
-        html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span></div>';
+        html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span><a href="javascript:void(0)" onclick="goPage(\'data-gov\')" style="font-size:11px;color:var(--primary);margin-left:10px">→ 数据治理细看</a></div>';
         html += '<div class="card-bd" id="recon-wild-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
         // ③-3 Agent 状态：维护态与未知态分开列（unknown ≠ failed）
         html += '<div class="card" style="margin-top:16px" id="recon-anomaly"><div class="card-hd">🖥 Agent 状态 <span style="font-weight:400;font-size:11px;color:var(--muted)">维护态 '+anomaly.length+' · 状态未知 '+unknownA.length+'（心跳过期/从未心跳 ≠ 失败，可能只是网络中断）</span></div>';
@@ -399,18 +399,33 @@ function renderMetricsBrowse() {
         siteCfg(function(cfg) {
           var vmuiUrl = cfg.vm_url + '/vmui/';
           var html = '<div class="card" style="height:calc(100vh - 130px);display:flex;flex-direction:column">';
-          html += '<div class="card-hd">📈 指标大屏 <span style="font-weight:400;font-size:11px;color:var(--muted)">数据长什么样？控制台只做导航壳，不自建图表</span><span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span><button class="btn btn-o btn-sm" style="float:right" onclick="openGrafanaNew()">↗ 在新窗口打开 Grafana</button></div>';
+          html += '<div class="card-hd">📈 指标大屏 <span style="font-weight:400;font-size:11px;color:var(--muted)">数据长什么样？控制台只做导航壳，不自建图表</span><span class="tabs" style="margin-left:12px"><span class="active" onclick="switchMetricsTab(\'vmui\')">VMUI</span><span onclick="switchMetricsTab(\'grafana\')">Grafana</span></span>'
+            + '<select id="metrics-range" onchange="metricsRangeApply()" title="时间范围（对 VMUI / Grafana 分别以各自 URL 参数生效）" style="margin-left:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="">默认</option><option value="5m">近 5 分钟</option><option value="1h">近 1 小时</option><option value="6h">近 6 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select>'
+            + '<button class="btn btn-o btn-sm" style="float:right" onclick="openGrafanaNew()">↗ 在新窗口打开 Grafana</button></div>';
           html += '<div class="card-bd" style="flex:1;padding:0;overflow:hidden">';
           html += '<iframe id="metrics-frame" src="'+vmuiUrl+'" style="width:100%;height:100%;border:0"></iframe>';
           html += '</div></div>';
+          html += '<div style="margin-top:6px;font-size:11px;color:var(--muted)">时间范围对 VMUI（g0.range_input）与 Grafana（from/to）分别生效；租户 / 看板筛选依赖 Grafana 变量与面板清单接入，待定义侧立项（诚实边界，不放假筛选器）。</div>';
           document.getElementById("main-content").innerHTML = html;
         });
       }
+      var _metricsTab = 'vmui';
       function switchMetricsTab(t) {
+        _metricsTab = t;
         document.querySelectorAll(".card-hd .tabs span").forEach(function(s){s.classList.toggle("active",s.textContent.toLowerCase().indexOf(t)>=0)});
-        var frame = document.getElementById("metrics-frame");
-        if (frame) siteCfg(function(cfg) {
-          frame.src = t==='grafana' ? cfg.grafana_url + '/' : cfg.vm_url + '/vmui/';
+        metricsRangeApply();
+      }
+      // 时间范围落地：VMUI 用 g0.range_input，Grafana 用 from/to 相对时间
+      function metricsRangeApply() {
+        var rng = (document.getElementById('metrics-range')||{}).value || '';
+        var frame = document.getElementById('metrics-frame');
+        if (!frame) return;
+        siteCfg(function(cfg) {
+          if (_metricsTab === 'grafana') {
+            frame.src = cfg.grafana_url + '/' + (rng ? '?from=now-' + rng + '&to=now' : '');
+          } else {
+            frame.src = cfg.vm_url + '/vmui/' + (rng ? '?g0.range_input=' + rng : '');
+          }
         });
       }
       function openGrafanaNew() {
@@ -1273,7 +1288,21 @@ function mdRender(md) {
           var flows = {};
           (((out[2]||{}).flows)||[]).forEach(function(f){ flows[f.id] = f; });
           window._flowMap = flows;
+          targetSyncTypeOptions();
           targetRender();
+        });
+      }
+      // 类型筛选选项动态补全：静态清单只是常见类型，实际在册的 target.type（如 prometheus_scrape）
+      // 必须出现在选项里——否则用它筛永远 0 行，读者会误以为"这类目标不存在"（2026-09-27 实测踩中）。
+      function targetSyncTypeOptions() {
+        var sel = document.getElementById('target-type');
+        if (!sel) return;
+        var known = {};
+        Array.prototype.forEach.call(sel.options, function(o){ known[o.value] = 1; });
+        var extra = {};
+        (window._targets||[]).forEach(function(tg){ if (tg.type && !known[tg.type]) extra[tg.type] = 1; });
+        Object.keys(extra).sort().forEach(function(tp){
+          var o = document.createElement('option'); o.value = tp; o.text = tp; sel.appendChild(o);
         });
       }
       // 目标采集间隔：参数由插件 params 驱动（params_json.interval），未声明则显示「随接入参数」
@@ -1333,7 +1362,16 @@ function mdRender(md) {
                 : '<span class="badge b-h" title="' + escHtml(tg.last_test_at || '') + '">' + escHtml(res) + '</span>'));
           if (inChange) st += ' <span class="badge" style="background:#fff5df;color:#946011">变更中 flow-'+fl.id+'</span>';
           var traceBtn = tg.flow_id ? ' <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="openOnboardFlow('+tg.flow_id+')" title="回到产生这个目标的接入流水线，看它是怎么走过来的">🧭 接入过程</button>' : '';
-          return '<tr'+rowStyle+'><td>'+escHtml(tg.name)+'<div style="font-size:11px;color:var(--muted)"><code>'+escHtml(tg.address)+'</code>'+(resCell?' · 对象 '+resCell:'')+'</div></td>'
+          // 行可点下钻（同源下钻，IA 规则 4）：点空白处走主下钻（有对象→对象详情；有流水线→接入过程），
+          // 行内 a/button 自带入口，closest 守卫防双触发
+          var rowClick = rowStyle;
+          if (!inChange && (tg.resource_id || tg.flow_id)) {
+            var drill = tg.resource_id
+              ? "openResourceDrawer('" + escHtml(tg.resource_id) + "')"
+              : "openOnboardFlow(" + tg.flow_id + ")";
+            rowClick = ' style="cursor:pointer" onclick="if(event.target.closest(\'a,button,code\'))return;' + drill + '"';
+          }
+          return '<tr'+rowClick+'><td>'+escHtml(tg.name)+'<div style="font-size:11px;color:var(--muted)"><code>'+escHtml(tg.address)+'</code>'+(resCell?' · 对象 '+resCell:'')+'</div></td>'
             + '<td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(tg.plugin||tg.type)+'</span><div style="font-size:11px;color:var(--muted)">'+escHtml(tg.type||'')+'</div></td>'
             + '<td>'+(iv?'<code style="font-size:11px">'+escHtml(iv)+'</code>':'<span style="font-size:11px;color:var(--muted)">随接入参数</span>')+'</td>'
             + '<td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+escHtml(tg.agent_id)+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td>'
@@ -1750,7 +1788,9 @@ function mdRender(md) {
       }
       function openDetail(agent) {
         currentDetailAgent = agent;
-        document.getElementById("detail-title").textContent = agent.name || agent.id;
+        // 副标注每次重建（textContent 会把静态 span 抹掉）：明示"进程视角"，与接入中心对象（机器）抽屉区分（E1 定位）
+        document.getElementById("detail-title").innerHTML = escHtml(agent.name || agent.id)
+          + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">进程视角 · 对象（机器）详情在接入中心抽屉</span>';
         document.getElementById("detail-panel").classList.add("open");
         switchDetailTab("plugins");
       }

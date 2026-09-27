@@ -50,12 +50,20 @@
         }) + '</td></tr>';
       }
       _versions.forEach(function (v) {
+        // 「未登记」≠「无要求」：字段缺失时明示数据缺口（自动选版的兼容判据依赖它），
+        // 不再用"—"冒充正常空值——读者会把"—"读成"没有要求"
+        var kernelCell = v.min_kernel
+          ? vEsc(v.min_kernel)
+          : '<span style="color:var(--muted)" title="versions.yaml 未登记 min_kernel——登记后自动选版才能用内核版本做兼容判据">未登记</span>';
+        var compsCell = (v.components || []).length
+          ? vEsc(compsLabel(v.components))
+          : '<span style="color:var(--muted)" title="versions.yaml 未登记 components——登记后自动选版才能核对包内组件要求">未登记</span>';
         html += '<tr><td>' + vEsc(v.tag) + '</td><td>' + vEsc(v.version) + '</td><td>' + vEsc(v.arch) + '</td>'
-          + '<td>' + vEsc(statusLabel(v.status)) + '</td><td>' + vEsc(v.min_kernel || '—') + '</td>'
-          + '<td>' + vEsc(compsLabel(v.components)) + '</td><td>' + vEsc(v.source) + '</td>'
+          + '<td>' + vEsc(statusLabel(v.status)) + '</td><td>' + kernelCell + '</td>'
+          + '<td>' + compsCell + '</td><td>' + vEsc(v.source) + '</td>'
           + '<td>' + vEsc(v.updated_at || '—') + '</td>'
           + '<td style="white-space:nowrap">'
-          + '<button class="btn btn-o btn-sm" onclick="editVersion(\'' + vAttr(v.tag) + '\')">编辑矩阵</button> '
+          + '<button class="btn btn-o btn-sm" onclick="editVersion(\'' + vAttr(v.tag) + '\')" title="编辑该版本的登记信息（tag/架构/内核下限/组件要求）">编辑登记</button> '
           + '<button class="btn btn-o btn-sm" onclick="downloadVersion(\'' + vAttr(v.tag) + '\')">下载</button> '
           + actionBtn(v)
           + '</td></tr>';
@@ -169,7 +177,7 @@
 
   function actionBtn(v) {
     var a = statusAction(v.status);
-    return '<button class="btn btn-p btn-sm" onclick="setVersionStatus(\'' + vAttr(v.tag) + '\',\'' + vAttr(a.to)
+    return '<button class="btn btn-p btn-sm" title="生命周期：发布（draft→stable）→ 弃用（stable→deprecated）→ 停用下架（deprecated→disabled）；disabled 可重新发布" onclick="setVersionStatus(\'' + vAttr(v.tag) + '\',\'' + vAttr(a.to)
       + '\')">' + vEsc(a.label) + '</button>';
   }
 
