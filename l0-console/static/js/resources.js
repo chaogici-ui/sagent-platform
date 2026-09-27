@@ -264,9 +264,9 @@
       + ' · 未接入 ' + (nAll - nConnected) + '　|　接入方式：本机 Agent ' + mLocal + ' · 远程采集 ' + mRemote
       + (_resMode !== 'all' || _resTenant !== 'all' ? '　<span style="color:var(--primary)">（已按筛选过滤，当前显示 ' + rows.filter(resMatch).length + ' 个）</span>' : '') + '</div>';
 
-    h += '<table><thead><tr><th style="width:210px">对象</th><th style="width:150px">接入方式</th><th style="width:130px">环境</th>'
-      + '<th style="width:140px">Agent</th><th style="width:130px">采集状态</th><th style="width:90px">最近数据</th>'
-      + '<th style="width:140px">归属租户</th><th style="width:230px"></th></tr></thead><tbody id="res-tbody">' + resRowsHTML(rows) + '</tbody></table>';
+    h += '<table class="res-tab"><thead><tr><th style="width:18%">对象</th><th style="width:11%">接入方式</th><th style="width:10%">环境</th>'
+      + '<th style="width:11%">Agent</th><th style="width:12%">采集状态</th><th style="width:7%">最近数据</th>'
+      + '<th style="width:11%">归属租户</th><th style="width:20%"></th></tr></thead><tbody id="res-tbody">' + resRowsHTML(rows) + '</tbody></table>';
 
     h += '<div class="batch-bar" style="margin-top:12px"><strong style="font-size:13px">批量操作</strong>'
       + '<span style="font-size:11px;color:var(--muted)">按 Agent 的 IDC / 类型批量执行（来自心跳清单，不含未接入机器）</span>'
@@ -339,7 +339,7 @@
     var envChips = [r.labels.env, r.labels.idc, r.labels.business_system].filter(Boolean)
       .map(function (t) { return '<span class="res-chip">' + rEsc(t) + '</span>'; }).join('');
     var h = '<tr>';
-    h += '<td><b>' + rEsc(r.res.ip || r.res.id) + '</b>'
+    h += '<td title="' + rEsc(r.res.ip || r.res.id) + (r.res.name ? ' · ' + rEsc(r.res.name) : '') + '"><b>' + rEsc(r.res.ip || r.res.id) + '</b>'
       + (r.res.name && r.res.name !== r.res.ip ? '<div style="font-size:11px;color:var(--muted)">' + rEsc(r.res.name) + '</div>' : '')
       + (envLine ? '<div style="font-size:11px;color:var(--muted)">' + envLine + '</div>' : '') + '</td>';
 
@@ -360,7 +360,7 @@
     }
     h += '<td>' + modeCell + '</td>';
 
-    h += '<td style="font-size:12px">' + (envChips || '<span style="color:var(--muted)">—</span>')
+    h += '<td style="font-size:12px"' + (envChips ? ' title="' + rEsc([r.labels.env, r.labels.idc, r.labels.business_system].filter(Boolean).join(' · ')) + '"' : '') + '>' + (envChips || '<span style="color:var(--muted)">—</span>')
       + (r.res.target_kind ? '<div style="font-size:11px;color:var(--muted)">' + rEsc(r.res.target_kind) + ' · SSH ' + rEsc(r.res.ssh_port || 22) + '</div>' : '')
       + '</td>';
 
@@ -401,7 +401,7 @@
       else acts += ' <button class="btn btn-o btn-sm" onclick="resService(\'' + rEsc(r.key) + '\',\'stop\')">停用</button>';
       acts += ' <button class="btn btn-d btn-sm" onclick="resOffboard(\'' + rEsc(r.key) + '\')">卸载</button>';
     }
-    h += '<td style="white-space:nowrap">' + acts + '</td>';
+    h += '<td class="res-act">' + acts + '</td>';
     return h + '</tr>';
   }
 

@@ -166,6 +166,11 @@ th {
   color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border);
 }
 td { padding: 10px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+/* 接入中心资源表：fixed 布局 + 百分比列宽，表格恒等于容器宽，消灭卡内横向滚动条。
+   长内容省略号截断（完整信息走详情抽屉/悬停 title）；操作列例外，允许按钮换行 */
+.res-tab { table-layout: fixed; width: 100%; }
+.res-tab th, .res-tab td { overflow: hidden; text-overflow: ellipsis; }
+.res-tab td.res-act { white-space: normal; overflow: visible; text-overflow: clip; }
 tr:hover td { background: #fafbfc; }
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
 .b-h { background: #ecfdf5; color: var(--success); }
