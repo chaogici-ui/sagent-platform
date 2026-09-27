@@ -29,6 +29,7 @@ var metricKeyRe = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 func registerReconRoute(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recon", handleRecon)
 	mux.HandleFunc("/api/vm/cardinality", handleVMCardinality) // 高基数治理切片（数据治理页）
+	mux.HandleFunc("/api/recon/draft/ack", handleDraftAck)     // 修复草案复核结论落审计（变更中心唯一复核入口）
 }
 
 // InvalidateReconCache 目标/Agent 增删改后调用，强制下轮对账重算
@@ -260,6 +261,52 @@ func handleVMCardinality(w http.ResponseWriter, r *http.Request) {
 		"total_series": d.Data.TotalSeries,
 		"top_metrics":  d.Data.SeriesCountByMetricName,
 	})
+}
+
+// handleDraftAck POST /api/recon/draft/ack 修复草案复核结论（IA 设计稿 ⑤ / 裁决 2）。
+// 草案由对账异常模板自动生成（只读、不是 evidence）；复核与「转为变更单」的动作只发生在变更中心。
+// 本端点只把人工复核结论落审计做合规留痕，不直接执行修复、也不创建执行任务——
+// 变更单的实际执行仍走变更中心既有流水线（避免绕过预演/批准/验收三段）。
+func handleDraftAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeJSON(w, map[string]interface{}{"error": "仅支持 POST"})
+		return
+	}
+	var req struct {
+		TargetID   string `json:"target_id"`
+		TargetName string `json:"target_name"`
+		Decision   string `json:"decision"` // confirm=确认转变为变更单 / reject=驳回
+		Note       string `json:"note"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]interface{}{"error": "请求体解析失败"})
+		return
+	}
+	if req.Decision != "confirm" && req.Decision != "reject" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]interface{}{"error": "decision 必须为 confirm 或 reject"})
+		return
+	}
+	name := req.TargetName
+	if name == "" {
+		name = req.TargetID
+	}
+	if name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]interface{}{"error": "缺少目标标识"})
+		return
+	}
+	result := "确认转变为变更单（草案为模板建议，非 evidence）"
+	if req.Decision == "reject" {
+		result = "驳回草案（不产生变更单）"
+	}
+	if req.Note != "" {
+		result += "；备注：" + req.Note
+	}
+	addAudit("修复草案复核", name, "变更中心", result)
+	writeJSON(w, map[string]interface{}{"ok": true, "decision": req.Decision, "target": name, "result": result})
 }
 
 // expandCatalogKnown 目录注册口径：全部指标 name + expression 均视为已知

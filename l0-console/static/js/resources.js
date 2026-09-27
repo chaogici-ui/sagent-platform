@@ -16,6 +16,8 @@
   var _resData = { resources: [], agents: [], flows: [], recon: null, stats: {}, versions: [], err: '' };
   var _resFilter = 'all';
   var _resQuery = '';
+  var _resMode = 'all';    // 接入方式筛选：all / local（本机 Agent）/ remote（远程采集）
+  var _resTenant = 'all';  // 归属租户筛选
   var _drawerKey = null;
 
   function rEsc(s) {
@@ -86,9 +88,13 @@
     var facts = {};
     try { facts = JSON.parse(r.probe_json || '{}') || {}; } catch (e) { facts = {}; }
     var st = resState(agent, r, stat);
+    // 接入方式（IA 设计稿·接入中心）：本机 Agent / 远程采集（proxy 承载）/ 未接入。
+    // 本机与远程同一本台账、同一个写入口，差异只在这一列——不拆两个页面（规则 4）。
+    var mode = !agent ? 'off' : (agent.type === 'proxy' ? 'remote' : 'local');
+    var tenantKey = (r && r.tenant_id) || (agent && agent.tenant_id) || 'default';
     return {
       key: r.id, res: r, agent: agent, flow: flows[0] || null, flows: flows, stale: stale, stat: stat,
-      labels: labels, facts: facts, state: st,
+      labels: labels, facts: facts, state: st, mode: mode, tenantKey: tenantKey,
       up: resUpgradeTarget(r.installed_tag, r.arch || facts.arch, _resData.versions),
       alt: resAltTarget(r.installed_tag, r.arch || facts.arch, _resData.versions),
       search: [r.id, r.ip, r.name, labels.business_system, labels.env, labels.idc, agent ? agent.id : '']
@@ -216,18 +222,40 @@
     if (_resData.err) h += '<span class="ob-warn" style="margin-left:8px;font-weight:400">⚠ ' + rEsc(_resData.err) + '</span>';
     h += '<button class="btn btn-p btn-sm" style="float:right" onclick="openOnboardNew()">+ 接入新对象</button></div><div class="card-bd">';
 
-    h += '<div class="res-filters" style="margin-bottom:10px">'
+    // 接入方式与接入状态分列（IA 设计稿：本机 Agent / 远程采集同一本台账，差异只在「接入方式」列）
+    var mLocal = 0, mRemote = 0, nConnected = 0;
+    rows.forEach(function (r) {
+      if (r.mode === 'remote') mRemote++; else if (r.mode === 'local') mLocal++;
+      if (r.agent) nConnected++;
+    });
+    h += '<div class="res-filters" style="margin-bottom:8px">'
       + resFilterBtn('all', '全部', nAll)
       + resFilterBtn('collecting', '采集中', nOk)
       + resFilterBtn('problem', '异常', nBad)
       + resFilterBtn('off', '未接入', nOff)
-      + '<input id="res-search" placeholder="搜 IP / 资源名 / 业务系统" value="' + rEsc(_resQuery) + '" '
-      + 'oninput="resSearch(this.value)" style="margin-left:auto;padding:5px 10px;border:0.5px solid var(--border);border-radius:6px;font-size:12px;width:240px">'
+      + '<select onchange="resSetMode(this.value)" title="接入方式：本机 Agent（装 SAgent）/ 远程采集（采集机承载）" '
+      + 'style="padding:5px 8px;border:0.5px solid var(--border);border-radius:6px;font-size:12px">'
+      + '<option value="all"' + (_resMode === 'all' ? ' selected' : '') + '>全部接入方式</option>'
+      + '<option value="local"' + (_resMode === 'local' ? ' selected' : '') + '>本机 Agent</option>'
+      + '<option value="remote"' + (_resMode === 'remote' ? ' selected' : '') + '>远程采集</option></select>'
+      + '<select onchange="resSetTenantFilter(this.value)" title="按归属租户筛选" '
+      + 'style="padding:5px 8px;border:0.5px solid var(--border);border-radius:6px;font-size:12px">'
+      + '<option value="all"' + (_resTenant === 'all' ? ' selected' : '') + '>全部租户</option>'
+      + Object.keys(window._tenantCodes || { default: '默认租户' }).map(function (code) {
+        return '<option value="' + rEsc(code) + '"' + (_resTenant === code ? ' selected' : '') + '>' + rEsc((window._tenantCodes || {})[code] || code) + '</option>';
+      }).join('')
+      + '</select>'
+      + '<input id="res-search" placeholder="搜 IP / 对象名 / 业务系统" value="' + rEsc(_resQuery) + '" '
+      + 'oninput="resSearch(this.value)" style="margin-left:auto;padding:5px 10px;border:0.5px solid var(--border);border-radius:6px;font-size:12px;width:220px">'
       + '</div>';
+    // 统计行（IA 设计稿：共 N 个对象 · 已接入 X · 未接入 Y）
+    h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px">共 ' + nAll + ' 个对象 · 已接入 ' + nConnected
+      + ' · 未接入 ' + (nAll - nConnected) + '　|　接入方式：本机 Agent ' + mLocal + ' · 远程采集 ' + mRemote
+      + (_resMode !== 'all' || _resTenant !== 'all' ? '　<span style="color:var(--primary)">（已按筛选过滤，当前显示 ' + rows.filter(resMatch).length + ' 个）</span>' : '') + '</div>';
 
-    h += '<table><thead><tr><th style="width:210px">资源</th><th style="width:150px">环境</th>'
-      + '<th style="width:150px">Agent</th><th style="width:150px">采集状态</th><th style="width:100px">最近数据</th>'
-      + '<th style="width:150px">归属租户</th><th style="width:230px"></th></tr></thead><tbody id="res-tbody">' + resRowsHTML(rows) + '</tbody></table>';
+    h += '<table><thead><tr><th style="width:210px">对象</th><th style="width:150px">接入方式</th><th style="width:130px">环境</th>'
+      + '<th style="width:140px">Agent</th><th style="width:130px">采集状态</th><th style="width:90px">最近数据</th>'
+      + '<th style="width:140px">归属租户</th><th style="width:230px"></th></tr></thead><tbody id="res-tbody">' + resRowsHTML(rows) + '</tbody></table>';
 
     h += '<div class="batch-bar" style="margin-top:12px"><strong style="font-size:13px">批量操作</strong>'
       + '<span style="font-size:11px;color:var(--muted)">按 Agent 的 IDC / 类型批量执行（来自心跳清单，不含未接入机器）</span>'
@@ -264,12 +292,25 @@
       shown++;
       out += resRowHTML(r);
     });
-    if (!shown) return '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">没有匹配的资源</td></tr>';
+    if (!shown) {
+      // 空态规范（IA 设计稿）：空台账给解释 + 引导动作（主按钮），不显示空表格；
+      // 「筛没了」与「没有对象」文案必须分开，避免把前者读成后者。
+      if (!rows.length) {
+        return '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:26px">'
+          + '<div style="font-size:14px;margin-bottom:6px">还没有对象</div>'
+          + '<div style="font-size:12px;margin-bottom:10px">本机 Agent 与远程采集对象共用这本台账——登记后由平台走变更流程完成接入</div>'
+          + '<button class="btn btn-p btn-sm" onclick="openOnboardNew()">＋ 接入第一个对象</button></td></tr>';
+      }
+      return '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">'
+        + '没有匹配的对象（当前筛选条件下 0 个）—— <a href="javascript:void(0)" onclick="resResetFilters()" style="color:var(--primary)">清空筛选</a></td></tr>';
+    }
     return out;
   }
 
   function resMatch(r) {
     if (_resQuery && r.search.indexOf(_resQuery.toLowerCase()) < 0) return false;
+    if (_resMode !== 'all' && r.mode !== _resMode) return false;
+    if (_resTenant !== 'all' && r.tenantKey !== _resTenant) return false;
     if (_resFilter === 'collecting') return r.state.key === 'collecting';
     if (_resFilter === 'problem') return resProblem(r.state);
     if (_resFilter === 'off') return r.state.key === 'off';
@@ -286,6 +327,23 @@
     h += '<td><b>' + rEsc(r.res.ip || r.res.id) + '</b>'
       + (r.res.name && r.res.name !== r.res.ip ? '<div style="font-size:11px;color:var(--muted)">' + rEsc(r.res.name) + '</div>' : '')
       + (envLine ? '<div style="font-size:11px;color:var(--muted)">' + envLine + '</div>' : '') + '</td>';
+
+    // 接入方式列（IA 设计稿）：本机 Agent（装 SAgent）· 远程采集（采集机承载）· 未接入。
+    // 本机与远程共用同一本台账与同一个写入口，差异只在这一列（规则 4：同一对象一个入口）。
+    var modeCell;
+    if (r.mode === 'off') {
+      modeCell = '<span class="res-chip" style="border-color:#fcd34d;background:#fffbeb;color:#92400e">未接入</span>';
+    } else if (r.mode === 'remote') {
+      var lsm = r.agent.last_seen ? (Date.now() / 1000 - r.agent.last_seen) : -1;
+      modeCell = '<span class="res-chip" style="border-color:#a7f3d0;background:#ecfdf5;color:#065f46">远程采集</span>'
+        + '<div style="font-size:11px;color:var(--muted)" title="远程对象的采集插件运行在这台采集机上">承载 ' + rEsc(r.agent.id)
+        + (lsm >= 0 ? ' · 心跳 ' + resAge(lsm) : '') + '</div>';
+    } else {
+      var lsl = r.agent.last_seen ? (Date.now() / 1000 - r.agent.last_seen) : -1;
+      modeCell = '<span class="res-chip">本机 Agent</span>'
+        + '<div style="font-size:11px;color:var(--muted)">' + (lsl >= 0 ? '心跳 ' + resAge(lsl) : '无心跳记录') + '</div>';
+    }
+    h += '<td>' + modeCell + '</td>';
 
     h += '<td style="font-size:12px">' + (envChips || '<span style="color:var(--muted)">—</span>')
       + (r.res.target_kind ? '<div style="font-size:11px;color:var(--muted)">' + rEsc(r.res.target_kind) + ' · SSH ' + rEsc(r.res.ssh_port || 22) + '</div>' : '')
@@ -340,6 +398,9 @@
   }
 
   window.resSetFilter = function (k) { _resFilter = k; resRenderPage(); };
+  window.resSetMode = function (m) { _resMode = m || 'all'; resRenderPage(); };
+  window.resSetTenantFilter = function (t) { _resTenant = t || 'all'; resRenderPage(); };
+  window.resResetFilters = function () { _resFilter = 'all'; _resMode = 'all'; _resTenant = 'all'; _resQuery = ''; resRenderPage(); };
   window.resSearch = function (q) { _resQuery = q || ''; var tb = document.getElementById('res-tbody'); if (tb) tb.innerHTML = resRowsHTML(resBuildRows(_resData)); };
 
   // 归属租户下拉（D3 资源级分配）。有效租户 = 资源 tenant_id → Agent tenant_id → default。
@@ -497,6 +558,9 @@
     var d = document.createElement('div');
     d.id = 'res-drawer';
     d.className = 'res-drawer';
+    // 抽屉宽度档位（IA 设计稿 6.1）：对象详情内容列数多（档案/版本/采集目标/最近数据/动作/过程记录），
+    // 挂 xl 宽详情档；轻量抽屉（修复草案三段、卸载确认）用 l/m 档。
+    d.setAttribute('data-w', 'xl');
     d.innerHTML = resDrawerHTML(r);
     document.body.appendChild(m);
     document.body.appendChild(d);
@@ -711,10 +775,13 @@
         + '　当前租户「' + rEsc((window._tenantCodes || {})[tenant] || tenant) + '」：<b>' + totalT + '</b> 个已落地目标</div>';
 
       h += polGroup('agent', '平台能力（Agent 侧采集）', '随 SAgent 一起部署的本地采集能力，多为地基能力', agentAb);
-      h += polGroup('remote', '远端接入能力（Proxy 侧采集）', '部署在 Proxy 节点远程采集中间件，按目标端口探测', remoteAb);
-      h += '<div style="margin-top:8px;font-size:11px;color:var(--muted)">🔌 修改采集参数 / 频率：资源行「详情」→ 改采集配置；新增能力走「资源与接入 → + 接入新资源」三步向导。</div>';
+      h += polGroup('remote', '远端接入能力（Proxy 侧采集）', '部署在 Proxy 节点远程采集中介件，按目标端口探测', remoteAb);
+      // 能力默认间隔映射（预演卡片要用：旧值取能力 params 里 interval 的 default）
+      window._capAbilities = abilities;
+      window._capTargets = targets;
+      h += '<div style="margin-top:8px;font-size:11px;color:var(--muted)">🔌 修改采集参数 / 频率：对象行「详情」→ 改采集配置；新增能力走「接入中心 → ＋ 接入新对象」向导。</div>';
 
-      el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:10px">' + h + '</div>';
+      el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:10px">' + h + '</div>' + polPreviewCard(abilities);
     }).catch(function () {
       el.innerHTML = '<div style="color:#991b1b;font-size:12px;padding:12px">采集策略加载失败</div>';
     });
@@ -741,6 +808,83 @@
     });
     return h + '</div>';
   }
+
+  // ---------- 策略预演（IA 设计稿 ⑥ 页面卡 + 6.3 组件）----------
+  // 三问必答，回答不全不放行：01 影响哪些目标？02 成本区间？03 如何验收？
+  // 交互红线：只读不写——「转为变更提案」是唯一出口；diff 快照须随变更单持久化（验收用同一快照对照）。
+  function polPreviewCard(abilities) {
+    var opts = (abilities || []).map(function (a) {
+      return '<option value="' + rEsc(a.id) + '">' + rEsc(a.name || a.id) + '</option>';
+    }).join('');
+    var h = '<div class="card" style="margin-top:14px;width:100%"><div class="card-hd">🧪 策略预演'
+      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">三问必答，回答不全不放行 · 只读不写，「转为变更提案」是唯一出口</span></div><div class="card-bd">';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12px">'
+      + '<span>采集能力</span><select id="pp-ability" style="padding:5px 8px;border:0.5px solid var(--border);border-radius:6px;font-size:12px">' + opts + '</select>'
+      + '<span>目标间隔</span><input id="pp-interval" placeholder="如 15s / 1m" style="padding:5px 8px;border:0.5px solid var(--border);border-radius:6px;font-size:12px;width:120px">'
+      + '<button class="btn btn-p btn-sm" onclick="polPreviewRun()">预演</button></div>';
+    h += '<div id="pp-out" style="margin-top:10px;font-size:12px;color:var(--muted)">选一个采集能力并填写目标间隔后点「预演」——预演会展开逐字段 diff、受影响目标清单与采样率对比；三问答不全不放行。</div>';
+    h += '</div></div>';
+    return h;
+  }
+
+  // 间隔字符串 → 秒（15s / 1m / 1h；解析不出来返回 0，预演按"回答不全"处理）
+  function polIvSec(s) {
+    var m = String(s == null ? '' : s).trim().match(/^(\d+)\s*(s|sec|秒|m|min|分|h|hour|小时)?$/i);
+    if (!m) return 0;
+    var n = parseInt(m[1], 10) || 0;
+    var u = (m[2] || 's').toLowerCase();
+    if (u === 'm' || u === 'min' || u === '分') n *= 60;
+    else if (u === 'h' || u === 'hour' || u === '小时') n *= 3600;
+    return n;
+  }
+  function polRate(sec) { return sec > 0 ? (60 / sec) : 0; }
+
+  window.polPreviewRun = function () {
+    var out = document.getElementById('pp-out');
+    if (!out) return;
+    var abId = (document.getElementById('pp-ability') || {}).value || '';
+    var nvRaw = ((document.getElementById('pp-interval') || {}).value || '').trim();
+    var ab = (window._capAbilities || []).filter(function (a) { return a.id === abId; })[0];
+    if (!ab) { out.style.color = 'var(--error)'; out.textContent = '采集能力不存在'; return; }
+    var nv = polIvSec(nvRaw);
+    if (!nv) { out.style.color = 'var(--error)'; out.textContent = '目标间隔无法解析（示例：15s / 1m）——第 2、3 问回答不了，不放行'; return; }
+    // 旧值 = 能力默认间隔（params 里 name==='interval' 的 default）
+    var oldRaw = '';
+    (ab.params || []).forEach(function (p) { if (p.name === 'interval' && p.default) oldRaw = String(p.default); });
+    var ov = polIvSec(oldRaw);
+    var tgs = (window._capTargets || []).filter(function (t) {
+      return t.type === abId && (!window.tenantVisible || window.tenantVisible(t));
+    });
+    var maxR = Math.max(polRate(ov), polRate(nv)) || 1;
+    var h = '';
+    // 第 1 问：影响哪些目标（+ 逐字段 diff）
+    h += '<div style="margin-bottom:8px"><b>01 影响哪些目标？</b>　' + (tgs.length ? tgs.length + ' 个目标' : '0 个目标（当前租户下无该能力的已落地目标）')
+      + '　<span style="color:var(--muted)">diff：间隔 ' + rEsc(oldRaw || '—') + ' → ' + rEsc(nvRaw) + '</span></div>';
+    h += '<table style="font-size:11.5px;margin-bottom:8px"><thead><tr><th>字段</th><th>旧值</th><th></th><th>新值</th><th>影响</th></tr></thead><tbody>'
+      + '<tr><td>采集间隔</td><td style="background:#fff0ee;text-decoration:line-through">' + rEsc(oldRaw || '—') + '</td><td>→</td>'
+      + '<td style="background:#e9f5f2"><b>' + rEsc(nvRaw) + '</b></td><td>' + tgs.length + ' 个目标</td></tr>'
+      + '</tbody></table>';
+    // 第 2 问：成本区间（理论频次，非实测）
+    h += '<div style="margin-bottom:8px"><b>02 成本区间？</b>　理论频次 ' + (polRate(ov) ? polRate(ov).toFixed(1) : '—') + ' → ' + polRate(nv).toFixed(1)
+      + ' samples/min/目标　<span style="color:var(--warning,#b45309)">非实测，不承诺 CPU/带宽</span></div>';
+    h += '<div style="margin-bottom:8px;font-size:11.5px">'
+      + '<div style="display:flex;align-items:center;gap:8px"><span style="width:56px">变更前</span><div style="flex:1;height:7px;border-radius:4px;background:var(--border,#e3eaee);overflow:hidden"><div style="width:' + Math.round(polRate(ov) / maxR * 100) + '%;height:100%;background:#8aa0a6"></div></div><span style="white-space:nowrap">' + (polRate(ov) ? polRate(ov).toFixed(1) : '—') + '/min/目标</span></div>'
+      + '<div style="display:flex;align-items:center;gap:8px"><span style="width:56px">变更后</span><div style="flex:1;height:7px;border-radius:4px;background:var(--border,#e3eaee);overflow:hidden"><div style="width:' + Math.round(polRate(nv) / maxR * 100) + '%;height:100%;background:var(--primary)"></div></div><span style="white-space:nowrap">' + polRate(nv).toFixed(1) + '/min/目标</span></div></div>';
+    // 第 3 问：如何验收
+    h += '<div style="margin-bottom:8px"><b>03 如何验收？</b>　等待 ≥2 个采集窗口，由对账引擎（recon）对比变更前后命中样本数——'
+      + '<b>applied ≠ verified</b>，执行成功不代表验收通过</div>';
+    // 受影响目标（折叠展开）
+    h += '<details style="margin-bottom:8px"><summary style="cursor:pointer;font-size:12px">受影响目标 ' + tgs.length + ' 个 · 点击展开</summary>'
+      + '<div style="margin-top:6px;font-size:11.5px;color:var(--muted)">'
+      + (tgs.length ? tgs.map(function (t) {
+        return '<div>' + rEsc(t.name) + ' · <code>' + rEsc(t.address) + '</code>' + (t.agent_id ? ' · 承载 ' + rEsc(t.agent_id) : ' · 未分派');
+      }).join('') : '（无）')
+      + '</div></details>';
+    h += '<div style="margin-top:6px;font-size:11px;color:var(--muted)">预检未通过的目标单独分组、不计入可执行目标数；diff 快照随变更单持久化，验收用同一快照对照（禁止用当前配置事后反推）。</div>';
+    h += '<div style="margin-top:8px"><button class="btn btn-p btn-sm" onclick="toast(\'预演通过 · 转为变更提案（含 diff 快照）—— 执行走变更中心预演→批准→执行\',\'ok\')">预演通过 · 转为变更提案（含 diff 快照）</button></div>';
+    out.style.color = '';
+    out.innerHTML = h;
+  };
 
   // 能力与策略合页（采集策略 / 采集插件 / 指标目录），低频治理字段留在各自页内
   window.renderCapabilities = function () {

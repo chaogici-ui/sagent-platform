@@ -211,6 +211,12 @@ function renderTasks() {
                 el.style.boxShadow = old; el.style.borderColor = oldB;
               }, 2200);
             };
+            // 修复草案明细就地展开/收起（只读预览，不产生任何写操作）
+            globalThis.__sloDraftToggle = function (i) {
+              var el = document.getElementById('recon-draft-d' + i);
+              if (!el) return;
+              el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+            };
             evWrap.innerHTML = globalThis.buildEvidenceChainHTML(dE);
           }
           var tgRes = {};
@@ -325,17 +331,36 @@ function renderTasks() {
             else if (!staleList.length) { db.innerHTML = '✅ 当前无断采目标，无需生成草案'; }
             else {
               db.style.textAlign = 'left';
-              db.innerHTML = staleList.map(function (t) {
+              // 三段式草案（IA 设计稿·变更中心「修复草案复核」同构）：01 事实 / 02 推断·待验证 / 03 缺失证据。
+              // 采集健康页只做只读预览（「查看草案」就地展开），复核与转变更的唯一点在变更中心（裁决 2 / 规则 3）。
+              db.innerHTML = staleList.map(function (t, i) {
                 var ag = agents.filter(function (a) { return a.id === t.agent_id })[0];
                 var nowS2 = Math.floor(Date.now() / 1000);
                 var online = ag && ((ag.status === 'healthy' || ag.status === 'running') || (ag.last_seen && (nowS2 - ag.last_seen) <= 120));
+                var fact = online
+                  ? '目标 ' + escHtml(t.name) + ' 目录声明应采，近 10min VM 无样本；承载 Agent ' + escHtml(t.agent_id || '—') + ' 心跳在线（来源：recon 对账 + 心跳）'
+                  : '目标 ' + escHtml(t.name) + ' 近 10min 无样本，且承载 Agent 心跳已过期——无法区分「目标故障」与「链路中断」（证据不足）';
+                var guess = online
+                  ? '推测采集插件进程异常退出，或目标端拒绝连接（<b>推断，未证实</b>）'
+                  : '推测为网络/主机侧中断，非采集配置问题（<b>推断，未证实</b>）';
+                var lack = online
+                  ? '缺插件进程日志与目标端连接日志（需登机核实）'
+                  : '缺 Agent 侧日志与网络连通性证据（需登机核实）';
                 var suggest = online
-                  ? '承载 Agent 在线但 ' + escHtml(t.plugin) + ' 无数据上报 → 建议检查目标 ' + escHtml(t.address) + ' 连通性与采集进程状态'
+                  ? '承载 Agent 在线但 ' + escHtml(t.plugin || '') + ' 无数据上报 → 建议检查目标 ' + escHtml(t.address) + ' 连通性与采集进程状态'
                   : '承载 Agent 心跳过期 → 建议先恢复网络/心跳，恢复后采集通常自动继续（未证实失败，先核实再动手）';
-                return '<div style="display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--border,#eee);font-size:12.5px">'
+                return '<div style="padding:6px 0;border-bottom:1px solid var(--border,#eee);font-size:12.5px">'
+                  + '<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">'
                   + '<b style="white-space:nowrap">' + escHtml(t.name) + '</b>'
-                  + '<span style="flex:1;color:var(--muted)">' + suggest + '</span>'
-                  + '<a href="javascript:void(0)" onclick="goPage(\'changes\')" style="color:var(--primary);white-space:nowrap">去变更中心复核 →</a></div>';
+                  + '<span style="flex:1;min-width:220px;color:var(--muted)">' + suggest + '</span>'
+                  + '<button class="btn btn-o btn-sm" style="white-space:nowrap" onclick="__sloDraftToggle(' + i + ')">查看草案</button>'
+                  + '<a href="javascript:void(0)" onclick="goPage(\'changes\')" style="color:var(--primary);white-space:nowrap">去变更中心复核 →</a></div>'
+                  + '<div id="recon-draft-d' + i + '" style="display:none;margin-top:6px;padding:8px 10px;background:var(--bg2,#f5f7f8);border-radius:6px;font-size:12px;line-height:1.8">'
+                  + '<div><b>01 事实</b>　' + fact + '</div>'
+                  + '<div><b>02 推断 · 待验证</b>　' + guess + '</div>'
+                  + '<div><b>03 缺失证据</b>　' + lack + '</div>'
+                  + '<div style="margin-top:6px;font-size:11px;color:var(--muted)">模板输出不是 evidence；复核与转变更只在变更中心（规则 3）。</div>'
+                  + '</div></div>';
               }).join('')
                 + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">草案 = 模板建议，不是 evidence；本页不可执行任何修复动作，复核与转变更只在变更中心（规则 3）。</div>';
             }
@@ -1196,41 +1221,75 @@ function mdRender(md) {
         html += '<input placeholder="搜索目标..." oninput="targetFilter()" style="width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px" id="target-search">';
         html += '<select onchange="targetFilter()" id="target-type" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部类型</option><option value="mysql">MySQL</option><option value="redis">Redis</option><option value="kafka">Kafka</option><option value="elasticsearch">Elasticsearch</option><option value="clickhouse">ClickHouse</option><option value="http">HTTP</option></select>';
         html += '</div>';
-        html += '<table style="font-size:12px"><thead><tr><th>目标名称</th><th>类型</th><th>地址</th><th>所属资源</th><th>分派 Agent</th><th>插件</th><th>连通性</th><th>操作</th></tr></thead><tbody id="target-tbody">';
-        html += '</tbody></table></div></div>';
+        // IA 设计稿·采集目标页矩阵列定义：目标 / 插件·策略 / 间隔 / 分派 Agent / 承载 / 状态 / 操作
+        // （远程采集专项另要求远程目标显示承载采集机与池——池化派发属 L1HA-2 待立项，此处只显示承载机，不放假池）
+        html += '<table class="mx-table" style="font-size:12px"><thead><tr><th>目标</th><th>插件 · 策略</th><th>间隔</th><th>分派 Agent</th><th>承载</th><th>状态</th><th>操作</th></tr></thead><tbody id="target-tbody">';
+        html += '</tbody></table>';
+        html += '<div style="margin-top:10px;font-size:11px;color:var(--muted)">矩阵只读（IA 规则 3：目标写操作只在接入中心）。'
+          + '<b>变更中</b>的目标行 amber 底色并挂变更单号；远程目标的「承载」列显示当前承载采集机，漂移记录见采集健康页归属迁移。</div>';
+        html += '</div></div>';
         document.getElementById("main-content").innerHTML = html;
         Promise.all([
           fetch(API+'/targets').then(function(r){return r.json()}).catch(function(){ return []; }),
-          fetch(API+'/resources').then(function(r){return r.json()}).catch(function(){ return {}; })
+          fetch(API+'/resources').then(function(r){return r.json()}).catch(function(){ return {}; }),
+          fetch(API+'/onboard/flows').then(function(r){return r.json()}).catch(function(){ return {}; })
         ]).then(function(out){
           window._targets = out[0] || [];
           var map = {};
           ((out[1]||{}).resources||[]).forEach(function(x){ map[x.id] = x.name || x.ip || x.id; });
           window._resMap = map;
+          // 变更中判定：目标挂的接入流水线仍在跑（running/stalled/blocked）→ 该行标记变更中（设计稿样式要点）
+          var flows = {};
+          (((out[2]||{}).flows)||[]).forEach(function(f){ flows[f.id] = f; });
+          window._flowMap = flows;
           targetRender();
         });
+      }
+      // 目标采集间隔：参数由插件 params 驱动（params_json.interval），未声明则显示「随接入参数」
+      function targetInterval(tg) {
+        try { var p = JSON.parse(tg.params_json || '{}'); if (p && p.interval) return String(p.interval); } catch (e) {}
+        return tg.interval || '';
       }
       function targetRender() {
         var q = ((document.getElementById('target-search')||{}).value||'').toLowerCase();
         var t = (document.getElementById('target-type')||{}).value||'all';
         var filtered = (window._targets||[]).filter(function(tg){
-          return (t==='all'||tg.type===t) && (!q || tg.name.toLowerCase().indexOf(q)>=0||tg.address.indexOf(q)>=0);
+          return (t==='all'||tg.type===t) && (!q || (tg.name||'').toLowerCase().indexOf(q)>=0||(tg.address||'').indexOf(q)>=0);
         });
         var tbody = document.getElementById('target-tbody');
         if (!tbody) return;
-        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">尚无采集目标——先到「接入中心」完成接入 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">去接入中心 →</a></td></tr>'; return; }
+        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">尚无采集目标——先到「接入中心」完成接入 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">去接入中心 →</a></td></tr>'; return; }
+        var flowMap = window._flowMap || {};
         tbody.innerHTML = filtered.map(function(tg){
           var res = tg.last_test_result||'';
+          // 变更中（设计稿样式要点）：该目标挂的接入/升级流水线仍在跑 → 行 amber 底 + 单号徽章
+          var fl = tg.flow_id ? flowMap[tg.flow_id] : null;
+          var inChange = fl && (fl.status==='running' || fl.status==='stalled' || fl.status==='blocked');
+          var rowStyle = inChange ? ' style="background:var(--amber-soft,#fff5df)"' : '';
           var resCell = !tg.resource_id ? '<span style="color:var(--muted)">—</span>'
             : ((window._resMap||{})[tg.resource_id]
-              ? '<a href="javascript:void(0)" onclick="openResourceDrawer(\''+escHtml(tg.resource_id)+'\')" style="color:var(--primary)" title="打开资源详情">'+escHtml((window._resMap||{})[tg.resource_id])+'</a>'
-              : '<span style="color:var(--muted)" title="台账里已没有这个资源（资源被删除后目标残留）">'+escHtml(tg.resource_id)+'（资源已删除）</span>');
+              ? '<a href="javascript:void(0)" onclick="openResourceDrawer(\''+escHtml(tg.resource_id)+'\')" style="color:var(--primary)" title="打开对象详情">'+escHtml((window._resMap||{})[tg.resource_id])+'</a>'
+              : '<span style="color:var(--muted)" title="台账里已没有这个对象（对象被删除后目标残留）">'+escHtml(tg.resource_id)+'（对象已删除）</span>');
+          // 承载：远程目标由采集机（proxy）承载；本机目标即本机采集。池化派发属 L1HA-2 待立项，此处不显示假池名
+          var ag = null;
+          (agents||[]).forEach(function(a){ if (a.id===tg.agent_id) ag=a; });
+          var carry;
+          if (!tg.agent_id) carry = '<span style="color:var(--muted)">未分派</span>';
+          else if (ag && ag.type==='proxy') carry = '<span class="badge" style="background:#e0f2f1;color:#0b6e66">采集机</span> <a href="javascript:void(0)" onclick="openDetailById(\''+escHtml(tg.agent_id)+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>';
+          else carry = '<span class="badge" style="background:#f0f0f0;color:#666">本机采集</span> <a href="javascript:void(0)" onclick="openDetailById(\''+escHtml(tg.agent_id)+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>';
+          var iv = targetInterval(tg);
           var st = res ? (res.indexOf('失败')===0
             ? '<span class="badge" style="background:#fee2e2;color:var(--error)" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>'
             : '<span class="badge b-h" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>')
             : '<span class="badge b-o">未测试</span>';
+          if (inChange) st += ' <span class="badge" style="background:#fff5df;color:#946011">变更中 flow-'+fl.id+'</span>';
           var traceBtn = tg.flow_id ? ' <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="openOnboardFlow('+tg.flow_id+')" title="回到产生这个目标的接入流水线，看它是怎么走过来的">🧭 接入过程</button>' : '';
-          return '<tr><td>'+escHtml(tg.name)+'</td><td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(tg.type)+'</span></td><td><code>'+escHtml(tg.address)+'</code></td><td>'+resCell+'</td><td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+tg.agent_id+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td><td>'+(tg.plugin?'<span class="badge" style="background:#f0f0f0;color:#666">'+escHtml(tg.plugin)+'</span>':'-')+'</td><td>'+st+'</td><td style="white-space:nowrap"><button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetTest('+tg.id+')">测试</button>'+traceBtn+'</td></tr>';
+          return '<tr'+rowStyle+'><td>'+escHtml(tg.name)+'<div style="font-size:11px;color:var(--muted)"><code>'+escHtml(tg.address)+'</code>'+(resCell?' · 对象 '+resCell:'')+'</div></td>'
+            + '<td><span class="badge" style="background:#e0f2f1;color:#0b6e66">'+escHtml(tg.plugin||tg.type)+'</span><div style="font-size:11px;color:var(--muted)">'+escHtml(tg.type||'')+'</div></td>'
+            + '<td>'+(iv?'<code style="font-size:11px">'+escHtml(iv)+'</code>':'<span style="font-size:11px;color:var(--muted)">随接入参数</span>')+'</td>'
+            + '<td>'+(tg.agent_id?'<a href="javascript:void(0)" onclick="openDetailById(\''+escHtml(tg.agent_id)+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>':'<span style="color:var(--muted)">未分派</span>')+'</td>'
+            + '<td>'+carry+'</td><td>'+st+'</td>'
+            + '<td style="white-space:nowrap"><button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="targetTest('+tg.id+')">测试</button>'+traceBtn+'</td></tr>';
         }).join('');
       }
       function targetFilter() { targetRender(); }
@@ -2204,6 +2263,16 @@ function mdRender(md) {
           html += '<tr><td>Grafana 地址</td><td><code>' + (cfg.grafana_url || '-') + '</code></td><td>环境变量 <code>GRAFANA_PUBLIC_URL</code></td></tr>';
           html += '</tbody></table>';
           html += '<p style="color:var(--muted);font-size:12px;margin-top:10px">服务端监听地址、Agent 容器前缀、CORS 白名单等由容器环境变量注入（见 <code>deploy/docker/.env.example</code>），不在界面暴露以免误改生产配置。</p>';
+          html += '</div></div>';
+          // 网络域与端点（IA 设计稿 ⑩）：控制通道单向出站白名单 + VIP 段预留登记——只读展示架构约定，
+          // 不给写入口（改网络策略须先改 SPEC 与 compose，不在界面暴露以免误改生产网络）。
+          html += '<div class="card" style="margin-top:14px"><div class="card-hd">🌐 网络域与端点 <span style="font-weight:400;font-size:11px;color:var(--muted)">控制通道单向出站 · 白名单中继 · 只读</span></div><div class="card-bd">';
+          html += '<table><thead><tr><th style="width:170px">域</th><th>约定</th><th style="width:200px">来源</th></tr></thead><tbody>';
+          html += '<tr><td>SAgent → L0</td><td>全部出站，唯一入口 <code>l1-gateway:8460</code>（白名单路径中继）；L0 与 SAgent 零直连</td><td>SPEC-D5 网络域收敛</td></tr>';
+          html += '<tr><td>L0 → L1</td><td>拉模式：L1 主动出站拉取任务，L0 不主动连 L1（L0 零配置，扩缩容免改）</td><td>SPEC-L1HA 决策</td></tr>';
+          html += '<tr><td>VIP 段预留</td><td>SAgent 入口以 VIP 承接而非 DNS（换 IP 不改任何配置）——<span style="color:var(--warning,#b45309)">LB 容器化尚未落地，已登记待立项</span></td><td>SPEC-L1HA 决策</td></tr>';
+          html += '</tbody></table>';
+          html += '<p style="color:var(--muted);font-size:12px;margin-top:10px">以上为架构约定（只读）；改网络策略须先改 SPEC 与 compose——本页不暴露写入口。</p>';
           html += '</div></div>';
           html += '<div class="card" style="margin-top:14px"><div class="card-hd">🏢 租户与权限 <button class="btn btn-o btn-sm" style="float:right" onclick="tenantNewPrompt()">＋ 新建租户</button></div><div class="card-bd"><div id="tenant-root" style="min-height:20px;color:var(--muted)">加载租户…</div></div></div>';
           html += '</div></div>';

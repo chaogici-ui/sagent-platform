@@ -508,12 +508,82 @@ function renderOnboardCenter() {
 //  为统一变更时间线。每单含编码 / 类型 / 目标 / 状态 / 时间 / 步骤证据。
 //  真实记录聚合，无伪审批入口（原生型人工批准由流水线人工步骤承担，符合原型"不伪造"精神）。
 // ===================================================================
+// ===================================================================
+//  修复草案复核（IA 设计稿 ⑤ 页面卡 + 裁决 2）：全站唯一复核入口。
+//  草案由对账异常模板自动生成（采集健康页只作只读预览）；复核与「转为变更单」只在这里发生。
+//  三段式结构固定：01 事实 / 02 推断·待验证 / 03 缺失证据——模板输出不是 evidence，人工确认才可转变更。
+// ===================================================================
+window.chRenderDraft = function () {
+  var box = document.getElementById('ch-draft-body');
+  if (!box) return;
+  Promise.all([
+    fetch(API + '/recon').then(function (r) { return r.json(); }).catch(function () { return null; }),
+    fetch(API + '/agents').then(function (r) { return r.json(); }).catch(function () { return []; })
+  ]).then(function (rs) {
+    var d = rs[0], raw = rs[1];
+    var ags = Array.isArray(raw) ? raw : ((raw || {}).agents || []);
+    box.style.textAlign = '';
+    if (!d || !d.summary) { box.textContent = '⚠ 对账引擎暂不可用，无法生成草案'; return; }
+    if (d.summary.vm_reachable === false) { box.textContent = '— VM 不可达，本轮无法生成草案（不猜测、不放假结论）'; return; }
+    var stale = d.stale || [];
+    if (!stale.length) { box.textContent = '✅ 当前无断采目标，没有待复核的草案'; return; }
+    var nowS = Math.floor(Date.now() / 1000);
+    box.style.textAlign = 'left';
+    window._chDrafts = stale.slice(0, 5);
+    box.innerHTML = window._chDrafts.map(function (t, i) {
+      var ag = null;
+      ags.forEach(function (a) { if (a.id === t.agent_id) ag = a; });
+      var online = ag && ((ag.status === 'healthy' || ag.status === 'running') || (ag.last_seen && (nowS - ag.last_seen) <= 120));
+      var fact = online
+        ? '目标 ' + obEscape(t.name) + ' 目录声明应采，近 10min VM 无样本；承载 Agent ' + obEscape(t.agent_id || '—') + ' 心跳在线'
+        : '目标 ' + obEscape(t.name) + ' 近 10min VM 无样本，且承载 Agent 心跳已过期——无法区分「目标故障」与「链路中断」';
+      var guess = online ? '采集插件进程异常退出，或目标端拒绝连接' : '网络/主机侧中断，不是采集配置问题';
+      var lack = online ? '插件进程日志、目标端连接日志（需登机核实）' : 'Agent 侧日志、网络连通性证据（需登机核实）';
+      return '<div style="padding:10px 0;border-bottom:1px solid var(--border,#eee)">'
+        + '<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px">'
+        + '<b style="font-size:13px">' + obEscape(t.name) + '</b>'
+        + '<span class="badge" style="background:#fff5df;color:#946011">待复核</span>'
+        + '<span style="font-size:11px;color:var(--muted);margin-left:auto">来源：采集健康页对账异常自动生成</span></div>'
+        + '<div style="font-size:12.5px;line-height:1.9">'
+        + '<div><b>01 事实</b>　' + fact + '</div>'
+        + '<div><b>02 推断 · 待验证</b>　' + guess + '（<b>推断，未证实</b>）</div>'
+        + '<div><b>03 缺失证据</b>　' + lack + '</div></div>'
+        + '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        + '<button class="btn btn-p btn-sm" onclick="chDraftAck(' + i + ',\'confirm\')">确认无误 · 转为变更单</button>'
+        + '<button class="btn btn-o btn-sm" onclick="chDraftAck(' + i + ',\'reject\')">驳回</button>'
+        + '<span style="font-size:11px;color:var(--muted)">模板输出不是 evidence，人工勾选确认后才可转变更（结论写审计）</span></div></div>';
+    }).join('')
+      + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">草案由对账异常模板生成（自动、只读）；此处是全站唯一的复核与转变更入口——采集健康页只作只读预览（裁决 2 / 规则 3）。'
+      + ' 确认后落审计留痕，实际执行仍走本页既有预演→批准→执行→验收流程。</div>';
+  });
+};
+
+// 复核结论落审计（POST /api/recon/draft/ack）。confirm=转为变更单 / reject=驳回；
+// 本动作只登记结论，不直接执行修复——执行走变更中心流水线，避免绕过三段闸门。
+window.chDraftAck = function (i, decision) {
+  var t = (window._chDrafts || [])[i];
+  if (!t) return;
+  if (decision === 'confirm' && !window.confirm('确认草案结论并转为变更单？\n\n' + (t.name || '') + '\n\n草案是模板建议（不是 evidence），本次复核结论将写入审计；实际执行仍走变更中心流程。')) return;
+  fetch(API + '/recon/draft/ack', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_id: String(t.id == null ? '' : t.id), target_name: t.name || '', decision: decision })
+  }).then(function (r) { return r.json(); }).then(function (o) {
+    if (o && o.error) { toast('复核登记失败：' + o.error, 'err'); return; }
+    toast((decision === 'confirm' ? '已确认并登记（审计已留痕）：' : '已驳回：') + (t.name || ''), 'ok');
+    window.chRenderDraft();
+  }).catch(function (e) { toast('复核登记失败：' + (e && e.message || e), 'err'); });
+};
+
 window.renderChanges = function () {
   var el = document.getElementById('main-content');
   el.innerHTML = '<div class="card"><div class="card-hd">📋 变更中心'
     + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">谁动了它、怎么走过来的？统一变更时间线（过程聚合视图，合规原始留痕见审计日志）</span>'
     + '<button class="btn btn-p btn-sm" style="float:right" onclick="openOnboardNew()">➕ 新接入</button></div>'
-    + '<div class="card-bd" id="ch-body"><div style="text-align:center;color:var(--muted);padding:20px">⏳ 汇总变更流水线与审计…</div></div></div>';
+    + '<div class="card-bd" id="ch-body"><div style="text-align:center;color:var(--muted);padding:20px">⏳ 汇总变更流水线与审计…</div></div></div>'
+    + '<div class="card" style="margin-top:16px" id="ch-draft"><div class="card-hd">🩹 修复草案复核 '
+    + '<span style="font-weight:400;font-size:11px;color:var(--muted)">全站唯一复核入口 · 草案是模板建议不是 evidence · 复核结论写审计</span></div>'
+    + '<div class="card-bd" id="ch-draft-body" style="text-align:center;color:var(--muted);padding:16px">⏳ 拉取对账草案…</div></div>';
+  window.chRenderDraft();
   Promise.all([
     fetch(API + '/onboard/flows').then(function (r) { return r.json(); }).catch(function () { return {}; }),
     fetch(API + '/audit?limit=1000').then(function (r) { return r.json(); }).catch(function () { return []; }),

@@ -133,6 +133,22 @@ globalThis.buildEvidenceChainHTML = function (d) {
   var agentsArr = (d.agents || []).filter(function (a) { return window.tenantVisible(a); }); // D3：证据链按当前租户隔离
   var now = Math.floor(Date.now() / 1000);
   var HEARTBEAT_TTL = 120; // 心跳新鲜度阈值(秒)：last_seen 距今超过该值视为 Agent 离线
+  var RECON_TTL = 240;     // 对账证据有效期(秒)：超过视为对账停摆，证据降级为未知
+  var STATS_TTL = 300;     // 采样证据有效期(秒)：与采集健康"近 5 分钟有样本"口径一致
+  // 证据时间解析：支持 epoch 秒与 'YYYY-MM-DD HH:MM:SS'（本地时区）两种来源
+  function toSec(v) {
+    if (v == null || v === '') return 0;
+    if (typeof v === 'number') return v;
+    var n = parseInt(v, 10);
+    if (String(v).indexOf('-') < 0 && isFinite(n) && n > 1e9) return n;
+    var t = new Date(String(v).replace(' ', 'T')).getTime();
+    return isFinite(t) ? Math.floor(t / 1000) : 0;
+  }
+  function hm(sec) {
+    if (!sec) return '';
+    try { return new Date(sec * 1000).toLocaleTimeString('zh-CN', { hour12: false }); } catch (e) { return ''; }
+  }
+  function expired(until) { return until > 0 && now > until; }
   var alive = agentsArr.filter(function (a) {
     var ls = a && a.last_seen;
     return ls && (now - ls) <= HEARTBEAT_TTL;
@@ -157,13 +173,31 @@ globalThis.buildEvidenceChainHTML = function (d) {
     ? (cfgBad ? cfgOk + '/' + cfgKnown + ' 配置对齐' : cfgKnown + ' 个配置全部对齐')
     : '配置版本证据待接入';
   var e5Ok = statsN > 0 && vmOk;
+  // ---- 证据时效（IA 设计稿：每环显示 状态 · 证据时间 · 有效至；过期证据自动降级为「未知」）----
+  var atHeartbeat = 0;
+  agentsArr.forEach(function (a) { var ls = toSec(a && a.last_seen); if (ls > atHeartbeat) atHeartbeat = ls; });
+  var atRecon = toSec(d.recon && (d.recon.generated_at || d.recon.generated_at_ts));
+  var minAge = null;
+  Object.keys(d.stats || {}).forEach(function (k) {
+    var s = d.stats[k];
+    if (!s || s.age_sec == null || s.age_sec < 0) return;
+    if (minAge === null || s.age_sec < minAge) minAge = s.age_sec;
+  });
+  var atStats = minAge === null ? 0 : (now - minAge);
+  function untilOf(at, ttl) { return at ? at + ttl : 0; }
+  // 证据过期 → 明确状态降级为「未知」（不是失败，也不是健康）
+  function degrade(ok, until) { return (ok === true && expired(until)) ? null : ok; }
+  var u1 = untilOf(atHeartbeat, HEARTBEAT_TTL), u3 = untilOf(atRecon, RECON_TTL),
+      u4 = untilOf(atStats, STATS_TTL), u5 = untilOf(atRecon, RECON_TTL);
+  var d1 = degrade(e1Ok, u1), d3 = degrade(e3Ok, u3), d4 = degrade(e4Ok, u4),
+      d5 = degrade(vmOk, u5), d6 = degrade(e5Ok, Math.min(u4 || Infinity, u5 || Infinity));
   var chain = [
-    { k: 'heartbeat', label: '① 对象连接', ok: e1Ok, detail: agentsArr.length ? alive + ' / ' + agentsArr.length + ' 在线(≤' + HEARTBEAT_TTL + 's)' : '无 Agent' },
-    { k: 'config', label: '② 配置版本', ok: e2Ok, detail: e2Detail },
-    { k: 'source', label: '③ 源采集', ok: e3Ok, detail: '应采 ' + targetsN + ' · 断采 ' + staleN },
-    { k: 'scrape', label: '④ 区域抓取', ok: e4Ok, detail: e4Ok ? statsN + ' 个目标有采集采样' : '采样证据待接入' },
-    { k: 'transport', label: '⑤ 区域传输', ok: vmOk, detail: vmOk ? 'VM 可达' : 'VM 无响应' },
-    { k: 'central', label: '⑥ 中央入库', ok: e5Ok, detail: e5Ok ? '稳定采集中' : '待确认采样' }
+    { k: 'heartbeat', label: '① 对象连接', ok: d1, detail: agentsArr.length ? alive + ' / ' + agentsArr.length + ' 在线(≤' + HEARTBEAT_TTL + 's)' : '无 Agent', at: atHeartbeat, until: u1 },
+    { k: 'config', label: '② 配置版本', ok: e2Ok, detail: e2Detail, at: 0, until: 0 },
+    { k: 'source', label: '③ 源采集', ok: d3, detail: '应采 ' + targetsN + ' · 断采 ' + staleN, at: atRecon, until: u3 },
+    { k: 'scrape', label: '④ 区域抓取', ok: d4, detail: d4 ? statsN + ' 个目标有采集采样' : (statsN ? '采样证据已过期' : '采样证据待接入'), at: atStats, until: u4 },
+    { k: 'transport', label: '⑤ 区域传输', ok: d5, detail: d5 ? 'VM 可达' : (vmOk ? 'VM 可达但证据过期' : 'VM 无响应'), at: atRecon, until: u5 },
+    { k: 'central', label: '⑥ 中央入库', ok: d6, detail: d6 ? '稳定采集中' : (e5Ok ? '入库证据已过期' : '待确认采样'), at: Math.max(atStats, 0), until: Math.min(u4 || 0, u5 || 0) }
   ];
   var h = '<div class="ev-chain">';
   chain.forEach(function (c) {
@@ -184,15 +218,23 @@ globalThis.buildEvidenceChainHTML = function (d) {
       }
     }
     var click = jt ? ' style="cursor:pointer" onclick="' + jt + '"' : '';
-    h += '<div class="ev-node ' + st + '"' + click + ' title="' + esc(c.detail) + (jt ? ' · 点击逐段归因' : '') + '">'
-      + '<span class="ev-ic">' + ic + '</span><span class="ev-lb">' + esc(c.label) + '</span><span class="ev-dt">' + esc(c.detail) + '</span></div>';
+    // 证据时效小字：过期显式标注「已过期 → 未知」，不静默降级
+    var tsTxt;
+    if (!c.at) tsTxt = '证据待接入';
+    else {
+      tsTxt = '证据 ' + hm(c.at) + (c.until ? ' · 有效至 ' + hm(c.until) : '');
+      if (c.until && expired(c.until)) tsTxt += ' · 已过期 → 未知';
+    }
+    h += '<div class="ev-node ' + st + '"' + click + ' title="' + esc(c.detail) + ' · ' + esc(tsTxt) + (jt ? ' · 点击逐环归因' : '') + '">'
+      + '<span class="ev-ic">' + ic + '</span><span class="ev-lb">' + esc(c.label) + '</span><span class="ev-dt">' + esc(c.detail) + '</span>'
+      + '<span class="ev-ts" style="flex-basis:100%;font-size:10px;color:var(--muted)">' + esc(tsTxt) + '</span></div>';
   });
-  var gateOk = e1Ok !== false && e2Ok !== false && e3Ok !== false && e4Ok !== false && vmOk && e5Ok !== false;
+  var gateOk = d1 !== false && e2Ok !== false && d3 !== false && d4 !== false && d5 !== false && d6 !== false;
   h += '<div class="ev-node ev-gate" title="已应用 ≠ 已入库，六环全绿方为正常">' + (gateOk ? '采集正常 ✓' : '有缺口，逐环归因 →') + '</div></div>';
   if (!gateOk) {
     h += '<div style="margin-top:-6px;margin-bottom:14px;font-size:11.5px;color:var(--muted)">'
       + '🔼 红色/缺口环可点击，快速下钻归因：Agent 侧问题→资源页"问题"，数据侧问题→采集健康对账。'
-      + ' <span style="color:var(--warn)">"已应用 ≠ 已入库"</span>，请逐环核验；灰点环=证据缺失（未知，不是失败）。</div>';
+      + ' <span style="color:var(--warn)">"已应用 ≠ 已入库"</span>，请逐环核验；灰点环=证据缺失或已过期（降级为未知，不是失败）。</div>';
   }
   return h;
 };

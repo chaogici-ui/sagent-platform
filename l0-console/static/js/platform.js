@@ -75,7 +75,18 @@
       if (!top.length) { cb.innerHTML = '— VM 尚无 series 数据'; return; }
       cb.style.textAlign = 'left';
       var maxV = top[0].value || 1;
-      cb.innerHTML = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">VM 总 series：' + total + ' · 以下为 series 数最多的指标（治理建议：确认 label 设计，必要时收敛基数后走变更中心）</div>'
+      // 治理建议切片（IA 设计稿 ⑨）：确认治理建议 → 走变更中心执行；本页不直接改采集配置（规则 3）。
+      // 丢弃率影响必须实测确认，本页不预估具体数值（禁止假数据）。
+      var hotList = top.filter(function (m) { return m.value > 1000; });
+      var advice = '<div style="margin-top:10px;padding:8px 10px;background:var(--bg2,#f5f7f8);border-radius:6px;font-size:11.5px;line-height:1.7">'
+        + '<b>治理建议</b>　' + (hotList.length
+          ? '以下指标 series 数偏高，建议核对 label 设计（是否含高基数维度如实例 IP / Pod 名 / 请求路径），必要时收敛基数：'
+            + hotList.slice(0, 5).map(function (m) { return '<code>' + escHtml(m.name) + '</code>（' + m.value + '）'; }).join('、')
+          : '当前无 series 数超过 1000 的指标，暂不建议收敛（判定阈值：单指标 series > 1000）')
+        + '<div style="color:var(--muted);margin-top:4px">丢弃率影响须由 VM 实测确认，本页不预估具体数值；治理方案确认后走变更中心执行，本页不直接改采集配置。</div>'
+        + (hotList.length ? '<div style="margin-top:6px"><button class="btn btn-p btn-sm" onclick="toast(\'治理提案需人工确认后走变更中心执行 —— 本页不直接改采集配置（规则 3）\',\'ok\')">生成治理变更提案</button></div>' : '')
+        + '</div>';
+      cb.innerHTML = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">VM 总 series：' + total + ' · 以下为 series 数最多的指标（按指标名 TopN，实测）</div>'
         + top.map(function (m, i) {
           var w = Math.max(4, Math.round(m.value / maxV * 100));
           var hot = i === 0 && m.value > 1000;
@@ -83,7 +94,7 @@
             + '<code style="min-width:200px;overflow:hidden;text-overflow:ellipsis">' + escHtml(m.name) + '</code>'
             + '<div style="flex:1;height:7px;border-radius:4px;background:var(--border,#e3eaee);overflow:hidden"><div style="width:' + w + '%;height:100%;background:' + (hot ? 'var(--warning,#b45309)' : 'var(--primary)') + '"></div></div>'
             + '<span style="white-space:nowrap;color:var(--muted)">' + m.value + ' series' + (hot ? ' ⚠' : '') + '</span></div>';
-        }).join('');
+        }).join('') + advice;
     });
   };
 
