@@ -635,18 +635,24 @@ window.renderChanges = function () {
     });
     entries.sort(function (a, b) { return String(b.ts).localeCompare(String(a.ts)); });
 
-    var nRun = 0, nDone = 0, nFail = 0;
+    // 统计四态 + 未知必须闭合：总数 = 进行中 + 成功 + 失败 + 未知。
+    // 之前缺「未知」桶（canceled 流水线落 unknown 不计入任何桶），出现过 240 ≠ 236+2+0 的算术漏洞（A4）。
+    // 口径说明：本时间线 = 变更流水线 + 审计聚合的操作记录（启停/动作类），不是纯"变更单"——
+    // 独立变更单实体（含 diff 快照）尚待立项（策略预演「转为变更提案」目前为提示，见 resources.js 预演卡）。
+    var nRun = 0, nDone = 0, nFail = 0, nUnknown = 0;
     entries.forEach(function (x) {
       if (x.status === 'running' || x.status === 'stalled') nRun++;
       else if (x.status === 'done') nDone++;
       else if (x.status === 'failed') nFail++;
+      else nUnknown++;
     });
 
     var h = '<div class="ob-stat">';
-    h += '<div class="s"><div class="n">' + entries.length + '</div><div class="l">变更总数</div></div>';
+    h += '<div class="s" title="变更流水线 + 审计聚合的操作记录（启停/动作类），非纯变更单"><div class="n">' + (nRun + nDone + nFail + nUnknown) + '</div><div class="l">变更总数</div></div>';
     h += '<div class="s"><div class="n" style="color:var(--warn)">' + nRun + '</div><div class="l">进行中</div></div>';
     h += '<div class="s"><div class="n" style="color:var(--success)">' + nDone + '</div><div class="l">成功</div></div>';
     h += '<div class="s"><div class="n" style="color:var(--error)">' + nFail + '</div><div class="l">失败</div></div>';
+    h += '<div class="s" title="取消的流水线等无法证实结果的状态——不证实成功，也不谎报失败"><div class="n" style="color:var(--muted)">' + nUnknown + '</div><div class="l">未知</div></div>';
     h += '</div>';
 
     if (!entries.length) {

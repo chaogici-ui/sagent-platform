@@ -131,6 +131,10 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # 时区：容器默认 UTC，导致后端生成的全部 'YYYY-MM-DD HH:MM:SS' 文本时间戳
+      # （recon.generated_at / 审计 / 心跳记录）与浏览器本地时间差 8 小时，
+      # 前端证据环把正常数据链判成"已过期 → 未知"（2026-09-27 实测）。默认上海时区，可 .env 覆盖。
+      - TZ=${L0_TZ:-Asia/Shanghai}
       - VM_URL=http://victoriametrics:8428
       # 浏览器可达的 Grafana 地址（前端指标浏览 iframe/跳转用，反代/远程部署时改此值或 .env 覆盖）
       - GRAFANA_PUBLIC_URL=${GRAFANA_PUBLIC_URL:-http://localhost:3000}

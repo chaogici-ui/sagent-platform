@@ -115,7 +115,16 @@ function renderTasks() {
         // unknown ≠ failed：未知不进异常计数、不进待处理结论，只单独露出——避免把"可能只是网络断了"当成故障报警。
         var vis = agents.filter(function (a) { return window.tenantVisible(a); }); // 多租户(D3)界面隔离
         var anomaly = vis.filter(function(a){return a.status==='stopped'}); // 明确维护态（需人工恢复）
-        var unknownA = vis.filter(function(a){return a.status==='offline'||a.status==='created'});
+        // 状态未知 = offline/created，外加「status=healthy 但心跳已过期/从未心跳」——与证据环①完全同口径
+        //（HEARTBEAT_TTL=120s，见 overview.js buildEvidenceChainHTML）。此前只看 status 字段，
+        // 出现过同屏"环① 6/9 在线(≤120s)"与"✅ 全部 9 个 Agent 在线"打架（A2，2026-09-27 修复）。
+        var _nowSec = Math.floor(Date.now() / 1000);
+        var _hbTtl = 120;
+        var unknownA = vis.filter(function(a){
+          if (a.status==='offline'||a.status==='created') return true;
+          if (a.status==='stopped') return false;
+          return !a.last_seen || (_nowSec - a.last_seen) > _hbTtl;
+        });
         var html = '';
         // 页头：主问题（IA 规范——每页只回答一个问题，页头副标题即主问题）
         html += '<div class="card"><div class="card-bd" style="padding-bottom:10px"><span style="font-size:16px;font-weight:700">◫ 采集健康</span>'
@@ -2044,10 +2053,9 @@ function mdRender(md) {
         showCurrentAgents(filtered, key+'='+value);
       }
       function closeBatchModal() { document.getElementById("batch-modal").classList.remove("open"); }
-      function confirmBatch() {
-        document.getElementById("batch-modal").classList.remove("open");
-        batchOp();
-      }
+      // 批量操作两段式：batchOp 只做预览并弹确认模态框（曾直接执行，影响面最大的操作反而零确认），
+      // confirmBatch（模态框「确认执行」）才真正发动作。
+      var _batchPlan = null;
       function batchOp() {
         var scopeType = document.getElementById("batch-scope-type").value;
         var scopeVal = document.getElementById("batch-scope-val").value;
@@ -2057,12 +2065,37 @@ function mdRender(md) {
           return (a.labels||{})[scopeType]===scopeVal;
         });
         if (target.length===0) { toast("没有匹配的 Agent","err"); return; }
-        showLog("批量"+action+": "+target.length+" Agent", "ok");
-        var done=0, ok=0;
-        target.forEach(function(a) {
-          fetch(API+"/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:a.id,action:action})}).then(function(r){return r.json()}).then(function(d){
-            done++; if(d.success) ok++;
-            if(done===target.length){ toast("完成: "+ok+"/"+target.length+" 成功", ok===target.length?"ok":"err"); refresh(); if (typeof window.resRefreshAfterBatch==='function') window.resRefreshAfterBatch(); }
+        _batchPlan = { ids: target.map(function(a){return a.id;}), action: action };
+        var scopeLabel = scopeType==='type' ? '类型' : 'IDC';
+        document.getElementById("batch-modal-title").innerText = "确认批量「"+action+"」（"+target.length+" 台）";
+        document.getElementById("batch-modal-body").innerHTML =
+          '对 <b>'+escHtml(scopeLabel)+'='+escHtml(scopeVal)+'</b> 的全部 '+target.length+' 台 Agent 执行「<b>'+escHtml(action)+'</b>」：'
+          + '<div style="margin:8px 0;padding:8px;background:var(--bg,#f6f6f4);border-radius:6px;max-height:180px;overflow:auto">'
+          + target.map(function(a){ return escHtml(a.id)+' <span style="color:var(--muted)">('+(a.status||'?')+(a.last_seen?'':' · 从未心跳')+')</span>'; }).join('<br>')
+          + '</div>停止/重启会中断这些机器的采集，操作将逐台记入审计。';
+        document.getElementById("batch-modal").classList.add("open");
+      }
+      function confirmBatch() {
+        document.getElementById("batch-modal").classList.remove("open");
+        batchOpExecute();
+      }
+      function batchOpExecute() {
+        if (!_batchPlan || !_batchPlan.ids || !_batchPlan.ids.length) { toast("没有待执行的批量计划","err"); return; }
+        var ids = _batchPlan.ids, action = _batchPlan.action;
+        _batchPlan = null;
+        showLog("批量"+action+": "+ids.length+" Agent（已确认）", "ok");
+        var done=0, ok=0, failedIds=[];
+        ids.forEach(function(id) {
+          fetch(API+"/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:id,action:action})}).then(function(r){return r.json()}).then(function(d){
+            done++; if(d.success) ok++; else failedIds.push(id);
+            if(done===ids.length){
+              var msg = "完成: "+ok+"/"+ids.length+" 成功" + (failedIds.length ? " · 失败: "+failedIds.join(", ") : "");
+              toast(msg, failedIds.length?"err":"ok");
+              showLog(msg, failedIds.length?"err":"ok");
+              refresh(); if (typeof window.resRefreshAfterBatch==='function') window.resRefreshAfterBatch();
+            }
+          }).catch(function(){ done++; failedIds.push(id);
+            if(done===ids.length){ toast("完成: "+ok+"/"+ids.length+" 成功 · 失败: "+failedIds.join(", "),"err"); refresh(); }
           });
         });
       }

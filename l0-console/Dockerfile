@@ -5,7 +5,7 @@ FROM alpine:3.19
 # SAgent 安装（playbook）。openssh-client 必须显式装（alpine 不随 ansible-core 带入，
 # 缺它时 sshpass 报 "Failed to run command"，远端全部 unreachable）
 # 依赖预编译二进制（宿主机交叉编译产物 COPY 进来），不做容器内 go build（VM 内存红线）
-RUN apk add --no-cache docker-cli ansible-core sshpass openssh-client && \
+RUN apk add --no-cache docker-cli ansible-core sshpass openssh-client tzdata && \
     adduser -D -h /home/deploy deploy && \
     mkdir -p /home/deploy/l0-console && \
     chown -R deploy:deploy /home/deploy
