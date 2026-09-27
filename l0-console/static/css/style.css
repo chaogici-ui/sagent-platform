@@ -82,6 +82,9 @@ nav .nav-foot {
 .ev-ic { font-size: 13px; font-weight: 700; }
 .ev-lb { font-size: 11px; color: var(--muted); font-weight: 600; }
 .ev-dt { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 证据时效小字：column 布局下禁止 flex-basis:100%（主轴是纵向，会被当成"占满整卡高度"，
+   挤压兄弟行导致 ev-dt 被压瘪、文字被 overflow:hidden 拦腰切掉——2026-09-27 实测修复） */
+.ev-ts { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 证据环三态配色（IA 设计稿 3.2 状态规范 + 样式要点 1）：
    健康 --teal-soft/--success · 失败 --red-soft/--red · 未知 --amber-soft/--amber。
    未知＝证据缺失或过期，既不失败也不健康——必须用琥珀色顶出来，灰色会被误读成"无问题"。 */

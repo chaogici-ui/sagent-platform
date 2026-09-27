@@ -274,7 +274,7 @@ globalThis.buildEvidenceChainHTML = function (d) {
     }
     h += '<div class="ev-node ' + st + '"' + click + ' title="' + esc(c.detail) + ' · ' + esc(tsTxt) + (jt ? ' · 点击逐环归因' : '') + '">'
       + '<span class="ev-ic">' + ic + '</span><span class="ev-lb">' + esc(c.label) + '</span><span class="ev-dt">' + esc(c.detail) + '</span>'
-      + '<span class="ev-ts" style="flex-basis:100%;font-size:10px;color:var(--muted)">' + esc(tsTxt) + '</span></div>';
+      + '<span class="ev-ts">' + esc(tsTxt) + '</span></div>';
   });
   var gateOk = d1 !== false && e2Ok !== false && d3 !== false && d4 !== false && d5 !== false && d6 !== false;
   h += '<div class="ev-node ev-gate" title="已应用 ≠ 已入库，六环全绿方为正常">' + (gateOk ? '采集正常 ✓' : '有缺口，逐环归因 →') + '</div></div>';
