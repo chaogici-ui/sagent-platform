@@ -1342,132 +1342,13 @@ function mdRender(md) {
           window._targets = list||[]; targetRender();
         }).catch(function(){});
       }
-      // ---- 已删除：targetDelete / targetEdit / targetSave（2026-09-27）----
+      // ---- 已删除：targetDelete / targetEdit / targetSave / openOnboardWizard 簇（2026-09-27）----
       // IA 设计稿 ④ 采集目标「操作流程」定案：本页唯一动作是「看 + 跳」，规则 3 规定目标 CRUD
-      // 只在接入中心。这三个函数在表格里已无按钮引用（表格操作列只剩「测试」「接入过程」），
-      // 属于可被后来者重新挂上的后门——留着就是给"绕过只读"埋雷，故整簇移除。
+      // 只在接入中心。以上函数均无外部调用点（表格操作列只剩「测试」「接入过程」），
+      // 且都直接写 /api/targets、不建流水线、不留审计，属可被后来者重新挂上的后门，整簇移除。
       // 写目标的正确入口（唯一）：接入中心「＋接入对象」→ resources.js 的 openOnboardNew()，
       // 走接入流水线留痕；资源抽屉的 resNewTarget 亦已收口到同一入口。
-      // 后端 /api/targets 的 POST/PUT/DELETE 端点保留不动。
-      // ⚠️ 下方 openOnboardWizard 簇（含 onboardRun / obFillPort / obLoadGroupList）已无任何调用点：
-      //   它直接 POST /targets、不建流水线、不留审计，属可被后来者重新挂上的后门；其独有的
-      //   「④ 主机指标能力分组配置」UI 尚未在新向导（openOnboardNew）复刻。当前保留待迁移，勿重新挂载。
-      // ---- M1-⑤ 老接入向导（已废弃 · 保留待迁移 · 勿挂载）：选插件 → 填目标 → 分派 → 测试 ----
-      // prePlugin 预选插件；preAgentID 预选分派 Agent（从资源抽屉进来时必须带，否则建出来的目标
-      // 落在"未分派"，本机清单里看不到）；backFn 关闭后回哪页（默认回采集目标页）
-      function openOnboardWizard(prePlugin, preAgentID, backFn) {
-        onboardCfg(function(cfg) {
-        var plugins = cfg.onboard_plugins || [];
-        var agentOpts = agents.map(function(a){
-          return '<option value="'+a.id+'"'+(a.id===preAgentID?' selected':'')+(a.source==='heartbeat'?' data-hb="1"':'')+'>'+escHtml(a.id)+'（'+(a.type==='proxy'?'Proxy':'Edge')+(a.source==='heartbeat'?' · 心跳':' · 本机')+' · '+a.status+'）</option>';
-        }).join('');
-        renderOverlay('🚀 接入向导 <span style="font-weight:400;font-size:11px;color:var(--muted)">选插件 → 填目标 → 分派 → 能力配置 → 测试 → 配置下发</span>', function(){
-          var h = '<div style="display:grid;gap:12px;font-size:13px;max-width:560px">';
-          h += '<div><b>① 选择采集插件 *</b><br><select id="ob-plugin" onchange="obFillPort()" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px">';
-          plugins.forEach(function(p){ h += '<option value="'+p.probe+'" data-port="'+p.port+'"'+(prePlugin&&p.name===prePlugin?' selected':'')+'>'+p.name+'（'+p.probe+'）</option>'; });
-          h += '</select><div style="font-size:11px;color:var(--muted);margin-top:3px">插件能力与指标说明见「采集插件」菜单</div></div>';
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
-            + '<div><b>② 目标名称 *</b><br><input id="ob-name" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px" placeholder="例: order-prod-db-01"></div>'
-            + '<div><b>目标地址 *</b><br><input id="ob-addr" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px" placeholder="host:port"></div></div>';
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
-            + '<div><b>③ 分派 Agent *</b><br><select id="ob-agent" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px">'+agentOpts+'</select></div>'
-            + '<div><b>备注</b><br><input id="ob-note" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px"></div></div>';
-          // ④ 主机指标能力配置（配置轨道，随目标一起下发给分派 Agent）
-          h += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">'
-            + '<div style="font-weight:600">④ 主机指标能力 <span style="font-weight:400;font-size:10px;color:var(--muted)">仅对分派 Agent 的 host_metrics 生效（配置轨道，版本 +1）</span></div>'
-            + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px">'
-            + '<div><b style="font-size:12px">采集频率</b><br><select id="ob-hm-interval" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px">'
-            + ['15s','30s','60s','5m'].map(function(iv){return '<option value="'+iv+'"'+(iv==='30s'?' selected':'')+'>'+iv+'</option>'}).join('')
-            + '</select></div>'
-            + '<div><b style="font-size:12px">保持 Agent 现有分组/例外</b><br><label style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:4px;padding-top:6px"><input type="checkbox" id="ob-hm-keep" checked> 不修改分组配置</label></div>'
-            + '</div>'
-            + '<div id="ob-hm-groups" style="margin-top:8px;display:none"><b style="font-size:12px">分组勾选（未勾 = 关闭该组）</b><div id="ob-hm-grp-list" style="display:grid;grid-template-columns:repeat(2,1fr);gap:4px;margin-top:4px;font-size:12px;color:var(--muted)">⏳ 加载分组...</div></div>'
-            + '</div>';
-          h += '<div style="display:flex;gap:8px"><button class="btn btn-p" onclick="onboardRun()">🚀 创建并测试连通性</button><button class="btn btn-o" onclick="closeOverlay()">取消</button></div>';
-          h += '<div id="ob-receipt"></div>';
-          h += '</div>';
-          return h;
-        }, true, backFn || renderTargets);
-        obLoadGroupList();
-        });
-      }
-      // 接入向导：动态加载 host_metrics 分组清单（治理目录推导，不写死）
-      function obLoadGroupList() {
-        fetch(API+'/metrics/gov?plugin_name=host_metrics&only_phase1=1').then(function(r){return r.json()}).then(function(list){
-          var counts = {};
-          (list||[]).forEach(function(m){ if (m.grp) counts[m.grp] = (counts[m.grp]||0)+1; });
-          var labels = {cpu:'CPU',memory:'内存',disk:'磁盘 IO',filesystem:'文件系统',network:'网络',netstack:'网络协议栈',loadproc:'负载与进程',kernel:'内核与 VM',system:'系统信息',custom:'平台自定义'};
-          var el = document.getElementById('ob-hm-grp-list');
-          if (!el) return;
-          var h = '';
-          Object.keys(counts).sort().forEach(function(g){
-            h += '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:var(--text,#333)">'
-              + '<input type="checkbox" class="ob-hm-grp-cb" data-grp="'+escHtml(g)+'" checked> '
-              + escHtml(labels[g]||g) + ' <span style="color:var(--muted);font-size:10px">'+counts[g]+'</span></label>';
-          });
-          el.innerHTML = h || '治理目录暂无 host_metrics 分组数据';
-          el.style.color = '';
-          // 「保持现有配置」勾选切换分组区显隐
-          var keep = document.getElementById('ob-hm-keep');
-          var box = document.getElementById('ob-hm-groups');
-          if (keep && box) keep.onchange = function(){ box.style.display = keep.checked ? 'none' : 'block'; };
-        }).catch(function(){});
-      }
-      function obFillPort() {
-        var sel = document.getElementById('ob-plugin');
-        var port = sel.options[sel.selectedIndex].dataset.port;
-        var addr = document.getElementById('ob-addr');
-        if (port && addr && addr.value.indexOf(':')<0) addr.placeholder = 'host:'+port;
-      }
-      function onboardRun() {
-        var probe = document.getElementById('ob-plugin').value;
-        var body = {
-          name: document.getElementById('ob-name').value.trim(),
-          type: probe.replace(/_probe|_exporter$/,'').replace('http_response','http'),
-          address: document.getElementById('ob-addr').value.trim(),
-          agent_id: document.getElementById('ob-agent').value,
-          plugin: probe,
-          note: document.getElementById('ob-note').value.trim()
-        };
-        if (!body.name || !body.address) { toast('名称和地址必填','err'); return; }
-        var rc = document.getElementById('ob-receipt');
-        rc.innerHTML = '<div style="margin-top:8px;color:var(--muted)">⏳ 创建目标...</div>';
-        fetch(API+'/targets',{method:'POST',headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){
-          if (d.error) { rc.innerHTML = '<div style="margin-top:8px;color:var(--error)">❌ 创建失败：'+escHtml(d.error)+'</div>'; return; }
-          var tid = d.id || d.target_id;
-          // ④ 主机指标能力：未勾「保持现有配置」时，把频率+分组勾选写入分派 Agent 的 host_metrics 段（配置轨道）
-          var keep = document.getElementById('ob-hm-keep');
-          var cfgPromise;
-          if (keep && !keep.checked && body.agent_id) {
-            var groups = {};
-            document.querySelectorAll('.ob-hm-grp-cb').forEach(function(cb){ groups[cb.dataset.grp] = cb.checked; });
-            var hmBody = {host_metrics: {enabled: true, interval: document.getElementById('ob-hm-interval').value, groups: groups, exclude_metrics: []}};
-            cfgPromise = fetch(API+'/agents/'+encodeURIComponent(body.agent_id)+'/config', {method:'PUT',headers:{"Content-Type":"application/json"},body:JSON.stringify(hmBody)})
-              .then(function(r){return r.json()});
-          } else {
-            cfgPromise = Promise.resolve(null);
-          }
-          return cfgPromise.then(function(cfgRes){
-            var cfgLine = cfgRes
-              ? (cfgRes.error ? '<div style="margin-top:4px;color:var(--error)">⚠️ 指标配置下发失败：'+escHtml(cfgRes.error)+'</div>'
-                             : '<div style="margin-top:4px">📈 主机指标配置已下发（频率 '+escHtml(document.getElementById('ob-hm-interval').value)+'，cfg-'+cfgRes.version+'）</div>')
-              : '';
-            rc.innerHTML = '<div style="margin-top:8px;font-size:12px"><div>✅ 目标已创建（id='+tid+'），分派 Agent 配置版本 +1</div>'+cfgLine
-              + '<div style="margin-top:4px;color:var(--muted)">⏳ 正在测试连通性...</div></div>';
-            return fetch(API+'/targets/'+tid+'/test',{method:'POST'}).then(function(r){return r.json()}).then(function(t){
-              var ok = t.ok;
-              var line2 = ok ? '✅ 连通性测试通过：'+escHtml(t.result||'') : '⚠️ 连通性测试失败：'+escHtml(t.result||t.error||'');
-              rc.innerHTML = '<div style="margin-top:8px;font-size:12px"><div>✅ 目标已创建（id='+tid+'）</div>'+cfgLine
-                + '<div style="margin-top:4px">'+line2+'</div>'
-                + '<div style="margin-top:4px">📦 配置已写入分派 Agent 期望配置，Agent 下次心跳（≤30s）自动拉取生效</div>'
-                + (ok ? '<div style="margin-top:6px;color:var(--muted)">💡 采集开始后，可在插件仪表盘（约 2-5 分钟）看到该目标曲线；若持续无数据，SLO 页断采清单会出现该目标</div>' : '<div style="margin-top:6px;color:var(--muted)">💡 网络不通不影响配置下发；修复网络后采集自动开始</div>')
-                + '<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-o btn-sm" onclick="closeOverlay()">完成</button></div></div>';
-            });
-          });
-        }).catch(function(e){
-          rc.innerHTML = '<div style="margin-top:8px;color:var(--error)">❌ 请求失败：'+escHtml(String(e))+'</div>';
-        });
-      }
+      // 后端 /api/targets 的 POST/PUT/DELETE 端点保留不动（流水线内部使用）。
       // ---- 指标中心：多渠道治理视图（D9 五渠道 × 层级树 × 渠道/分组/归属过滤） ----
       var _CHANNEL_LABELS = {builtin:'内置采集', exporter:'Exporter', script:'自定义脚本', sql:'SQL/JDBC', log:'日志转指标', '':'未归类'};
       var _OWNERSHIP_LABELS = {preset:'预置（可停用）', custom:'自定义', '':'-'};
