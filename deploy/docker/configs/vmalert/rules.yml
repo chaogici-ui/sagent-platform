@@ -16,7 +16,7 @@ groups:
     rules:
       # L0 控制面失联：/metrics 探不到（进程死/网络断）。最高优先级，全网失管前奏。
       - alert: L0ControlPlaneDown
-        expr: sagent_l0_up == 0
+        expr: max by (job) (sagent_l0_up) == 0  # P0: replica 折叠，防双副本重复告警
         for: 30s
         labels:
           severity: critical
@@ -26,7 +26,7 @@ groups:
 
       # L0 catalog 状态库不可达：存接管/多副本状态强一致的根基。
       - alert: L0CatalogUnreachable
-        expr: sagent_l0_catalog_reachable == 0
+        expr: max by (job) (sagent_l0_catalog_reachable) == 0  # P0: replica 折叠
         for: 30s
         labels:
           severity: critical
@@ -38,7 +38,7 @@ groups:
       # 这是把"控制台内部告警中心(D6)"桥接到可编排告警链的关键——alert.go 判定为 firing 的，
       # 此处转成 Prometheus 规则，供 VM/Alertmanager/静默/升级编排。
       - alert: L0InternalAlertsActive
-        expr: sagent_l0_alerts_active > 0
+        expr: max by (job) (sagent_l0_alerts_active) > 0  # P0: replica 折叠
         for: 30s
         labels:
           severity: warning
@@ -48,7 +48,7 @@ groups:
 
       # 接入 SAgent 多数离线：online/total 比例跌破 50%（total>0 才判，避免无 Agent 时误报）。
       - alert: L0AgentsMajorityOffline
-        expr: sagent_l0_agents_total > 0 and (sagent_l0_agents_online / sagent_l0_agents_total) < 0.5
+        expr: max by (job) (sagent_l0_agents_total) > 0 and (max by (job) (sagent_l0_agents_online) / max by (job) (sagent_l0_agents_total)) < 0.5  # P0: replica 折叠
         for: 60s
         labels:
           severity: critical

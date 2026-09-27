@@ -89,6 +89,24 @@ func driveStepFromL1Task(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg
 		l1InstallExtraShape(t, extra)
 		if t.Status == "done" {
 			diags = registerInstallScrapeTarget(catDB, f, extra, diags)
+			// 证据链 P2（2026-09-27）：runner 路径取包留痕——L1 执行进程无 DB，
+			// 事件由对账桥在 L0 侧落库（tag/sha256/sha_verified 来自 runner 结构化回执）。
+			recPkg := storepkg.PackageDownloadRow{
+				Caller:     "runner:" + t.ID,
+				ResourceID: f.ResourceID,
+				Source:     "runner-resolve",
+				Note:       "L1 runner 就近取包，事件由对账桥代记",
+			}
+			if v, ok := extra["tag"].(string); ok {
+				recPkg.Tag = v
+			}
+			if v, ok := extra["sha256"].(string); ok {
+				recPkg.SHA256 = v
+			}
+			if v, ok := extra["sha_verified"].(bool); ok {
+				recPkg.Verified = v
+			}
+			_ = catDB.RecordPackageDownload(recPkg)
 		}
 		diags = withPortSource(cred, diags)
 	}

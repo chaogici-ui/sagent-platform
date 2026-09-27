@@ -478,6 +478,8 @@ function renderOnboardCenter() {
         if (f.timeout_view) html += obTimeoutBadge(f.timeout_view);
         html += '</td>';
         html += '<td onclick="event.stopPropagation()" style="white-space:nowrap"><button class="btn btn-o btn-sm" onclick="openOnboardFlow(' + f.id + ')">查看过程</button>';
+        // 证据链（P1，2026-09-27）：六跳独立实证时间线——L0 下发→投递→取包→安装→心跳→VM 实测
+        html += ' <button class="btn btn-o btn-sm" title="六跳证据链：每跳=声明+独立实证配对，含哪个 vmagent 副本抓到数据" onclick="openChainTrace(' + f.id + ')">⛓ 证据链</button>';
         // 卸载入口：只对"真的装过"的接入流水线出现（agent 台账有登记，或安装环节已 ok/skipped）。
         // 卸载完成后 agent 记录被注销，按钮自动消失——语义由台账驱动，不靠前端记忆
         if (f.can_offboard) {
@@ -695,6 +697,7 @@ window.renderChanges = function () {
         var evTxt = obPlainTech(x.evidence);
         var evEl = x.flow
           ? (x.steps ? '<span class="ch-steps">' + x.steps + ' 步</span>' : '') + '<button class="btn btn-o btn-sm" style="margin-left:8px" onclick="openOnboardFlow(' + x.flow.id + ')">查看过程</button>'
+            + ' <button class="btn btn-o btn-sm" title="六跳证据链：L0 下发→投递→取包→安装→心跳→VM 实测，每跳=声明+独立实证" onclick="openChainTrace(' + x.flow.id + ')">⛓ 证据链</button>'
           : '';
         h += '<tr><td style="font-size:12px">' + obEscape(x.ts) + '</td>'
           + '<td><code class="ch-code">' + obEscape(x.code) + '</code></td>'
@@ -3560,4 +3563,61 @@ function obOffboard(flowId) {
       setTimeout(function () { openOnboardFlow(o.flow_id); }, 500);
     }).catch(function (e) { toast('发起卸载失败：' + (e && e.message || e), 'err'); });
   }).catch(function (e) { toast('读取流水线失败：' + (e && e.message || e), 'err'); });
+}
+
+// ==================== 证据链视图（P1，2026-09-27） ====================
+// GET /api/trace?flow=<id> 六跳装配：每跳 = 声明 + 独立实证配对。
+// 原则与 recon 同源：不信单方陈述——心跳回写与 VM 实测是独立于任务通道的外部实证。
+window.openChainTrace = function (flowId) {
+  var old = document.getElementById('chain-trace-modal');
+  if (old) old.remove();
+  var ov = document.createElement('div');
+  ov.id = 'chain-trace-modal';
+  ov.className = 'modal-overlay';
+  ov.innerHTML = '<div class="modal" style="max-width:860px;width:92%;max-height:82vh;overflow:auto">'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+    + '<b style="font-size:14px">⛓ 全链路证据链 · 流水线 #' + flowId + '</b>'
+    + '<span style="font-size:11px;color:var(--muted)">每一跳 = 声明 + 独立实证（对账引擎同源原则：不信单方陈述）</span>'
+    + '<button class="btn btn-o btn-sm" style="margin-left:auto" onclick="document.getElementById(\'chain-trace-modal\').remove()">关闭</button></div>'
+    + '<div id="chain-trace-body" style="font-size:12.5px;color:var(--muted)">⏳ 装配六跳证据…</div></div>';
+  document.body.appendChild(ov);
+  requestAnimationFrame(function () { ov.classList.add('open'); });
+  fetch(API + '/trace?flow=' + flowId).then(function (r) { return r.json(); }).then(function (d) {
+    var b = document.getElementById('chain-trace-body');
+    if (!b) return;
+    if (!d.ok) { b.innerHTML = '<div style="color:var(--error)">⚠ ' + obEscape(d.error || d.summary || '装配失败') + '</div>'; return; }
+    var stColor = { ok: 'var(--success,#15803d)', unknown: '#946011', failed: 'var(--error,#b91c1c)' };
+    var stIcon = { ok: '✓', unknown: '?', failed: '✕' };
+    var h = '<div style="margin-bottom:8px;padding:8px 10px;background:var(--bg2,#f5f7f8);border-radius:6px;font-size:12px">'
+      + '资源 <b>' + obEscape(d.resource_id) + '</b> · 模式 ' + obEscape(d.mode)
+      + ' · 能力 ' + obEscape((d.abilities || []).join(', ') || '—')
+      + '<div style="margin-top:4px;font-weight:500">' + obEscape(d.summary) + '</div></div>';
+    (d.hops || []).forEach(function (hp) {
+      var c = stColor[hp.status] || '#946011';
+      h += '<div style="border:0.5px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden">'
+        + '<div style="display:flex;align-items:baseline;gap:8px;padding:8px 12px;background:var(--bg2,#f5f7f8)">'
+        + '<span style="font-weight:500;font-size:13px">' + hp.step + ' ' + obEscape(hp.name) + '</span>'
+        + '<span style="font-weight:500;color:' + c + '">' + (stIcon[hp.status] || '?') + ' ' + hp.status + '</span>'
+        + (hp.ts ? '<span style="font-size:11px;color:var(--muted);margin-left:auto">' + obEscape(traceTs(hp.ts)) + '</span>' : '')
+        + '</div>'
+        + '<div style="padding:6px 12px 8px">'
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px">声明：' + obEscape(hp.declared) + '</div>'
+        + '<table style="font-size:11.5px;width:100%">'
+        + (hp.evidence || []).map(function (e) {
+            return '<tr><td style="width:130px;color:var(--muted);padding:2px 0;vertical-align:top">' + obEscape(e.k) + '</td>'
+              + '<td style="word-break:break-all">' + obEscape(e.v) + '</td></tr>';
+          }).join('')
+        + '</table></div></div>';
+    });
+    b.innerHTML = h;
+  }).catch(function (e) {
+    var b = document.getElementById('chain-trace-body');
+    if (b) b.innerHTML = '<div style="color:var(--error)">⚠ 证据链查询失败：' + obEscape(String(e)) + '</div>';
+  });
+};
+function traceTs(sec) {
+  if (!sec) return '—';
+  var d = new Date(sec * 1000);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+    + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
 }

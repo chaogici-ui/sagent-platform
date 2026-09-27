@@ -450,3 +450,23 @@ func UnmarshalPayload(s string) map[string]any {
 	_ = json.Unmarshal([]byte(s), &m)
 	return m
 }
+// ListL1TasksByFlow 按流水线列出任务（时间正序；证据链 P1 装配用）。
+func (s *DB) ListL1TasksByFlow(flowID int64) ([]*L1TaskRow, error) {
+	rows, err := s.db.Query(
+		`SELECT `+l1TaskCols+` FROM l1_tasks WHERE flow_id = ? ORDER BY created_at ASC, id ASC`,
+		flowID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*L1TaskRow{}
+	for rows.Next() {
+		t, err := rowToL1Task(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}

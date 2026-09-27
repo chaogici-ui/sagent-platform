@@ -1713,6 +1713,11 @@ func ansibleInstallJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 	//    Package Cache 进程 HTTP resolve，缺省进程内 resolveInstallBinary（红线语义一致）。
 	binPath, err := resolveInstallBinaryAny(tag)
 	if err != nil {
+		// 证据链 P2：被拒绝的 resolve 同样留痕（此前只有成功安装才有回执，拒绝即蒸发）
+		_ = catDB.RecordPackageDownload(storepkg.PackageDownloadRow{
+			Caller: "install-flow:" + itoa64(flowID), ResourceID: res.ID, Tag: tag,
+			Verified: false, Source: "rejected", Note: err.Error(),
+		})
 		fail("L1 包缓存就近取包失败/拒绝（"+tag+"）", map[string]any{"tag": tag, "cache": packageCacheRoot()},
 			[]diag{fatalDiag("binary_not_found", "L1 包缓存就近取包失败/拒绝："+err.Error(),
 				"确认平台版本库有该版本的二进制（data/binaries/<tag>/SAgent 随镜像分发），且缓存/清单 sha256 一致；平台不作旧包降级兜底")})
@@ -1727,6 +1732,15 @@ func ansibleInstallJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 	}
 	sum := sha256.Sum256(binData)
 	fileSHA := hex.EncodeToString(sum[:])
+	// 证据链 P2：取包成功即留痕（来源：独立 Package Cache 进程 HTTP resolve 或进程内缓存）
+	dlSource := "cache-hit"
+	if strings.TrimSpace(os.Getenv("L1_PACKAGE_CACHE_URL")) != "" {
+		dlSource = "remote-resolve"
+	}
+	_ = catDB.RecordPackageDownload(storepkg.PackageDownloadRow{
+		Caller: "install-flow:" + itoa64(flowID), ResourceID: res.ID, Tag: tag,
+		SHA256: fileSHA, Verified: ver.SHA256 == "" || ver.SHA256 == fileSHA, Source: dlSource,
+	})
 	if ver.SHA256 != "" && ver.SHA256 != fileSHA {
 		fail("二进制 sha256 与版本清单不一致（清单登记的版本可能已被篡改或未同步），拒绝安装",
 			map[string]any{"tag": tag, "catalog": ver.SHA256, "actual": fileSHA},

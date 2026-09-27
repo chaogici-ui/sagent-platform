@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -129,7 +130,7 @@ func runTestAction(action string) map[string]interface{} {
 			result["success"] = false
 		}
 		// up 检查
-		upResp, _ := httpGet(vmBase() + "/api/v1/query?query=up")
+		upResp, _ := httpGet(vmBase() + "/api/v1/query?query=" + url.QueryEscape("max by (job, instance) (up)")) // P0: replica 折叠防计数翻倍
 		upCount := strings.Count(upResp, `"1"`)
 		checks = append(checks, map[string]interface{}{"metric": fmt.Sprintf("up_nodes(%d)", upCount), "status": "PASS"})
 
@@ -159,7 +160,7 @@ func runTestAction(action string) map[string]interface{} {
 			go func() {
 				defer wg.Done()
 				httpGet(vmBase() + "/api/v1/query?query=host_cpu_percent")
-				httpGet(fmt.Sprintf("%s/api/v1/query_range?query=host_memory_used_percent&start=%d&end=%d&step=15", vmBase(), time.Now().Unix()-300, time.Now().Unix()))
+				httpGet(fmt.Sprintf("%s/api/v1/query_range?query=%s&start=%d&end=%d&step=15", vmBase(), url.QueryEscape("max by (instance) (host_memory_used_percent)"), time.Now().Unix()-300, time.Now().Unix()))
 			}()
 		}
 		wg.Wait()
@@ -182,7 +183,7 @@ func runTestAction(action string) map[string]interface{} {
 		time.Sleep(15 * time.Second)
 		dockerCmd("network", "connect", cfgL0Net, agentContainerName("vmagent"))
 		time.Sleep(15 * time.Second)
-		upResp, _ := httpGet(vmBase() + "/api/v1/query?query=up")
+		upResp, _ := httpGet(vmBase() + "/api/v1/query?query=" + url.QueryEscape("max by (job, instance) (up)")) // P0: replica 折叠防计数翻倍
 		upCount := strings.Count(upResp, `"1"`)
 		result["output"] = fmt.Sprintf("网络中断恢复: %d 节点在线", upCount)
 

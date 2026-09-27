@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,9 +20,12 @@ import (
 // 换目标机/换端口/换指标都不影响（零硬编码）。instance 一并返回：演示容器等
 // 没走接入流水线的目标只有 instance 可用，前端按 instance 兜底匹配。
 const (
-	// 指标条数：该资源名下近 5m 有过样本的 series 数
-	vmQResourceMetrics = `count by (resource_id, instance) (count_over_time({resource_id!=""}[5m]))`
-	// 新鲜度：该资源最新样本距今多少秒（lookback 5m，超时无样本的行自然消失）
+	// 指标条数：该资源名下近 5m 有过样本的 series 数。
+	// 证据链 P0（2026-09-27）：vmagent 双副本带 replica 标签后同一 series 有两份（dedup 只合并同
+	// labelset）——先 max by(__name__) 折叠副本再计数，保持"指标名条数"语义不翻倍。
+	vmQResourceMetrics = `count by (resource_id, instance) (max by (resource_id, instance, __name__) (count_over_time({resource_id!=""}[5m])))`
+	// 新鲜度：该资源最新样本距今多少秒（lookback 5m，超时无样本的行自然消失）。
+	// max 聚合天然跨副本折叠（取两副本中较新者），replica 标签不影响。
 	vmQResourceFreshness = `time() - max by (resource_id, instance) (timestamp({resource_id!=""}))`
 )
 
@@ -137,13 +141,63 @@ func vmQuery(query string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// fetchCollectStats 两路查询；任一失败即整体失败（宁可显示"取不到"也不显示错的 0）
-func fetchCollectStats() ([]resourceStat, error) {
-	mBody, err := vmQuery(vmQResourceMetrics)
+// fetchDistinctSeriesRows series API 抓"近 5m 有过样本的 series"全量标签行，
+// Go 侧按完整标签集（剔除 replica 维度）去重计数——保持基线语义不翻倍：
+// MetricsQL 聚合无法"按除 replica 外的全部标签分组"（count_over_time 还会丢 __name__），
+// label_del+count 实测也不去重同标签序列（512×2=1024）。series API + Go 去重与
+// 改造前基线（512/530/532）逐行一致。
+func fetchDistinctSeriesRows() ([]vmRow, error) {
+	end := time.Now().Unix()
+	u := fmt.Sprintf("%s/api/v1/series?match[]=%s&start=%d&end=%d",
+		vmBaseURL(), url.QueryEscape(`{resource_id!=""}`), end-300, end)
+	resp, err := http.Get(u)
 	if err != nil {
 		return nil, err
 	}
-	metrics, err := parseVMRows(mBody)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var d struct {
+		Data []map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &d); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	res := map[string]*vmRow{}
+	for _, m := range d.Data {
+		rid, inst := m["resource_id"], m["instance"]
+		k := rid + "\x00" + inst
+		keys := make([]string, 0, len(m))
+		for k2, v := range m {
+			if k2 == "replica" { // 副本维度不参与计数（P0 双副本标签）
+				continue
+			}
+			keys = append(keys, k2+"="+v)
+		}
+		sort.Strings(keys)
+		setKey := k + "\x00" + strings.Join(keys, "\x00")
+		if seen[setKey] {
+			continue
+		}
+		seen[setKey] = true
+		if _, ok := res[k]; !ok {
+			res[k] = &vmRow{ResourceID: rid, Instance: inst}
+		}
+		res[k].Value++
+	}
+	out := make([]vmRow, 0, len(res))
+	for _, r := range res {
+		out = append(out, *r)
+	}
+	return out, nil
+}
+
+// fetchCollectStats 两路查询；任一失败即整体失败（宁可显示"取不到"也不显示错的 0）
+func fetchCollectStats() ([]resourceStat, error) {
+	metrics, err := fetchDistinctSeriesRows()
 	if err != nil {
 		return nil, err
 	}

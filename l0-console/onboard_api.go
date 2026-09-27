@@ -1473,7 +1473,9 @@ func autoReportStep(catDB *storepkg.DB, agentStore *AgentStore, flowID int64, st
 }
 
 // vmSeriesCount 平台侧直查 VictoriaMetrics：某资源 ID 的活跃序列数。
-// 采集入库的独立证据——不信 Agent 自报，observe_collect 验收以这里为准
+// 采集入库的独立证据——不信 Agent 自报，observe_collect 验收以这里为准。
+// 证据链 P0（2026-09-27）：vmagent 双副本带 replica 标签后同一序列返回两行——
+// 计数前按 replica 折叠（去掉 replica 维度去重），保持"活跃序列数"语义。
 func vmSeriesCount(resourceID string) int {
 	client := &http.Client{Timeout: 3 * time.Second}
 	q := url.QueryEscape(`{resource_id="` + resourceID + `"}`)
@@ -1484,13 +1486,21 @@ func vmSeriesCount(resourceID string) int {
 	defer resp.Body.Close()
 	var out struct {
 		Data struct {
-			Result []json.RawMessage `json:"result"`
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return 0
 	}
-	return len(out.Data.Result)
+	seen := make(map[string]bool, len(out.Data.Result))
+	for _, r := range out.Data.Result {
+		delete(r.Metric, "replica") // 副本维度不参与计数
+		key := fmt.Sprintf("%v", r.Metric)
+		seen[key] = true
+	}
+	return len(seen)
 }
 
 // jsonCompact 紧凑 JSON（审计摘要用，不缩进）

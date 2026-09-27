@@ -274,6 +274,11 @@ services:
       - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write,http://victoriametrics-ha:8428/api/v1/write"
       - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
       - "--remoteWrite.maxDiskUsagePerURL=2GB"
+      # 证据链 P0（2026-09-27）：副本身份标签——VM 里每条 series 可归属到具体 vmagent。
+      # 修复"双副本数据双写但身份蒸发"：此前 label 集完全一致，dedup 后无法回答
+      # "哪个 vmagent 拉的、坏一台后另一台是否接管"（.workbuddy/evidence/chain-evidence-20260927.md 断点1）。
+      # 代价：存储 series 数翻倍（dedup 只合并同 labelset）；所有聚合查询须先按 replica 折叠（已同步修）。
+      - "--remoteWrite.label=replica=vmagent-1"
     volumes:
       - ./configs/vmagent:/etc/vmagent:ro
       # 接入流水线自动登记的抓取目标（l0-console 安装作业写入，热加载）
@@ -299,6 +304,8 @@ services:
       - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write,http://victoriametrics-ha:8428/api/v1/write"
       - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
       - "--remoteWrite.maxDiskUsagePerURL=2GB"
+      # 证据链 P0：副本身份标签（与主副本不同值，见上）
+      - "--remoteWrite.label=replica=vmagent-ha-1"
     volumes:
       - ./configs/vmagent:/etc/vmagent:ro
       - ./configs/scrape-sd:/etc/vmagent-sd:ro

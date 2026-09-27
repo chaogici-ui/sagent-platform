@@ -417,6 +417,26 @@ func registerPackageCacheRoutes(mux *http.ServeMux, catDB *storepkg.DB) {
 		// 与 L0 侧 /api/package-cache/status 同源，但独立进程经此对外就近取包
 		handlePackageCacheResolve(w, r)
 	})
+	// 证据链 P2（2026-09-27）：取包事件查询——"何时、谁、取了哪个 tag、sha256 是否核对一致"。
+	// 只读；tag/resource_id 过滤可选。拒绝的 resolve 也在此列（Source=rejected）。
+	mux.HandleFunc("/api/package-downloads", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		q := r.URL.Query()
+		limit := 0
+		fmt.Sscanf(q.Get("limit"), "%d", &limit)
+		rows, err := catDB.ListPackageDownloads(q.Get("tag"), q.Get("resource_id"), limit)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if rows == nil {
+			rows = []*storepkg.PackageDownloadRow{}
+		}
+		writeJSON(w, map[string]any{"ok": true, "downloads": rows})
+	})
 }
 
 // cfgPackageCacheListen 独立 Package Cache 进程监听地址（PACKAGE_CACHE_LISTEN，默认 :8450）。

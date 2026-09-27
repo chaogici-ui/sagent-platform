@@ -240,6 +240,10 @@ func main() {
 	if err := catDB.InitL1Tasks(); err != nil {
 		log.Fatalf("init l1 tasks table: %v", err)
 	}
+	// 版本包取用事件表（package_downloads，证据链 P2）：取包/回源/拒绝全留痕
+	if err := catDB.InitPackageDownloads(); err != nil {
+		log.Fatalf("init package downloads table: %v", err)
+	}
 	// HA-3 跨 L1 归属迁移记录表（relocations）：迁移证据 + 冷却判定来源
 	if err := catDB.InitRelocations(); err != nil {
 		log.Fatalf("init relocations table: %v", err)
@@ -282,6 +286,7 @@ func main() {
 	registerTenantRoutes(mux, catDB)         // 多租户管控（架构 D3 骨架：租户清单 + 新建）
 	registerTenantTokenRoutes(mux, catDB)    // 租户 API Token 签发/吊销/状态（架构 D3 凭证鉴权）
 	registerHealthRoute(mux, store, catDB)   // 平台健康自检汇总（架构 3.3 可运维·相与规划）
+	registerTraceRoutes(mux, catDB, store)   // 证据链装配查询（P1：六跳时间线，只读）
 	registerAlertRoutes(mux, store, catDB)   // 告警中心（架构 D6/G5：查询式→主动告警，外发按 env）
 	registerL1TaskRoutes(mux, catDB)         // L1 任务源（架构 D5 IN3：Controller 拉取/回执，持久化 pg 任务表）
 	registerRelocateRoutes(mux, store, catDB) // HA-3 跨 L1 归属迁移（评审/执行/历史证据）
