@@ -45,23 +45,35 @@
         if (currentPage === "overview" && !overlayOpen) renderHealthOverview();
         refreshNavBadges();
       }
-      // 导航琥珀徽标（前端效果设计第 1 章信息架构）：实时反映"该动手的事"（断采目标/待处理流水线）。
-      // 消费既有 /api/recon(断采数) 与 /api/onboard/flows(待处理数)，未避免打扰正在看的内容，
-      // 仅在徽标计数变化时才重写 DOM（同值跳过）。失败静默保留上次值，不阻断页面。
-      var _navBadgeCache = {};
+      // 导航琥珀徽标（IA 设计稿 2.1 ① + 样式要点 2）：实时反映"该动手的事"。
+      // 规则 4：待办徽章数一处计算两处消费——工作台待办卡与「采集健康」badge 共用 computeTodos，
+      // 口径只有这一处实现（同一份 recon + flows 进出，结果确定），禁止两边各算一遍。
+      // 旧实现的 "onboard-center" 键在导航里没有对应 data-page（该页只是深链兜底），徽标永远
+      // 渲染不出来——已按设计稿收敛为「采集健康」一个 badge，不另开第二个入口。
+      // 渲染策略：先移除旧徽标再按需重建——每次反映最新计数且不会叠加；失败静默保留上次值，
+      // 不阻断页面（徽标是辅助信息，不该让整页挂掉）。
+      // 待办三类（设计稿 ① 工作台 界面效果）：未复核草案 / 待批准变更 / 受阻任务。
+      function computeTodos(recon, flows) {
+        var sum = (recon && recon.summary) || {};
+        // 未复核草案：草案由断采目标模板逐条生成，一条断采 = 一份待复核草案
+        var drafts = (recon && recon.stale && recon.stale.length) ? recon.stale.length : (sum.stale || 0);
+        var list = (flows && flows.flows) ? flows.flows : (flows || []);
+        var approvals = 0, blocked = 0;
+        list.forEach(function (f) {
+          if (!f) return;
+          if (f.wait_kind === 'human') approvals++;  // 停等人工决策 = 待批准
+          else if (f.status === 'stalled' || f.status === 'blocked' || f.status === 'failed') blocked++;
+        });
+        return { drafts: drafts, approvals: approvals, blocked: blocked,
+                 total: drafts + approvals + blocked };
+      }
+      window.computeTodos = computeTodos;
+
       async function refreshNavBadges() {
         try {
           var recon = await (await fetch(API + "/recon")).json();
           var flows = await (await fetch(API + "/onboard/flows")).json();
-          var stale = (recon && recon.summary && recon.summary.stale) || 0;
-          var wild = (recon && recon.summary && recon.summary.wild) || 0;
-          // IA 设计稿（规则 4）：待办徽章数一处计算两处消费——工作台待办与「采集健康」badge 同源。
-          // 采集健康 badge = 断采 + 野指标 + 维护态 Agent（unknown 不计入：未证实失败，不催人动手）
-          var maintained = agents.filter(function (a) { return a.status === "stopped" && window.tenantVisible(a); }).length;
-          var pending = (flows && flows.flows ? flows.flows : []).filter(function (f) {
-            return f.status === 'running' || f.status === 'blocked' || f.status === 'stalled' || f.status === 'failed';
-          }).length;
-          var map = { slo: stale + wild + maintained, "onboard-center": pending };
+          var map = { slo: computeTodos(recon, flows).total };
           Object.keys(map).forEach(function (page) {
             var n = map[page];
             var a = document.querySelector('nav a[data-page="' + page + '"]');

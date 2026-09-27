@@ -1302,52 +1302,12 @@ function mdRender(md) {
           window._targets = list||[]; targetRender();
         }).catch(function(){});
       }
-      function targetDelete(id, name) {
-        if (!confirm('确定删除采集目标「'+name+'」？分派 Agent 的配置将同步变更。')) return;
-        fetch(API+'/targets?id='+id,{method:'DELETE'}).then(function(r){return r.json()}).then(function(d){
-          if (d.error) { toast('删除失败: '+d.error,'err'); return; }
-          toast('已删除 '+name,'ok');
-          renderTargets();
-        }).catch(function(){ toast('删除失败','err'); });
-      }
-      function targetEdit(id) {
-        var tg = id ? (window._targets||[]).find(function(x){return x.id===id}) : null;
-        var agentOpts = '<option value="">未分派</option>';
-        agents.forEach(function(a){ agentOpts += '<option value="'+a.id+'"'+(tg&&tg.agent_id===a.id?' selected':'')+'>'+escHtml(a.id)+' ('+(a.type==='proxy'?'Proxy':'Edge')+(a.source==='heartbeat'?' · 心跳':' · 本机')+')</option>'; });
-        renderOverlay(tg?'✏️ 编辑采集目标':'➕ 新增采集目标', function(){
-          var h = '<div style="display:grid;gap:10px;font-size:13px">';
-          h += '<div><b>目标名称 *</b><br><input id="tg-name" value="'+(tg?escHtml(tg.name):'')+'" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px" placeholder="例: order-prod-db-01"></div>';
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
-            + '<div><b>类型</b><br><select id="tg-type" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px">'
-            + ['mysql','redis','kafka','elasticsearch','clickhouse','http'].map(function(t){return '<option'+(tg&&tg.type===t?' selected':'')+'>'+t+'</option>'}).join('')
-            + '</select></div>'
-            + '<div><b>地址 *</b><br><input id="tg-addr" value="'+(tg?escHtml(tg.address):'')+'" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px" placeholder="host:port"></div></div>';
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
-            + '<div><b>分派 Agent</b><br><select id="tg-agent" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px">'+agentOpts+'</select></div>'
-            + '<div><b>采集插件</b><br><input id="tg-plugin" value="'+(tg?escHtml(tg.plugin||''):'')+'" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px" placeholder="例: mysql_probe"></div></div>';
-          h += '<div><b>备注</b><br><input id="tg-note" value="'+(tg?escHtml(tg.note||''):'')+'" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px"></div>';
-          h += '</div><div style="margin-top:16px;display:flex;gap:8px"><button class="btn btn-p" onclick="targetSave('+(tg?tg.id:0)+')">💾 保存</button><button class="btn btn-o" onclick="closeOverlay()">取消</button></div>';
-          return h;
-        });
-      }
-      function targetSave(id) {
-        var body = {
-          id: id,
-          name: document.getElementById('tg-name').value.trim(),
-          type: document.getElementById('tg-type').value,
-          address: document.getElementById('tg-addr').value.trim(),
-          agent_id: document.getElementById('tg-agent').value,
-          plugin: document.getElementById('tg-plugin').value.trim(),
-          note: document.getElementById('tg-note').value.trim()
-        };
-        if (!body.name || !body.address) { toast('名称和地址必填','err'); return; }
-        fetch(API+'/targets',{method:id?'PUT':'POST',headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){
-          if (d.error) { toast('保存失败: '+d.error,'err'); return; }
-          toast(id?'已保存，分派 Agent 配置版本已更新':'已新增，分派 Agent 配置版本已更新','ok');
-          closeOverlay();
-          renderTargets();
-        }).catch(function(){ toast('保存失败','err'); });
-      }
+      // ---- 已删除：targetDelete / targetEdit / targetSave（2026-09-27）----
+      // IA 设计稿 ④ 采集目标「操作流程」定案：本页唯一动作是「看 + 跳」，规则 3 规定目标 CRUD
+      // 只在接入中心。这三个函数在表格里已无按钮引用（表格操作列只剩「测试」「接入过程」），
+      // 属于可被后来者重新挂上的后门——留着就是给"绕过只读"埋雷，故整簇移除。
+      // 需要写目标时：接入中心「＋接入对象」走接入向导（openOnboardWizard），或用资源抽屉
+      // 的 resNewTarget 扩采集。后端 /api/targets 的 POST/PUT/DELETE 端点保留不动。
       // ---- M1-⑤ 接入向导：选插件 → 填目标 → 分派 Agent → 连通性测试 → 配置下发回执 ----
       // prePlugin 预选插件；preAgentID 预选分派 Agent（从资源抽屉进来时必须带，否则建出来的目标
       // 落在"未分派"，本机清单里看不到）；backFn 关闭后回哪页（默认回采集目标页）

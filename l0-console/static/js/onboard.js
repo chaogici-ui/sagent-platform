@@ -914,6 +914,36 @@ function submitOnboardNew() {
   renderOverlay('📋 接入影响预演', function () {
     var h = '<div style="font-size:12.5px;line-height:1.8">';
     h += '将在 <b>' + picked.length + ' 个资源对象</b> 上发起一条接入流水线，请核对本次影响范围：</div>';
+    // 步骤位置（IA 设计稿 6.2 屏幕①：预演影响 = 第 3 步 / 共 5 步）
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">'
+      + '<span class="badge b-h">① 登记对象 ✅</span><span class="badge b-h">② 选方式 ✅</span>'
+      + '<span class="badge b-s">③ 预演影响</span>'
+      + '<span class="badge" style="background:#eef1f3;color:var(--muted)">④ 安装命令</span>'
+      + '<span class="badge" style="background:#eef1f3;color:var(--muted)">⑤ 心跳确认</span></div>';
+
+    // —— 影响预览四要素（IA 设计稿 6.2 屏幕①：先回答再发命令）——
+    // 影响目标：本机路径每台主机按所选能力建目标，未选能力时至少 1 个地基目标
+    var obPerHost = Math.max(abilities.length, 1);
+    var obWantTargets = picked.length * obPerHost;
+    // 理论频次：从插件 params 的 interval 推 samples/min。**非实测，不承诺 CPU/带宽**——
+    // 本向导没有 interval 声明时不估算，如实写「随插件默认间隔」，不编数字。
+    var obSecOf = function (v) {
+      var m = String(v == null ? '' : v).trim().match(/^(\d+)\s*([smh]?)$/);
+      if (!m) return 0;
+      var n = parseInt(m[1], 10);
+      return m[2] === 'h' ? n * 3600 : (m[2] === 'm' ? n * 60 : n);
+    };
+    var obFreqBits = [], obFreqSum = 0;
+    abilities.forEach(function (aid) {
+      var pv = (collected.params && collected.params[aid]) || {};
+      var iv = pv.interval || pv.scrape_interval || '';
+      var sec = obSecOf(iv);
+      if (sec > 0) { obFreqSum += 60 / sec; obFreqBits.push(obEscape(aid) + ' ' + obEscape(iv) + '（' + (60 / sec).toFixed(1) + ' samples/min）'); }
+    });
+    var obFreqTxt = obFreqBits.length
+      ? (obFreqSum.toFixed(1) + ' samples/min per 主机　' + obFreqBits.join(' · '))
+      : '随插件默认间隔（本向导未声明 interval，不估算）';
+
     h += '<table style="width:100%;font-size:12.5px;margin-top:10px;border-collapse:collapse"><tbody>';
     h += '<tr><td style="padding:6px 8px;color:var(--muted);width:110px">资源对象</td><td style="padding:6px 8px"><code>' + obEscape(picked.join(', ')) + '</code></td></tr>';
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">目标类型</td><td style="padding:6px 8px">' + obEscape(kind === 'docker' ? 'Docker 容器' : '真实主机') + '</td></tr>';
@@ -921,8 +951,15 @@ function submitOnboardNew() {
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">采集能力</td><td style="padding:6px 8px">' + (abilNames.length ? abilNames.join(' · ') : '<span style="color:var(--muted)">（地基能力）</span>') + '</td></tr>';
     var sshp = parseInt(obVal('ob-ssh-port'), 10) || 22;
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">SSH 连接</td><td style="padding:6px 8px">' + obEscape(obVal('ob-ssh-user') || '(未填)') + ' @ 端口 ' + sshp + (obVal('ob-ssh-pass') ? '（已填密码）' : '（未填密码 → 人工执行回馈模式）') + '</td></tr>';
+    // 四要素：影响目标 / 理论频次 / 网络要求 / 回退方式（设计稿 6.2 屏幕① 原文四问）
+    h += '<tr><td style="padding:6px 8px;color:var(--muted)">影响目标</td><td style="padding:6px 8px">'
+      + picked.length + ' 台主机 · 新增采集目标 <b>' + obWantTargets + '</b> 个</td></tr>';
+    h += '<tr><td style="padding:6px 8px;color:var(--muted)">理论频次</td><td style="padding:6px 8px">' + obFreqTxt
+      + ' <span style="color:var(--muted)">（非实测，不承诺 CPU/带宽）</span></td></tr>';
+    h += '<tr><td style="padding:6px 8px;color:var(--muted)">网络要求</td><td style="padding:6px 8px">出站 8460 → l1-gateway（VIP）；无需任何入站端口</td></tr>';
+    h += '<tr><td style="padding:6px 8px;color:var(--muted)">回退方式</td><td style="padding:6px 8px">接入中心可原样卸载（走卸载流水线，平台侧保留对象档案与历史样本）；全过程变更中心留痕</td></tr>';
     h += '</tbody></table>';
-    h += '<div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-p" onclick="doSubmitOnboardNew()">✅ 确认创建</button><button class="btn btn-o" onclick="closeOverlay()">返回修改</button></div>';
+    h += '<div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-p" onclick="doSubmitOnboardNew()">影响确认 · 确认创建</button><button class="btn btn-o" onclick="closeOverlay()">返回修改</button></div>';
     return h;
   }, true);
   // 记住本次选择，供 doSubmitOnboardNew 二次采集

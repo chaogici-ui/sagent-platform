@@ -24,6 +24,37 @@ function renderHealthOverview() {
       + (d.recon && d.recon.generated_at ? ' · 对账时间 ' + ovEsc(d.recon.generated_at) : '') + '</span>'
       + '<button class="btn btn-o btn-sm" style="float:right" onclick="renderHealthOverview()">↻ 刷新</button></div><div class="card-bd">';
 
+    // —— 结论卡（IA 设计稿 ① 工作台 样式要点 1）：页面最顶部最醒目的元素 ——
+    // --teal-soft 底 + 4px 左边框，按 健康/异常/不可用 三色切换（--success / --warn / --error）。
+    // 覆盖率与采集健康页**同口径**（分母 = summary.checked 可核对目标数）；checked=0 显示「不适用」，
+    // 绝不画一根 100% 的假健康条——数据同源，下钻代替复制（规则 4）。
+    var ovChk = summary.checked || 0, ovStale = summary.stale || 0, ovWild = summary.wild || 0;
+    var ovVmOk = summary.vm_reachable !== false;
+    // 待办三类与左侧导航「采集健康」badge 同源：computeTodos 一处计算、两处消费（规则 4 / 样式要点 2）
+    var ovTodos = (typeof window.computeTodos === 'function')
+      ? window.computeTodos(d.recon, d)
+      : { drafts: ovStale, approvals: 0, blocked: 0, total: ovStale };
+    var ovVerdict, ovColor, ovSoft;
+    if (!ovVmOk || d.err) {
+      ovVerdict = '✕ 采集实况不可用：VM 不可达，无法判定谁在报、谁断了';
+      ovColor = 'var(--error)'; ovSoft = 'var(--red-soft)';
+    } else if (ovTodos.total > 0) {
+      ovVerdict = '⚠ 有 ' + ovTodos.total + ' 项在等你：' + ovTodos.drafts + ' 份修复草案待复核 · '
+        + ovTodos.approvals + ' 笔变更待批准 · ' + ovTodos.blocked + ' 个任务受阻';
+      ovColor = 'var(--warn)'; ovSoft = 'var(--amber-soft)';
+    } else {
+      ovVerdict = '✅ 平台健康：已核对 ' + ovChk + ' 个目标全部在报，VM 无野指标，Agent 无异常';
+      ovColor = 'var(--success)'; ovSoft = 'var(--teal-soft)';
+    }
+    var ovCover = ovChk > 0
+      ? ('覆盖率 ' + Math.round((ovChk - ovStale) / ovChk * 100) + '%（可核验 ' + (ovChk - ovStale) + '/' + ovChk + '）')
+      : ('覆盖率 —（' + (ovVmOk ? '无可核对目标，不适用' : 'VM 不可达，不可判') + '）');
+    h += '<div style="background:' + ovSoft + ';border-left:4px solid ' + ovColor + ';border-radius:0 8px 8px 0;padding:12px 14px;margin-bottom:12px">'
+      + '<div style="font-size:13.5px;font-weight:600;color:' + ovColor + '">' + ovEsc(ovVerdict) + '</div>'
+      + '<div style="font-size:11.5px;color:var(--muted);margin-top:5px;display:flex;gap:14px;flex-wrap:wrap">'
+      + '<span>对账引擎' + (d.recon && d.recon.generated_at ? ' · ' + ovEsc(d.recon.generated_at) : ' · 时间未回传') + '</span>'
+      + '<span>' + ovEsc(ovCover) + '</span></div></div>';
+
     // 证据链概要（共享实现见 buildEvidenceChainHTML，与采集健康页同源，口径唯一）
     h += buildEvidenceChainHTML(d);
 
@@ -48,21 +79,37 @@ function renderHealthOverview() {
     setTimeout(function() { renderCtxAssist(d); }, 0); // 数据已在 d 内，下一帧同步渲染（无异步依赖）
     h += '';
 
-    // 待处理：必须有人动手的事（停等的决策、卡住的、失败的）
-    h += '<div class="card" style="margin-top:12px"><div class="card-hd">⚠️ 待处理 <span style="font-weight:400;font-size:11px;color:var(--muted)">停等人工决策 / 卡住 / 失败的流水线——这些是"我该做什么"</span></div><div class="card-bd">';
-    if (!pending.length) {
-      h += '<div style="text-align:center;color:var(--muted);padding:16px">✅ 没有待处理的流水线</div>';
+    // 待办（IA 设计稿 ① 工作台 界面效果）：分三类 chip —— 未复核草案 / 待批准变更 / 受阻任务。
+    // 计数与左侧导航「采集健康」badge 同源（computeTodos 一处计算、两处消费——规则 4）。
+    // 本页不处理：chip 只跳对应页，明细按钮进的是变更过程视图（看，不是改）。
+    var ovChip = function (n, label, cls) {
+      return '<span class="badge ' + cls + '" style="cursor:pointer;font-size:12px;padding:4px 11px"'
+        + ' onclick="goPage(\'changes\')" title="跳变更中心处理">' + n + ' ' + label + '</span>';
+    };
+    h += '<div class="card" style="margin-top:12px"><div class="card-hd">⚠️ 待办（' + ovTodos.total + '）'
+      + '<span style="font-weight:400;font-size:11px;color:var(--muted)">未复核草案 / 待批准变更 / 受阻任务——点击跳对应页处理，本页不处理</span></div><div class="card-bd">';
+    if (!ovTodos.total) {
+      h += '<div style="text-align:center;color:var(--muted);padding:16px">✅ 没有等待你的事</div>';
     } else {
-      h += '<table><thead><tr><th style="width:180px">资源</th><th style="width:150px">操作</th><th>当前环节</th><th style="width:110px">状态</th><th style="width:150px"></th></tr></thead><tbody>';
-      pending.forEach(function (f) {
-        h += '<tr><td><b>' + ovEsc(f.resource_id) + '</b><div style="font-size:11px;color:var(--muted)">' + ovEsc(f.resource_ip || '') + '</div></td>'
-          + '<td style="font-size:12px">' + ovEsc(f.mode_name || f.mode || '') + '</td>'
-          + '<td style="font-size:12px">' + ovEsc(f.current_title || f.current_step || '—')
-          + (f.warn_count ? ' <span class="ob-warn">⚠ ' + f.warn_count + ' 项待复核</span>' : '') + '</td>'
-          + '<td>' + (typeof obBadge === 'function' ? obBadge(f.status, f.wait_kind) : ovEsc(f.status)) + '</td>'
-          + '<td><button class="btn btn-o btn-sm" onclick="openOnboardFlow(' + f.id + ')">去处理</button></td></tr>';
-      });
-      h += '</tbody></table>';
+      // 颜色口径：待复核/待批准＝amber（等你决策），受阻＝red（等你救火）
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px">'
+        + ovChip(ovTodos.drafts, '份修复草案待复核', 'b-s')
+        + ovChip(ovTodos.approvals, '笔变更待批准', 'b-s')
+        + ovChip(ovTodos.blocked, '个任务受阻', 'b-o')
+        + '</div>';
+      if (pending.length) {
+        h += '<div style="margin-top:12px;font-size:11px;color:var(--muted)">明细（只读：点进去看过程，动作在变更中心发生）</div>';
+        h += '<table style="margin-top:6px"><thead><tr><th style="width:180px">资源</th><th style="width:150px">操作</th><th>当前环节</th><th style="width:110px">状态</th><th style="width:150px"></th></tr></thead><tbody>';
+        pending.forEach(function (f) {
+          h += '<tr><td><b>' + ovEsc(f.resource_id) + '</b><div style="font-size:11px;color:var(--muted)">' + ovEsc(f.resource_ip || '') + '</div></td>'
+            + '<td style="font-size:12px">' + ovEsc(f.mode_name || f.mode || '') + '</td>'
+            + '<td style="font-size:12px">' + ovEsc(f.current_title || f.current_step || '—')
+            + (f.warn_count ? ' <span class="ob-warn">⚠ ' + f.warn_count + ' 项待复核</span>' : '') + '</td>'
+            + '<td>' + (typeof obBadge === 'function' ? obBadge(f.status, f.wait_kind) : ovEsc(f.status)) + '</td>'
+            + '<td><button class="btn btn-o btn-sm" onclick="openOnboardFlow(' + f.id + ')">看变更过程</button></td></tr>';
+        });
+        h += '</tbody></table>';
+      }
     }
     h += '</div></div>';
 

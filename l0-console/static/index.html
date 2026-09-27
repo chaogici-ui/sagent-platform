@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SAgent 采集平台</title>
-    <link rel="stylesheet" href="css/style.css?v=15" />
+    <link rel="stylesheet" href="css/style.css?v=16" />
   </head>
   <body>
     <!-- Sidebar -->
@@ -28,9 +28,11 @@
       <a data-page="metrics-browse" onclick="goPage('metrics-browse')">📈 指标大屏</a>
       <a data-page="data-gov" onclick="goPage('data-gov')">🧹 数据治理</a>
       <div class="nav-section">平台</div>
-      <a data-page="platform-health" onclick="goPage('platform-health')">🩺 平台健康</a>
+      <!-- 平台组顺序对齐设计稿 2.1 ⑤（⑩平台设置 → ⑪审计日志 → ⑫平台健康）：
+           追问顺序=平台怎么配 → 谁在何时做了什么 → 平台自己活得好不好。 -->
       <a data-page="settings" onclick="goPage('settings')">⚙️ 平台设置</a>
       <a data-page="audit" onclick="goPage('audit')">📜 审计日志</a>
+      <a data-page="platform-health" onclick="goPage('platform-health')">🩺 平台健康</a>
       <div class="nav-foot"><span id="nav-user">toptea@l0</span> · <span id="nav-ver">v0.4.0</span></div>
     </nav>
 
@@ -108,14 +110,14 @@
       </div>
     </div>
 
-    <script src="js/utils.js?v=30"></script>
+    <script src="js/utils.js?v=31"></script>
     <script src="js/api.js?v=16"></script>
     <script src="js/fleet.js?v=16"></script>
-    <script src="js/panel.js?v=30"></script>
-    <script src="js/onboard.js?v=46"></script>
+    <script src="js/panel.js?v=31"></script>
+    <script src="js/onboard.js?v=47"></script>
     <script src="js/version.js?v=3"></script>
     <script src="js/resources.js?v=19"></script>
-    <script src="js/overview.js?v=7"></script>
+    <script src="js/overview.js?v=8"></script>
     <script src="js/platform.js?v=4"></script>
     <script src="js/app.js?v=17"></script>
     <script>

@@ -82,12 +82,15 @@ nav .nav-foot {
 .ev-ic { font-size: 13px; font-weight: 700; }
 .ev-lb { font-size: 11px; color: var(--muted); font-weight: 600; }
 .ev-dt { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ev-node.ev-ok { border-left-color: var(--success); }
+/* 证据环三态配色（IA 设计稿 3.2 状态规范 + 样式要点 1）：
+   健康 --teal-soft/--success · 失败 --red-soft/--red · 未知 --amber-soft/--amber。
+   未知＝证据缺失或过期，既不失败也不健康——必须用琥珀色顶出来，灰色会被误读成"无问题"。 */
+.ev-node.ev-ok { border-left-color: var(--success); background: var(--teal-soft); }
 .ev-node.ev-ok .ev-ic { color: var(--success); }
-.ev-node.ev-bad { border-left-color: var(--error); }
-.ev-node.ev-bad .ev-ic { color: var(--error); }
-.ev-node.ev-unknown { border-left-color: #b4c1c7; }
-.ev-node.ev-unknown .ev-ic { color: #8aa0aa; }
+.ev-node.ev-bad { border-left-color: var(--red); background: var(--red-soft); }
+.ev-node.ev-bad .ev-ic { color: var(--red); }
+.ev-node.ev-unknown { border-left-color: var(--amber); background: var(--amber-soft); }
+.ev-node.ev-unknown .ev-ic { color: var(--amber); }
 .ev-node.ev-gate {
   justify-content: center; flex: 0 1 auto;
   background: linear-gradient(135deg, var(--sidebar), var(--sidebar-2));
