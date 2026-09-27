@@ -43,8 +43,11 @@
       html += '<table style="font-size:12px"><thead><tr><th>tag</th><th>版本</th><th>架构</th>'
         + '<th>状态</th><th>内核下限</th><th>组件要求</th><th>来源</th><th>更新时间</th><th></th></tr></thead><tbody>';
       if (!_versions.length) {
-        html += '<tr><td colspan="9" style="text-align:center;color:var(--muted)">'
-          + '清单为空：请把 SAgent 二进制放进 data/binaries/<tag>/ 并在 data/versions.yaml 登记</td></tr>';
+        // 空态（P3）：统一走 stEmpty——原来只说"清单为空"，没把"下一步怎么办"说成人能执行的话
+        html += '<tr><td colspan="9">' + stEmpty({
+          icon: '🧬', title: '版本清单为空',
+          hint: '把 SAgent 二进制放进 <code>data/binaries/&lt;tag&gt;/</code>，再到 <code>data/versions.yaml</code> 登记；重进本页即出现在兼容矩阵里'
+        }) + '</td></tr>';
       }
       _versions.forEach(function (v) {
         html += '<tr><td>' + vEsc(v.tag) + '</td><td>' + vEsc(v.version) + '</td><td>' + vEsc(v.arch) + '</td>'

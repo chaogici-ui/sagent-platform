@@ -249,6 +249,34 @@ tr:hover td { background: #fafbfc; }
 .toast.show { display: block; }
 .toast-ok { background: var(--success); }
 .toast-err { background: var(--error); }
+.toast-warn { background: var(--amber); }
+
+/* ===== 四态骨架（IA 设计稿 P3 通用条款）：loading / error / readonly / empty =====
+   全站唯一实现。页面与抽屉都必须调 stSk / stErr / stEmpty / stRo 产出这四态，
+   禁止再各写一套内联灰字（历史 30+ 处，同一句"暂无数据"在四页是四种灰，且都没给下一步）。
+   语义色严格对齐设计稿 3.2：失败 --red / 未知·警示 --amber —— 不许拿红色表示"未证实"。 */
+.st { padding: 16px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+.st-center { text-align: center; }
+.st-ic { display: block; font-size: 20px; margin-bottom: 6px; }
+.st-t { color: var(--text); font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.st-actions { display: flex; gap: 8px; margin-top: 10px; }
+/* loading：骨架条色带扫过，打开即见到形状，不倒白屏（6.1「载入与失败」定案） */
+.st-sk i { display: block; height: 12px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--line) 25%, var(--bg) 37%, var(--line) 63%);
+  background-size: 400% 100%; animation: stSkSweep 1.2s ease-in-out infinite; }
+.st-sk i + i { margin-top: 10px; }
+.st-sk i:nth-child(2) { width: 62%; }
+.st-sk i:nth-child(3) { width: 80%; }
+@keyframes stSkSweep { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+/* error：错误行 + 重试，绝不静默留白 */
+.st-err { border-left: 3px solid var(--red); background: var(--red-soft); border-radius: 0 8px 8px 0; }
+.st-err .st-t { color: var(--red); }
+/* empty：空态必须给下一步（引导动作或明确去处） */
+.st-empty { border-left: 3px solid var(--line); background: var(--bg); border-radius: 0 8px 8px 0; }
+/* readonly：只读声明条，明说"本页不改东西、要改去哪" */
+.st-ro { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 400;
+  color: var(--muted); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 999px; padding: 1px 9px; vertical-align: middle; }
 @keyframes slideIn {
   from { transform: translateX(100%); }
   to { transform: translateX(0); }

@@ -89,7 +89,11 @@ function renderTasks() {
           var tbody = document.getElementById('tasks-tbody');
           if (!tbody) return;
           if (tasks.length===0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">暂无任务记录</td></tr>';
+            // 空态（P3）：统一走 stEmpty——"没有记录"要说清这是正常的还是有问题的
+            tbody.innerHTML = '<tr><td colspan="5">' + stEmpty({
+              icon: '🧾', title: '还没有落库记录',
+              hint: '本页读的是落库审计（重启不丢）——任何变更动作发生后才会出现记录'
+            }) + '</td></tr>';
           } else {
             tbody.innerHTML = tasks.reverse().map(function(t){
               var badge = t.result.indexOf('失败')>=0 ? 'b-o' : 'b-h';
@@ -437,7 +441,9 @@ function renderMetricsBrowse() {
       //  PAGE: Audit (Operation Log)
       // ===================================================================
             function renderAudit() {
-        var html = '<div class="card"><div class="card-hd">📜 审计日志 <span style="font-weight:400;font-size:11px;color:var(--muted)">谁在何时做了什么？· 本页是合规原始留痕，不做聚合、不提供改写；过程视图见变更中心</span></div><div class="card-bd">';
+        // P3 四态（readonly）：只读页显式声明只读，并指明"过程视图"在哪（避免把审计当变更单看）
+        var html = '<div class="card"><div class="card-hd">📜 审计日志 ' + stRo('合规原始留痕 · 不聚合、不改写')
+          + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">谁在何时做了什么？过程视图见变更中心</span></div><div class="card-bd">';
         html += '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">';
         html += '<input placeholder="搜索操作人/目标/结果..." oninput="auditFilter()" style="width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px" id="audit-search">';
         html += '<select onchange="auditFilter()" id="audit-action" style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="all">全部操作</option></select>';
@@ -452,7 +458,12 @@ function renderMetricsBrowse() {
         fetch(API+"/audit?limit=1000").then(function(r){return r.json()}).then(function(entries){
           window._auditData = entries || [];
           auditRender();
-        }).catch(function(){ document.getElementById("audit-tbody").innerHTML = '<tr><td colspan="6" style="color:var(--error)">加载失败</td></tr>'; });
+        }).catch(function(){
+          // P3 四态（error）：错误行 + 重试。原来只有一句红色"加载失败"，没有重试按钮——
+          // 一次抖动就得刷新整页，等于没给恢复路径。
+          document.getElementById("audit-tbody").innerHTML = '<tr><td colspan="6">'
+            + stErr({ msg: '审计记录取数失败（/api/audit 无响应）', retry: 'renderAudit()' }) + '</td></tr>';
+        });
       }
       function auditFilter() { window._auditPage = 1; auditRender(); }
       function auditGoPage(d) { window._auditPage = Math.max(1, (window._auditPage||1) + d); auditRender(); }
@@ -493,7 +504,13 @@ function renderMetricsBrowse() {
         var tbody = document.getElementById('audit-tbody');
         if (tbody) {
           if (filtered.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted)">无匹配记录</td></tr>';
+            // 空态（P3）：统一走 stEmpty；「筛没了」与「一条留痕都没有」文案分开。
+            // 审计是全站合规底账，"一条都没有"本身就是要让人注意的信号，不能混在搜索无果里。
+            tbody.innerHTML = '<tr><td colspan="6">' + ((entries && entries.length)
+              ? stEmpty({ icon: '🔍', title: '没有匹配的审计记录', hint: '换个关键字 / 操作类型，或清空筛选看全部留痕' })
+              : stEmpty({ icon: '📜', title: '还没有审计留痕',
+                  hint: '接入、启停、卸载、草案复核、配置改动都会在这里逐条落库（本页只读，不改不删）' })
+            ) + '</td></tr>';
           } else {
           tbody.innerHTML = pageItems.map(function(e,i){
             var isFail = e.result.indexOf('失败')>=0;
@@ -768,7 +785,7 @@ function renderPluginShell(tab) {
     + headIcon+(d.display_name||d.name||'')
     + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">'+(d.category||'')+' · '+(d.type||'exporter')+'</span>'
     + '<button class="btn btn-o btn-sm" style="float:right" onclick="renderPluginsMart()">← 返回</button>'
-    + '<button class="btn btn-o btn-sm" style="float:right;margin-right:6px" onclick="goPage(\'targets\'); setTimeout(function(){openOnboardWizard(\''+(d.name||'')+'\')},300)" title="到采集目标菜单，通过接入向导接入该插件">⚡ 去接入</button>'
+    + '<button class="btn btn-o btn-sm" style="float:right;margin-right:6px" onclick="goPage(\'resources\'); setTimeout(function(){typeof openOnboardNew===\'function\'&&openOnboardNew()},200)" title="到接入中心发起接入（走流水线留痕）">⚡ 去接入</button>'
     + '<button class="btn btn-o btn-sm" style="float:right;margin-right:6px" onclick="exportPlugin('+d.id+')" title="导出插件包（说明+指标+仪表盘）">⬇ 导出</button></div>';
   html += '<div class="detail-tabs" style="border-bottom:1px solid var(--border);padding:0 20px">'
     + '<span class="'+(tab==='doc'?'active':'')+'" onclick="switchPluginTab('+d.id+',\'doc\')">📖 采集说明</span>'
@@ -963,7 +980,10 @@ function mdRender(md) {
         } else {
           h += pmRowsHTML(items);
         }
-        if (filtered.length===0) h = '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--muted)">无匹配指标</td></tr>';
+        if (filtered.length===0) h = '<tr><td colspan="5">' + stEmpty({
+          icon: '🔍', title: '没有匹配的指标',
+          hint: '当前分组 / 关键字条件下 0 条 —— 换个条件或展开全部分组再看'
+        }) + '</td></tr>';
         tbody.innerHTML = h;
         ensureVmNames(function(){ if (document.getElementById('pm-tbody')) pmTbodyRender(); });
         var pager = document.getElementById('pm-pager');
@@ -1215,7 +1235,9 @@ function mdRender(md) {
       function renderTargets() {
         // 2026-09-26 IA 改造：采集目标降为只读矩阵（IA 规则 3——目标 CRUD 收口进接入中心）。
         // 保留：测试（连通性探测，不改配置）、接入过程下钻、所属资源/Agent 下钻。
-        var html = '<div class="card"><div class="card-hd">🎯 采集目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">每台采什么、分派给谁？只读矩阵 · 新增/修改/删除请走接入中心</span>'
+        // P3 四态（readonly）：只读页必须显式声明只读并指明写入口在哪（设计稿规则 3 + P3 通用条款）
+        var html = '<div class="card"><div class="card-hd">🎯 采集目标 ' + stRo('只读矩阵 · 新增/修改/删除只在接入中心')
+          + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">每台采什么、分派给谁？</span>'
           + '<button class="btn btn-o btn-sm" style="float:right" onclick="goPage(\'resources\')">去接入中心接入 →</button></div><div class="card-bd">';
         html += '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">';
         html += '<input placeholder="搜索目标..." oninput="targetFilter()" style="width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px" id="target-search">';
@@ -1258,7 +1280,20 @@ function mdRender(md) {
         });
         var tbody = document.getElementById('target-tbody');
         if (!tbody) return;
-        if (filtered.length===0) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">尚无采集目标——先到「接入中心」完成接入 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">去接入中心 →</a></td></tr>'; return; }
+        if (filtered.length===0) {
+          // 空态（IA 设计稿 P3）：统一走 stEmpty，且「筛没了」与「一个都没有」必须分开——
+          // 混成一句会让人把"筛选无匹配"读成"平台没有目标"
+          var none = !(window._targets||[]).length;
+          tbody.innerHTML = '<tr><td colspan="7">' + (none
+            ? stEmpty({ icon: '🎯', title: '尚无采集目标',
+                hint: '目标是接入流水线的产物——到接入中心选机器、选插件，流程走完就会在这里出现',
+                action: { label: '去接入中心 →', onclick: "goPage('resources')" } })
+            : stEmpty({ icon: '🔍', title: '没有匹配的目标',
+                hint: '当前搜索 / 类型筛选下 0 个 —— 换个条件再看看',
+                action: { label: '清空筛选', onclick: "document.getElementById('target-search').value='';document.getElementById('target-type').value='all';targetFilter()" } })
+          ) + '</td></tr>';
+          return;
+        }
         var flowMap = window._flowMap || {};
         tbody.innerHTML = filtered.map(function(tg){
           var res = tg.last_test_result||'';
@@ -1278,10 +1313,15 @@ function mdRender(md) {
           else if (ag && ag.type==='proxy') carry = '<span class="badge" style="background:#e0f2f1;color:#0b6e66">采集机</span> <a href="javascript:void(0)" onclick="openDetailById(\''+escHtml(tg.agent_id)+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>';
           else carry = '<span class="badge" style="background:#f0f0f0;color:#666">本机采集</span> <a href="javascript:void(0)" onclick="openDetailById(\''+escHtml(tg.agent_id)+'\')" style="color:var(--primary)">'+escHtml(tg.agent_id)+'</a>';
           var iv = targetInterval(tg);
-          var st = res ? (res.indexOf('失败')===0
-            ? '<span class="badge" style="background:#fee2e2;color:var(--error)" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>'
-            : '<span class="badge b-h" title="'+escHtml(tg.last_test_at||'')+'">'+escHtml(res)+'</span>')
-            : '<span class="badge b-o">未测试</span>';
+          // 探测结果三态（2026-09-27）：连通 / 失败 / 不适用。
+          // "不适用"= 该地址形态（如抓取 URL）本就不做 TCP 探测，用灰色表"未证实"，
+          // 不能和"失败"共用红色——那是在报假故障（unknown ≠ failed，IA 设计稿 3.2）。
+          var st = !res ? '<span class="badge b-o">未测试</span>'
+            : (res.indexOf('失败') === 0
+              ? '<span class="badge" style="background:#fee2e2;color:var(--error)" title="' + escHtml(tg.last_test_at || '') + '">' + escHtml(res) + '</span>'
+              : (res.indexOf('不适用') === 0
+                ? '<span class="badge" style="background:#f0f2f3;color:var(--muted)" title="' + escHtml(tg.last_test_at || '') + '">' + escHtml(res) + '</span>'
+                : '<span class="badge b-h" title="' + escHtml(tg.last_test_at || '') + '">' + escHtml(res) + '</span>'));
           if (inChange) st += ' <span class="badge" style="background:#fff5df;color:#946011">变更中 flow-'+fl.id+'</span>';
           var traceBtn = tg.flow_id ? ' <button class="btn btn-o btn-sm" style="font-size:10px;padding:2px 6px" onclick="openOnboardFlow('+tg.flow_id+')" title="回到产生这个目标的接入流水线，看它是怎么走过来的">🧭 接入过程</button>' : '';
           return '<tr'+rowStyle+'><td>'+escHtml(tg.name)+'<div style="font-size:11px;color:var(--muted)"><code>'+escHtml(tg.address)+'</code>'+(resCell?' · 对象 '+resCell:'')+'</div></td>'
@@ -1296,7 +1336,7 @@ function mdRender(md) {
       function targetTest(id) {
         toast('正在测试连通性...', 'ok');
         fetch(API+'/targets/'+id+'/test',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
-          toast(d.result||d.error||'完成', d.ok?'ok':'err');
+          toast(d.result||d.error||'完成', d.ok ? 'ok' : (d.applicable === false ? 'warn' : 'err'));
           return fetch(API+'/targets');
         }).then(function(r){return r.json()}).then(function(list){
           window._targets = list||[]; targetRender();
@@ -1541,7 +1581,10 @@ function mdRender(md) {
         var tbody = document.getElementById("metrics-tbody");
         if (tbody) {
           if (METRICS.length===0) {
-            tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">无匹配指标（可清空过滤条件重试）</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11">' + stEmpty({
+              icon: '🔍', title: '没有匹配的指标',
+              hint: '当前筛选条件下 0 条 —— 清空过滤条件即可看到全部'
+            }) + '</td></tr>';
           } else {
             tbody.innerHTML = pageItems.map(function(m){
               var statusBadge = m.status==='deprecated'?'<span class="badge" style="background:#fef3c7;color:#f59e0b">deprecated</span>':(m.status?'<span class="badge b-h">'+m.status+'</span>':'<span class="badge b-o">-</span>');

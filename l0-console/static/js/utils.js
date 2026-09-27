@@ -90,12 +90,63 @@
           });
         } catch (e) { /* 静默降级 */ }
       }
+      // ==== 四态骨架（IA 设计稿 P3 通用条款）====
+      // 全站 loading / error / readonly / empty 的唯一实现。四条纪律：
+      //   ① 0/0 一律判「不适用」，禁止显示 100%（分母为 0 时百分比没有意义）；
+      //   ② 空态必须带引导动作，或至少说清"下一步去哪"，不许只丢一句"暂无数据"；
+      //   ③ 只读页必须显式声明只读，并指明写入口在哪个页面（规则 3）；
+      //   ④ 取数失败必须给错误行 + 重试，绝不静默留白。
+      // 各页只准调用这四个函数产出状态，禁止再各写一套内联灰字（历史 30+ 处各写各的，
+      // 同一句"暂无数据"在四个页面是四种灰，也没有一处给了下一步）。
+      function stSk(rows) {                     // loading：骨架屏，不白屏
+        var n = rows || 2, h = '<div class="st st-sk" data-st="loading">';
+        for (var i = 0; i < n; i++) h += '<i></i>';
+        return h + '</div>';
+      }
+      function stEmpty(o) {                     // empty：说清"没有"并给下一步
+        o = o || {};
+        var h = '<div class="st st-empty" data-st="empty">';
+        if (o.icon) h += '<span class="st-ic">' + o.icon + '</span>';
+        h += '<div class="st-t">' + (o.title || '暂无数据') + '</div>';
+        if (o.hint) h += '<div>' + o.hint + '</div>';
+        if (o.action && o.action.label) {
+          h += '<div class="st-actions"><button class="btn btn-p btn-sm" onclick="' + o.action.onclick + '">'
+            + o.action.label + '</button></div>';
+        }
+        return h + '</div>';
+      }
+      function stErr(o) {                       // error：错误行 + 重试，不静默留白
+        o = o || {};
+        var h = '<div class="st st-err" data-st="error"><div class="st-t">⚠ 加载失败</div>'
+          + '<div>' + (o.msg || '取数失败') + '</div>';
+        if (o.retry) h += '<div class="st-actions"><button class="btn btn-o btn-sm" onclick="' + o.retry + '">重试</button></div>';
+        return h + '</div>';
+      }
+      function stRo(text) {                     // readonly：只读声明条
+        return '<span class="st-ro" title="本页不产生变更单，写操作在别处">🔒 ' + (text || '只读') + '</span>';
+      }
+      window.stSk = stSk; window.stEmpty = stEmpty; window.stErr = stErr; window.stRo = stRo;
+
       // ==== Page routing ====
+      // P3 四态兜底挂在路由层：goPage 是"打开任意一页"的唯一入口，一处改动覆盖全部 12 页，
+      // 不用每页各写一遍。loading = 先落骨架屏（不白屏）；error = 渲染器同步抛错、或 12s 后
+      // 骨架还在（取数失败被 catch 静默吞掉的典型症状）→ 兜成"错误行 + 重试"。
+      // readonly / empty 由各页渲染器调 stRo / stEmpty 产出。
+      var _pageSeq = 0, _pageWatch = null;
+      // 只开叠加层、不写主内容区的深链页不套骨架与看门狗，否则会误报"加载失败"
+      var _noPageGuard = { add: 1 };
       function goPage(page) {
         currentPage = page;
         window._prevView = null; // 正常导航时清空 overlay 返回记忆，防粘性回错页面
         document.querySelectorAll("nav a").forEach(function(a){a.classList.toggle("active",a.dataset.page===page)});
-        switch (page) {
+        var _seq = ++_pageSeq, _guard = !_noPageGuard[page];
+        clearTimeout(_pageWatch);
+        if (_guard) {
+          var mc0 = document.getElementById("main-content");
+          if (mc0) mc0.innerHTML = stSk(3);
+        }
+        try {
+          switch (page) {
           // —— 四项菜单（2026-09-22 用户评审后的信息架构）——
           case "overview": renderHealthOverview(); break;
           case "resources": renderResources(); break;      // 资源与接入（resources.js，主战场）
@@ -118,8 +169,24 @@
           case "versions": renderVersions(); break; // 版本与兼容（version.js）
           case "tenants": renderTenants(); break;
           default: renderHealthOverview();
+          }
+        } catch (e) {
+          // 渲染器同步抛错：给错误行 + 重试，别让人对着白屏猜
+          var mce = document.getElementById("main-content");
+          if (mce) mce.innerHTML = stErr({ msg: (e && e.message) || String(e), retry: "goPage('" + page + "')" });
         }
         renderStats(); // 统计条随页面显隐（见 statsRelevantPage）
+        // 看门狗：12s 后主内容区还是骨架 → 该页渲染器一个字节都没写出来，兜成错误态。
+        // _seq 比对防止"先开的慢页"误伤"后开的页"。
+        if (_guard) {
+          _pageWatch = setTimeout(function () {
+            if (_seq !== _pageSeq) return;
+            var mc = document.getElementById("main-content");
+            if (mc && mc.querySelector('.st-sk')) {
+              mc.innerHTML = stErr({ msg: '超时：' + page + ' 的数据没能取回来（后端未响应或接口报错）', retry: "goPage('" + page + "')" });
+            }
+          }, 12000);
+        }
       }
 
       // ==== 多租户(D3) 界面隔离：租户下拉 + 全局可见性过滤 ====
@@ -250,7 +317,10 @@
         var t = document.getElementById("toast");
         if (!t) return;
         t.textContent = msg;
-        t.className = "toast toast-" + (type === "err" ? "err" : "ok") + " show";
+        // 三态提示（IA 设计稿 3.2 unknown≠failed）：ok / err / warn。
+        // "不适用""待确认"这类既非成功也非失败的结果走 warn 琥珀色——
+        // 拿红色当"未证实"就是在报假故障。
+        t.className = "toast toast-" + (type === "err" ? "err" : type === "warn" ? "warn" : "ok") + " show";
         setTimeout(function () {
           t.classList.remove("show");
         }, 2500);

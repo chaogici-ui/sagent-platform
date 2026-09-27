@@ -131,9 +131,13 @@
       var v = document.getElementById('ph-verdict');
       var meta = document.getElementById('ph-meta');
       if (!d || !d.components) {
+        // P3 四态（error）：端点不可用要给错误行 + 重试，不能只丢一句"不可用"让人自己想办法
         if (v) { v.textContent = '⚠ 平台自检端点不可用'; v.style.color = 'var(--error)'; }
         var cb = document.getElementById('ph-comps');
-        if (cb) cb.textContent = '自检端点不可用';
+        if (cb) {
+          cb.style.textAlign = 'left';
+          cb.innerHTML = stErr({ msg: '平台自检接口（/api/health）无响应，或返回里没有组件清单', retry: 'fetchHealth()' });
+        }
         return;
       }
       var stMap = {
@@ -181,7 +185,8 @@
           })()
         : '对账引擎不可用 ⚠';
       if (!proxies.length) {
-        lb.innerHTML = '暂无采集机（proxy）—— <span style="color:var(--muted)">' + rcTxt + '</span>';
+        // 空态（P3）：统一走 stEmpty；rcTxt（对账引擎心跳）保留——它是"当前实况"，不是装饰
+        lb.innerHTML = stEmpty({ icon: '🛰', title: '还没有 L1 采集机', hint: rcTxt });
       } else {
         lb.style.textAlign = 'left';
         lb.innerHTML = rows + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">' + rcTxt + '</div>';

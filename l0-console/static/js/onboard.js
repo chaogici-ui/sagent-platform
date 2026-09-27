@@ -576,8 +576,8 @@ window.chDraftAck = function (i, decision) {
 
 window.renderChanges = function () {
   var el = document.getElementById('main-content');
-  el.innerHTML = '<div class="card"><div class="card-hd">📋 变更中心'
-    + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">谁动了它、怎么走过来的？统一变更时间线（过程聚合视图，合规原始留痕见审计日志）</span>'
+  el.innerHTML = '<div class="card"><div class="card-hd">📋 变更中心 ' + stRo('过程聚合视图 · 合规原始留痕在审计日志')
+    + ' <span style="font-weight:400;font-size:11px;color:var(--muted)">谁动了它、怎么走过来的？</span>'
     + '<button class="btn btn-p btn-sm" style="float:right" onclick="openOnboardNew()">➕ 新接入</button></div>'
     + '<div class="card-bd" id="ch-body"><div style="text-align:center;color:var(--muted);padding:20px">⏳ 汇总变更流水线与审计…</div></div></div>'
     + '<div class="card" style="margin-top:16px" id="ch-draft"><div class="card-hd">🩹 修复草案复核 '

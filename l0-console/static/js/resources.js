@@ -178,6 +178,10 @@
     Promise.all(urls.map(function (u) {
       return fetch(API + u).then(function (r) { return r.json(); }).catch(function () { return null; });
     })).then(function (out) {
+      // P3 四态（error）：主台账 /resources 拉不到不能静默降级成"没有对象"——
+      // 那会把"平台连不上"读成"还没接入任何东西"，是最误导人的一种失败。
+      // 其余接口容忍缺失（各自降级为空），只有主台账失败才判错误态。
+      if (!out[0]) { cb(null, '资源台账接口（/api/resources）无响应'); return; }
       var res = out[0] || {}, agents = out[1] || [], flows = out[2] || {}, recon = out[3],
         stats = out[4] || {}, vers = out[5] || {}, targets = out[6] || [];
       var d = {
@@ -201,8 +205,15 @@
   // ---------- 页面 ----------
   function renderResources() {
     var mc = document.getElementById('main-content');
-    mc.innerHTML = '<div class="card"><div class="card-bd" style="text-align:center;color:var(--muted);padding:24px">⏳ 正在汇总资源、Agent、流水线与采集实况…</div></div>';
-    resFetchAll(function (d) {
+    // P3 四态（loading）：打开即骨架屏，不倒白屏（原来是"⏳ 正在汇总…"一行字，看不出形状）
+    mc.innerHTML = '<div class="card"><div class="card-bd">' + stSk(3) + '</div></div>';
+    resFetchAll(function (d, ferr) {
+      // P3 四态（error）：取数失败给错误行 + 重试，不静默留白
+      if (ferr) {
+        mc.innerHTML = '<div class="card"><div class="card-bd">'
+          + stErr({ msg: ferr, retry: 'renderResources()' }) + '</div></div>';
+        return;
+      }
       _resData = d;
       resRenderPage();
     });
@@ -293,16 +304,20 @@
       out += resRowHTML(r);
     });
     if (!shown) {
-      // 空态规范（IA 设计稿）：空台账给解释 + 引导动作（主按钮），不显示空表格；
-      // 「筛没了」与「没有对象」文案必须分开，避免把前者读成后者。
+      // 空态规范（IA 设计稿 P3）：统一走 stEmpty（解释 + 引导动作）。
+      // 「筛没了」与「没有对象」文案必须分开，否则会把"筛选无匹配"读成"一个对象都没有"。
       if (!rows.length) {
-        return '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:26px">'
-          + '<div style="font-size:14px;margin-bottom:6px">还没有对象</div>'
-          + '<div style="font-size:12px;margin-bottom:10px">本机 Agent 与远程采集对象共用这本台账——登记后由平台走变更流程完成接入</div>'
-          + '<button class="btn btn-p btn-sm" onclick="openOnboardNew()">＋ 接入第一个对象</button></td></tr>';
+        return '<tr><td colspan="8">' + stEmpty({
+          icon: '🗂', title: '还没有对象',
+          hint: '本机 Agent 与远程采集对象共用这本台账——登记后由平台走变更流程完成接入',
+          action: { label: '＋ 接入第一个对象', onclick: 'openOnboardNew()' }
+        }) + '</td></tr>';
       }
-      return '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">'
-        + '没有匹配的对象（当前筛选条件下 0 个）—— <a href="javascript:void(0)" onclick="resResetFilters()" style="color:var(--primary)">清空筛选</a></td></tr>';
+      return '<tr><td colspan="8">' + stEmpty({
+        icon: '🔍', title: '没有匹配的对象',
+        hint: '当前筛选条件下 0 个 —— 换个条件，或清空筛选看全部',
+        action: { label: '清空筛选', onclick: 'resResetFilters()' }
+      }) + '</td></tr>';
     }
     return out;
   }
@@ -493,14 +508,15 @@
     }).catch(function (e) { toast('发起失败：' + (e && e.message || e), 'err'); });
   };
 
-  // resNewTarget 给这台机器扩采集：走接入向导（插件从平台能力目录选、带参数与连通测试、下发后回执），
-  // 并把本机 Agent 预选好。走向导而不是那个精简表单，是因为"扩展采集"要选能力、填参数、验连通，
-  // 精简表单只能手打插件名、既无参数也不测通不通（2026-09-24 用户确认要保留此入口后修正）
-  window.resNewTarget = function (agentID) {
+  // resNewTarget 给这台机器扩采集：统一收口到接入中心主入口（openOnboardNew），走流水线留痕。
+  // 之前走 panel.js 的 openOnboardWizard → 直接 POST /targets，不建 flow、不留审计，是绕过变更中心的后门。
+  // 注意：openOnboardNew 是整机接入向导，当前没有"仅扩展采集目标"的专用 mode，
+  // 用户需在向导里重新选中这台机器的资源——多一步操作，但保证写操作全部留痕（规则 3）。
+  window.resNewTarget = function () {
     closeResourceDrawer();
-    if (typeof openOnboardWizard === 'function') {
-      // 关掉向导回「资源与接入」本页——向导默认回采集目标页，从抽屉进来的话落点不对
-      openOnboardWizard(null, agentID || null, function () { goPage('resources'); });
+    goPage('resources');
+    if (typeof openOnboardNew === 'function') {
+      openOnboardNew();
     }
   };
 
@@ -534,17 +550,9 @@
   }
 
   // ---------- 机器详情抽屉（图 3） ----------
-  window.openResourceDrawer = function (key) {
-    var r = resFind(key);
-    if (!r) {
-      // 从别的页面跳进来（采集目标页「所属资源」等）时资源数据可能还没拉过，先补一次
-      resFetchAll(function (d) {
-        _resData = d;
-        if (!resFind(key)) { toast('资源不存在（可能已被删除）', 'err'); return; }
-        openResourceDrawer(key);
-      });
-      return;
-    }
+  // 抽屉外壳：只画遮罩 + 面板 + 给定内容，供「详情就绪 / 骨架 / 错误」三态复用。
+  // IA 设计稿 6.1「载入与失败」定案：打开即显示骨架屏（不白屏）；数据失败显示错误行 + 重试按钮。
+  function resDrawerShell(key, inner, w) {
     _drawerKey = key;
     var m = document.getElementById('res-drawer-mask');
     var old = document.getElementById('res-drawer');
@@ -560,14 +568,45 @@
     d.className = 'res-drawer';
     // 抽屉宽度档位（IA 设计稿 6.1）：对象详情内容列数多（档案/版本/采集目标/最近数据/动作/过程记录），
     // 挂 xl 宽详情档；轻量抽屉（修复草案三段、卸载确认）用 l/m 档。
-    d.setAttribute('data-w', 'xl');
-    d.innerHTML = resDrawerHTML(r);
+    d.setAttribute('data-w', w || 'xl');
+    d.innerHTML = inner;
     document.body.appendChild(m);
     document.body.appendChild(d);
     requestAnimationFrame(function () {
       d.classList.add('open');
       m.classList.add('open');
     });
+  }
+
+  // 抽屉标题栏（骨架态与错误态共用，避免这两态缺了关不掉抽屉的 ✕）
+  function resDrawerHead(key) {
+    return '<div class="res-drawer-hd"><b style="font-size:14px">' + rEsc(key) + '</b>'
+      + '<span style="margin-left:auto;cursor:pointer" onclick="closeResourceDrawer()">✕</span></div>';
+  }
+
+  window.openResourceDrawer = function (key) {
+    var r = resFind(key);
+    if (!r) {
+      // 从别的页面跳进来（采集目标页「所属资源」等）时资源数据可能还没拉过：
+      // 先把抽屉打开落骨架屏（不白屏），补拉完就地补丁成详情；失败给错误行 + 重试。
+      resDrawerShell(key, resDrawerHead(key) + '<div class="res-drawer-bd">' + stSk(3) + '</div>');
+      resFetchAll(function (d, ferr) {
+        if (ferr) {
+          resDrawerShell(key, resDrawerHead(key) + '<div class="res-drawer-bd">'
+            + stErr({ msg: ferr, retry: "openResourceDrawer('" + key + "')" }) + '</div>');
+          return;
+        }
+        _resData = d;
+        if (!resFind(key)) {
+          closeResourceDrawer();
+          toast('资源不存在（可能已被删除）', 'err');
+          return;
+        }
+        openResourceDrawer(key);
+      });
+      return;
+    }
+    resDrawerShell(key, resDrawerHTML(r), 'xl');
   };
 
   window.closeResourceDrawer = function () {
@@ -676,13 +715,13 @@
     } else {
       h += '<div style="font-size:12px;color:var(--muted)">这台机器还没有采集目标——采集目标定义"采什么"（MySQL / Redis / HTTP…），登记后才真的开始采</div>';
     }
-    // 空态给的是「给这台机器扩采集」的入口——走接入向导（插件从能力目录选、带参数与连通测试），
-    // 且**预选本机 Agent**：原来这里调 targetEdit() 不带上下文，建出来的目标落在"未分派"，
-    // 本机清单里根本看不到它，等于白填一遍表单（2026-09-24 用户追问后修正）
-    h += '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">'
+    // 空态引导：扩展采集统一收口到接入中心主入口，走流水线留痕（规则 3：一个对象只有一个可写入口）。
+    // 之前这里调 openOnboardWizard → POST /targets 直接建目标，不建 flow、不留变更记录，属绕过变更中心的后门。
+    // 待后端有「扩展采集」专用流水线 mode 后，可再加回直达入口（预选本机 Agent）。
+    h += '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
       + (tgs.length ? '<button class="btn btn-o btn-sm" onclick="goPage(\'targets\')">采集目标页查看</button>'
-                    : (r.agent ? '<button class="btn btn-p btn-sm" onclick="resNewTarget(\'' + rEsc(r.agent.id) + '\')">➕ 新增采集目标</button>' : ''))
-      + (r.agent ? '<button class="btn btn-o btn-sm" onclick="resOpenAgentDetail(\'' + rEsc(r.agent.id) + '\')">改采集配置 / 频率</button>' : '')
+                    : (r.agent ? '<span style="font-size:11px;color:var(--muted)">扩展采集能力请到接入中心发起（走流水线留痕）</span>' : ''))
+      + (r.agent ? '<button class="btn btn-o btn-sm" onclick="resNewTarget()">去接入中心 →</button>' : '')
       + '</div></div>';
 
     // ④ 最近数据（VM 实测）

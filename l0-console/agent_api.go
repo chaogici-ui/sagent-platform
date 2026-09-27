@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -12,6 +13,40 @@ import (
 
 	storepkg "github.com/sagent/l0-console/store"
 )
+
+// probeAddr 把采集目标地址归一化成 TCP dial 可用的 host:port，供连通性探测使用。
+// 返回 (地址, 原因)：原因非空 = 该地址形态不适合做 TCP 连通性探测（"不适用"，不是"失败"）。
+//
+// 为什么在探测侧而不是写入侧归一化：prometheus_scrape 目标的 address 是完整抓取 URL，
+// 其中的 /metrics 路径与查询串对抓取本身有意义，写库时截断会把抓取配置弄坏。
+// 只有"做不做得了 TCP 探测"这件事需要 host:port，所以就在探测这一处收敛。
+func probeAddr(raw string) (string, string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "目标未登记地址"
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", "地址不是合法 URL（" + err.Error() + "）"
+		}
+		if u.Host == "" {
+			return "", "URL 未声明主机（示例 http://10.0.0.1:9100/metrics）"
+		}
+		if u.Port() == "" {
+			return "", "抓取 URL 未声明端口，不做 TCP 探测（示例 http://" + u.Hostname() + ":9100/metrics）"
+		}
+		return u.Host, ""
+	}
+	// 非 URL 形态：容忍 host:port/metrics 这类带路径的裸写法，剥掉路径与查询后再校验
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		return "", "地址不是 host:port 形态（示例 10.0.0.1:9100）"
+	}
+	return s, ""
+}
 
 // registerAgentRoutes 注册 Agent 生命周期与采集目标相关 API
 func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.DB) {
@@ -376,16 +411,31 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			return
 		}
 		start := time.Now()
-		conn, err := net.DialTimeout("tcp", tgt.Address, 3*time.Second)
+		// 地址归一化（2026-09-27 修）：prometheus_scrape 类目标的 address 存的是完整抓取 URL
+		// （路径与查询串对抓取有意义，不能在写入侧规范化掉），而 TCP 探测只吃 host:port。
+		// 旧实现直接把 tgt.Address 塞进 Dial，URL 形态会得到
+		// "dial tcp: address http://…:9100/metrics: too many colons in address" ——
+		// 这个报错把人引向"网络不通"，而真因是地址形态不适用探测。
+		dialAddr, why := probeAddr(tgt.Address)
+		applicable := why == ""
 		result := ""
-		if err != nil {
-			result = "失败: " + err.Error()
-		} else {
-			conn.Close()
-			result = fmt.Sprintf("连通 (%d ms)", time.Since(start).Milliseconds())
+		ok := false
+		switch {
+		case !applicable:
+			// 不适用 ≠ 失败：该形态本就不该做 TCP 探测，前端按灰色"不适用"渲染，不报假故障
+			result = "不适用: " + why
+		default:
+			conn, derr := net.DialTimeout("tcp", dialAddr, 3*time.Second)
+			if derr != nil {
+				result = "失败: " + derr.Error()
+			} else {
+				conn.Close()
+				result = fmt.Sprintf("连通 (%d ms)", time.Since(start).Milliseconds())
+				ok = true
+			}
 		}
 		_ = catDB.UpdateTargetTest(id, result)
-		writeJSON(w, map[string]interface{}{"ok": err == nil, "result": result})
+		writeJSON(w, map[string]interface{}{"ok": ok, "applicable": applicable, "result": result})
 	})
 
 	// API: 执行操作
