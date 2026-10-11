@@ -238,17 +238,36 @@ func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage
 		}
 		switch t.Plugin {
 		case constants.PluginNameMySQLProbe:
-			dsn := ""
-			if t.ParamsJSON != "" {
-				var pj struct {
-					DSN string `json:"dsn"`
-				}
-				if json.Unmarshal([]byte(t.ParamsJSON), &pj) == nil {
-					dsn = pj.DSN
-				}
+			// 托管 DSN 构造：平台 params 是 address/port/username/password（params.yaml 声明），
+			// 与 redis_probe 同构拼 DSN——只读 dsn/address 会把 user/pass 丢掉（实测 156：
+			// my.cnf 的 user/password 为空 → exporter 无凭据 → mysql_up=0）
+			var pj struct {
+				Address  string `json:"address"`
+				Port     string `json:"port"`
+				Username string `json:"username"`
+				Password string `json:"password"`
+				DSN      string `json:"dsn"`
+				Mode     string `json:"mode"`
+				Interval string `json:"interval"`
 			}
+			if t.ParamsJSON != "" {
+				_ = json.Unmarshal([]byte(t.ParamsJSON), &pj)
+			}
+			dsn := pj.DSN
 			if dsn == "" {
-				dsn = t.Address // 兼容：直接把 DSN 填在 address 的登记方式
+				addr := pj.Address
+				if addr == "" {
+					addr = t.Address // 兼容：直接把 DSN 填在 address 的登记方式
+				}
+				port := pj.Port
+				if port == "" {
+					port = "3306"
+				}
+				if pj.Username != "" || pj.Password != "" {
+					dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/", pj.Username, pj.Password, addr, port)
+				} else {
+					dsn = addr
+				}
 			}
 			if dsn == "" || t.ResourceID == "" {
 				return nil, fmt.Errorf("managed mysql_probe target %q: dsn 与 resource_id 均必填", targetName(t))
