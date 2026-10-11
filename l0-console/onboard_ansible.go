@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1604,21 +1605,26 @@ func loadInstallPlaybook(binSrc, binSHA, cfgSrc, destHome string) string {
 // 作为离线证据（不再被 vmagent 读取，仅供排障核对）。
 // 端口取 AGENT_HTTP_PORT（与渲染给目标机的 listen 同源）
 func registerScrapeTarget(catDB *storepkg.DB, resourceID, host string) (string, error) {
-	dir := filepath.Join("data", "scrape-sd")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
 	addr := host + ":" + cfgAgentHTTPPort
-	doc := []map[string]any{{
-		"targets": []string{addr},
-		"labels":  map[string]string{"resource_id": resourceID, "source": "onboard_flow"},
-	}}
-	b, _ := json.Marshal(doc)
-	p := filepath.Join(dir, resourceID+".json")
-	if err := os.WriteFile(p, b, 0o644); err != nil {
-		return "", err
+	// 旧路径共享 file_sd（池化后不再被 vmagent 读取，仅离线证据）：写失败**不阻塞**池登记——
+	// 否则目录不可写（bind mount 属主漂移，如 mac 打包的 uid 501 目录在容器内 deploy 无写权限）
+	// 会把采集目标登记整体打断：156 实测 permission denied → vmpRegisterOnboarded 未执行
+	// → 池账本空 → vmagent 无 sd → 序列不入 VM → observe_collect 永远卡住
+	dir := filepath.Join("data", "scrape-sd")
+	p := ""
+	if err := os.MkdirAll(dir, 0o755); err == nil {
+		doc := []map[string]any{{
+			"targets": []string{addr},
+			"labels":  map[string]string{"resource_id": resourceID, "source": "onboard_flow"},
+		}}
+		b, _ := json.Marshal(doc)
+		p = filepath.Join(dir, resourceID+".json")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			log.Printf("registerScrapeTarget: 旧路径证据文件写失败（不阻塞池登记）: %v", err)
+			p = ""
+		}
 	}
-	// 池登记（账本轨）：失败不影响已写好的证据文件，调用方按原口径降级 warn
+	// 池登记（账本轨）才是采集目标的正轨：调度器据账本落 vmagent sd，失败才真正影响采集
 	if err := vmpRegisterOnboarded(catDB, resourceID, addr); err != nil {
 		return p, err
 	}
@@ -1632,7 +1638,8 @@ func registerScrapeTarget(catDB *storepkg.DB, resourceID, host string) (string, 
 func unregisterScrapeTarget(catDB *storepkg.DB, resourceID string) (string, error) {
 	p := filepath.Join("data", "scrape-sd", resourceID+".json")
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-		return p, err
+		// 旧路径证据文件删失败不阻塞池摘除（与 register 同口径：正轨是池账本）
+		log.Printf("unregisterScrapeTarget: 旧路径证据文件删除失败（不阻塞池摘除）: %v", err)
 	}
 	if err := vmpUnregisterOnboarded(catDB, resourceID); err != nil {
 		return p, err
