@@ -1,0 +1,359 @@
+networks:
+  l0-net:
+    ipam:
+      config:
+      - subnet: 10.10.0.0/24
+  l1-net:
+    ipam:
+      config:
+      - subnet: 10.20.0.0/24
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.93.0
+    container_name: l0-victoriametrics
+    labels:
+      sagent.layer: l0
+    networks:
+    - l0-net
+    ports:
+    - 18428:8428
+    command:
+    - --storageDataPath=/storage
+    - --retentionPeriod=30d
+    - --httpListenAddr=:8428
+    - --dedup.minScrapeInterval=10s
+    volumes:
+    - vm-storage:/storage
+    restart: unless-stopped
+  postgres:
+    image: postgres:16-alpine
+    container_name: l0-postgres
+    labels:
+      sagent.layer: l0
+    networks:
+    - l0-net
+    ports:
+    - 127.0.0.1:${PG_HOST_PORT:-55432}:5432
+    environment:
+    - POSTGRES_USER=${PG_USER:-sagent}
+    - POSTGRES_PASSWORD=${PG_PASSWORD:-sagent}
+    - POSTGRES_DB=${PG_DB:-sagent}
+    - TZ=${L0_TZ:-Asia/Shanghai}
+    - PGTZ=${L0_TZ:-Asia/Shanghai}
+    volumes:
+    - pg-data:/var/lib/postgresql/data
+    - ./configs/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U ${PG_USER:-sagent} -d ${PG_DB:-sagent}
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: l0-grafana
+    labels:
+      sagent.layer: l0
+    networks:
+    - l0-net
+    ports:
+    - 13000:3000
+    environment:
+    - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    - GF_SECURITY_ALLOW_EMBEDDING=true
+    volumes:
+    - grafana-storage:/var/lib/grafana
+    - ./configs/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    - ./configs/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    restart: unless-stopped
+    depends_on:
+    - victoriametrics
+  l0-vmalert:
+    image: victoriametrics/vmalert:v1.93.0
+    container_name: l0-vmalert
+    labels:
+      sagent.layer: l0
+    networks:
+    - l0-net
+    ports:
+    - 18880:8880
+    command:
+    - -rule=/etc/vmalert/rules.yml
+    - -datasource.url=http://victoriametrics:8428
+    - -remoteWrite.url=http://victoriametrics:8428
+    - -httpListenAddr=:8880
+    - -evaluationInterval=15s
+    - -notifier.blackhole=true
+    volumes:
+    - ./configs/vmalert:/etc/vmalert:ro
+    restart: unless-stopped
+    depends_on:
+    - victoriametrics
+  l0-console:
+    build:
+      context: ../../l0-console
+      dockerfile: Dockerfile
+    container_name: l0-console
+    labels:
+      sagent.layer: l0
+    networks:
+    - l0-net
+    ports:
+    - 18080:8080
+    environment:
+    - TZ=${L0_TZ:-Asia/Shanghai}
+    - VM_URL=http://victoriametrics:8428
+    - GRAFANA_PUBLIC_URL=${GRAFANA_PUBLIC_URL:-http://localhost:3000}
+    - VM_PUBLIC_URL=${VM_PUBLIC_URL:-}
+    - AUDIT_OPERATOR=${AUDIT_OPERATOR:-admin}
+    - SEED_DEMO_AGENTS=${SEED_DEMO_AGENTS:-1}
+    - AGENT_CONTAINER_PREFIX=l1-
+    - L0_NET=docker_l0-net
+    - AGENT_HTTP_PORT=19090
+    - CATALOG_DSN=${CATALOG_DSN:-}
+    - L1_ANSIBLE_RUNNER_ID=${L1_ANSIBLE_RUNNER_ID:-l1-ansible-runner-1}
+    - VMAGENT_POOL_BACK_STABLE_SEC=${VMAGENT_POOL_BACK_STABLE_SEC:-30}
+    - VMAGENT_POOL_BACK_COOLDOWN_SEC=${VMAGENT_POOL_BACK_COOLDOWN_SEC:-60}
+    - RELOCATE_COOLDOWN_SEC=${RELOCATE_COOLDOWN_SEC:-60}
+    volumes:
+    - catalog-data:/home/deploy/l0-console/data
+    - ./configs/scrape-sd:/home/deploy/l0-console/data/scrape-sd
+    - ./configs/vmagent-sd/vmagent-1:/home/deploy/l0-console/data/vmagent-sd/vmagent-1
+    - ./configs/vmagent-sd/vmagent-2:/home/deploy/l0-console/data/vmagent-sd/vmagent-2
+    - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+    group_add:
+    - '0'
+    restart: unless-stopped
+    depends_on:
+    - victoriametrics
+    - postgres
+  l1-hub:
+    image: docker-l0-console
+    container_name: l1-hub
+    labels:
+      sagent.layer: l1
+    command:
+    - --supervise
+    networks:
+      l0-net: null
+      l1-net:
+        aliases:
+        - l1-controller
+        - l1-gateway
+        - l1-package-cache
+        - l1-ansible-runner
+    ports:
+    - 8450:8450
+    - 8460:8460
+    - 8461:8461
+    - 8462:8462
+    environment:
+    - L1_COLLECTOR_ROLES=${L1_COLLECTOR_ROLES:-controller,gateway,package-cache,ansible-runner}
+    - L1_CONTROLLER_ID=l1-controller-1
+    - L1_CONTROLLER_LISTEN=:8461
+    - L1_CONTROLLER_LOOP_MS=3000
+    - L0_CONSOLE_URL=http://l0-console:8080
+    - L1_CONTROLLER_URL=http://l1-controller:8461
+    - L1_GATEWAY_LISTEN=:8460
+    - PACKAGE_CACHE_LISTEN=:8450
+    - L1_ANSIBLE_RUNNER_ID=l1-ansible-runner-1
+    - L1_ANSIBLE_RUNNER_LISTEN=:8462
+    - L1_ANSIBLE_RUNNER_LOOP_MS=3000
+    - AGENT_HOME_ROOT=/home
+    - L1_PACKAGE_CACHE=/home/deploy/l0-console/data/packages
+    volumes:
+    - catalog-data:/home/deploy/l0-console/data
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - nc -z 127.0.0.1 8450 && nc -z 127.0.0.1 8460 && nc -z 127.0.0.1 8461 && nc
+        -z 127.0.0.1 8462
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    depends_on:
+    - l0-console
+  vmagent-1:
+    image: victoriametrics/vmagent:v1.93.0
+    container_name: l1-vmagent-1
+    labels: &id001
+      sagent.layer: l1
+    networks: &id002
+      l1-net: null
+      l0-net: null
+    command:
+    - --promscrape.config=/etc/vmagent/scrape.yml
+    - --promscrape.fileSDCheckInterval=15s
+    - --remoteWrite.url=http://victoriametrics:8428/api/v1/write
+    - --remoteWrite.tmpDataPath=/tmp/vmagent-buffer
+    - --remoteWrite.maxDiskUsagePerURL=2GB
+    - --remoteWrite.label=replica=vmagent-1
+    volumes:
+    - ./configs/vmagent:/etc/vmagent:ro
+    - ./configs/vmagent-sd/vmagent-1:/etc/vmagent-sd-pool:ro
+    - vmagent-buffer-1:/tmp/vmagent-buffer
+    restart: unless-stopped
+    depends_on:
+    - victoriametrics
+    - vmauth
+  vmagent-2:
+    image: victoriametrics/vmagent:v1.93.0
+    container_name: l1-vmagent-2
+    labels: *id001
+    networks: *id002
+    command:
+    - --promscrape.config=/etc/vmagent/scrape.yml
+    - --promscrape.fileSDCheckInterval=15s
+    - --remoteWrite.url=http://victoriametrics:8428/api/v1/write
+    - --remoteWrite.tmpDataPath=/tmp/vmagent-buffer
+    - --remoteWrite.maxDiskUsagePerURL=2GB
+    - --remoteWrite.label=replica=vmagent-2
+    volumes:
+    - ./configs/vmagent:/etc/vmagent:ro
+    - ./configs/vmagent-sd/vmagent-2:/etc/vmagent-sd-pool:ro
+    - vmagent-buffer-2:/tmp/vmagent-buffer
+    restart: unless-stopped
+    depends_on:
+    - victoriametrics
+    - vmauth
+  vmauth:
+    image: victoriametrics/vmauth:v1.93.0
+    container_name: l1-vmauth
+    labels:
+      sagent.layer: l1
+    networks:
+    - l1-net
+    ports:
+    - 8427:8427
+    command:
+    - --auth.config=/etc/vmauth/auth.yaml
+    - --httpListenAddr=:8427
+    volumes:
+    - ./configs/vmauth:/etc/vmauth:ro
+    restart: unless-stopped
+    depends_on:
+    - sagent-proxy
+    - sagent-proxy-2
+  sagent-proxy:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-proxy
+    user: root
+    labels:
+      sagent.layer: l2
+    hostname: sagent-proxy
+    networks:
+    - l1-net
+    environment:
+    - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+    - SSHD_ENABLED=1
+    - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-01
+    - SAGENT_RESOURCE_TYPE=collector_proxy
+    - SAGENT_BUSINESS_SYSTEM=order
+    - SAGENT_ENV=prod
+    - SAGENT_IDC=idc-a
+    - SAGENT_CLUSTER=docker-cluster
+    - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
+    volumes:
+    - ./configs/sagent/sagent-proxy.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+    - sagent-proxy-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:19090/health
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+  sagent-proxy-2:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-proxy-2
+    user: root
+    labels:
+      sagent.layer: l2
+    hostname: sagent-proxy-2
+    networks:
+    - l1-net
+    environment:
+    - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+    - SSHD_ENABLED=1
+    - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-02
+    - SAGENT_RESOURCE_TYPE=collector_proxy
+    - SAGENT_BUSINESS_SYSTEM=order
+    - SAGENT_ENV=prod
+    - SAGENT_IDC=idc-a
+    - SAGENT_CLUSTER=docker-cluster
+    - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
+    volumes:
+    - ./configs/sagent/sagent-proxy-2.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+    - sagent-proxy-2-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:19090/health
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+  sagent-proxy-3:
+    build:
+      context: ../../sagent
+      dockerfile: Dockerfile
+    container_name: l1-sagent-proxy-3
+    user: root
+    labels:
+      sagent.layer: l2
+    hostname: sagent-proxy-3
+    networks:
+    - l1-net
+    environment:
+    - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+    - SSHD_ENABLED=1
+    - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-03
+    - SAGENT_RESOURCE_TYPE=collector_proxy
+    - SAGENT_BUSINESS_SYSTEM=order
+    - SAGENT_ENV=prod
+    - SAGENT_IDC=idc-a
+    - SAGENT_CLUSTER=docker-cluster
+    - SAGENT_METRICS_AUTH_KEY=${SAGENT_METRICS_AUTH_KEY:-demo-d4-bearer}
+    volumes:
+    - ./configs/sagent/sagent-proxy-3.yaml:/home/deploy/SAgent/conf/SAgent.yaml:ro
+    - sagent-proxy-3-data:/home/deploy/SAgent/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:19090/health
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+volumes:
+  vm-storage: null
+  grafana-storage: null
+  catalog-data: null
+  pg-data: null
+  vmagent-buffer-1: null
+  vmagent-buffer-2: null
+  sagent-1-data: null
+  sagent-2-data: null
+  sagent-proxy-data: null
+  sagent-proxy-2-data: null
+  sagent-proxy-3-data: null
+  mysql-1-data: null
+  mysql-2-data: null
