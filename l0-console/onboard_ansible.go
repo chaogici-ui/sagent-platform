@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,23 +11,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	storepkg "github.com/sagent/l0-console/store"
 )
 
 // ===================================================================
-//  平台 ansible 执行器
+//  平台 ansible 执行通道
 //  设计依据：PLAN-采集接入中心与流程引擎.md §4.1；用户流程修正（2026-09-21）：
 //
 //  「主机探路 / 安装 SAgent」不再由人工复制命令执行——平台持有资源对象的
-//  SSH 凭据（模拟资源台账下发），直接调 ansible 到目标机执行：
-//    preflight_host → ansible ping(联通性) + setup(事实采集) → 自动回填台账
-//    install_agent  → ansible playbook（分发二进制/sha256 校验/写配置/启动）
+//  SSH 凭据（模拟资源台账下发），投递 L1 Ansible Runner 到目标机执行：
+//    preflight_host → L1 探路（ping 联通性 + setup 事实采集）→ 回执对账桥回填台账
+//    install_agent  → L1 安装（分发二进制/sha256 校验/写配置/启动）
 //  人工交互收敛到两个决策点：① 输入资源对象+凭据 ② 选 SAgent 版本。
-//  凭据缺失或 ansible 不可用时回落旧「执行包+人工回报」路径（external 原语义）。
-//  失败处理与人工路径一致：fail + 原始输出留痕 → 人工重试/强制。
+//  B5 起执行端恒为 L1 Runner：本文件只保留共享判据/基座（投递、收口、探路内核），
+//  进程内 ansible 作业已删除。
 //
 //  证据契约（2026-09-21 用户要求：探测/安装过程中的异常、报错必须回到界面）：
 //   - 成功也留证据：每步 detail 必带 conn（连接目标 + 端口来源）与 evidence（原始输出）
@@ -38,12 +34,6 @@ import (
 //   - 端口来源可追溯：台账登记值 vs 平台回落默认值，回落必须留痕
 //   - 值缺失不许静默填 0：拿不到就是拿不到，标 warn 而不是伪造"实测 0"
 // ===================================================================
-
-// ansibleJobs 防并发：同一 flow:step 的异步作业在进程内只跑一份。
-// 进程重启后作业丢失的兜底：running 事件超过 staleLimit 视为孤儿，允许重新拉起
-var ansibleJobs sync.Map
-
-const ansibleStaleLimit = 15 * time.Minute
 
 // l0AgentURL 安装配置里下发给 SAgent 的平台地址（目标机 → 平台回传通道）。
 // lab 拓扑下目标机与平台同网段，用容器 DNS 名；生产用 .env 覆盖
@@ -64,19 +54,7 @@ func ansibleAvailable() bool {
 	return true
 }
 
-// ansibleFallbackReason 平台自动执行未接管的原因（空串=已接管/无需接管）。
-// 必须给人看见：否则用户只看到"怎么又要我手工执行"，却不知道是凭据缺失还是环境缺 ansible
-func ansibleFallbackReason(res *storepkg.Resource) string {
-	st := credState(sshCredOf(res))
-	if ok, _ := st["valid"].(bool); !ok {
-		reason, _ := st["reason"].(string)
-		return "平台自动执行未接管：" + reason + "；本环节回落「人工复制执行包 + 回报结果」模式"
-	}
-	if !ansibleAvailable() {
-		return "平台自动执行未接管：运行环境缺少 ansible / ansible-playbook / sshpass；本环节回落「人工复制执行包 + 回报结果」模式"
-	}
-	return ""
-}
+// ansibleFallbackReason 已随 B5 收口删除：执行端恒为 L1 Runner，不再有「执行包 + 人工回报」回落路径。
 
 // sshCred 目标机 SSH 凭据（来自资源台账）
 type sshCred struct {
@@ -158,6 +136,85 @@ func sshCredOf(res *storepkg.Resource) *sshCred {
 	return &sshCred{Host: res.IP, Port: port, User: res.SSHUser, Pass: res.SSHPassword, PortSource: src}
 }
 
+// flowSSHCred 解析本步 ansible 的 SSH 落点凭据（SPEC-B4b §零.三 G1/G2）。
+//
+// 落点 = 承载机（flow.AgentID），而不是被采对象（flow.ResourceID）：
+//   - edge 模式：承载机就是资源自身（AgentID == ResourceID）→ 取该资源行凭据，与旧行为一致
+//   - remote 模式：承载机是采集机，AgentID 是采集机 agent id → agents.resource_id
+//     → 采集机资源行 → ssh_*。被采对象在 remote 模式下**不是** SSH 落点
+//     （它是被探测对象，出现在能力可行性核对里）
+//
+// G2：承载机无资源行 / 无 ssh_* 时返回 dispatchErr（显式失败 + 可执行诊断），
+// **绝不静默回落**到被采对象凭据——那会把 ansible 连到被采对象上，与「采集机是唯一执行端」
+// 的拓扑原则（P1/P2）相反，且掩盖"采集机没登记凭据"这个真实故障。
+func flowSSHCred(catDB *storepkg.DB, f *storepkg.Flow) (*sshCred, *dispatchErr) {
+	if f == nil {
+		return nil, &dispatchErr{
+			summary: "流水线不存在", reason: "flow_not_found",
+			diag: fatalDiag("flow_not_found", "流水线不存在", ""),
+		}
+	}
+	agentID := strings.TrimSpace(f.AgentID)
+	if agentID == "" {
+		agentID = strings.TrimSpace(f.ResourceID)
+	}
+	if agentID == "" {
+		return nil, &dispatchErr{
+			summary: "流水线未绑定承载机，无法确定 SSH 落点", reason: "no_agent",
+			diag: fatalDiag("no_agent", "流水线未绑定承载机，无法确定 SSH 落点",
+				"先在「选择承载采集机」环节完成选机后点「↻ 重试该步」"),
+		}
+	}
+
+	// edge：承载机 = 资源自身
+	if agentID == f.ResourceID {
+		if res := mustResource(catDB, agentID); res != nil {
+			if c := sshCredOf(res); c.valid() {
+				return c, nil
+			}
+		}
+		return nil, &dispatchErr{
+			summary: "承载机 " + agentID + " 未登记 SSH 接入凭据",
+			reason:  "no_ssh_cred",
+			diag: fatalDiag("no_ssh_cred",
+				"承载机 "+agentID+" 未登记 SSH 接入凭据，无法 ansible 探路/安装",
+				"为该承载机登记 主机/端口/用户/口令（资源台账 SSH 字段）后点「↻ 重试该步」"),
+		}
+	}
+
+	// remote：采集机 agent id → resource_id → 采集机资源行
+	rid, err := catDB.GetAgentResourceID(agentID)
+	if err != nil || strings.TrimSpace(rid) == "" {
+		return nil, &dispatchErr{
+			summary: "采集机 " + agentID + " 未关联资源行",
+			reason:  "collector_no_resource",
+			diag: fatalDiag("collector_no_resource",
+				"采集机 "+agentID+" 未登记资源行，无法确定 SSH 接入凭据",
+				"为采集机 "+agentID+" 登记资源行并补 SSH 主机/端口/用户/口令后点「↻ 重试该步」"),
+		}
+	}
+	res := mustResource(catDB, rid)
+	if res == nil {
+		return nil, &dispatchErr{
+			summary: "采集机 " + agentID + " 的资源行 " + rid + " 不存在",
+			reason:  "collector_resource_missing",
+			diag: fatalDiag("collector_resource_missing",
+				"采集机 "+agentID+" 的资源行 "+rid+" 不存在",
+				"核对资源台账；补登记后点「↻ 重试该步」"),
+		}
+	}
+	if c := sshCredOf(res); c.valid() {
+		return c, nil
+	}
+	return nil, &dispatchErr{
+		summary: "采集机 " + agentID + " 未登记 SSH 接入凭据",
+		reason:  "collector_no_ssh_cred",
+		diag: fatalDiag("collector_no_ssh_cred",
+			"采集机 "+agentID+" 未登记 SSH 接入凭据，无法 ansible 探路/安装",
+			"为该采集机登记 主机/端口/用户/口令 后点「↻ 重试该步」"),
+	}
+}
+
 // writeInventory 生成临时 inventory（连接参数全部内联，跑完即删）
 func writeInventory(c *sshCred) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "l0-ansible-*")
@@ -179,35 +236,23 @@ l0node ansible_host=%s ansible_port=%d ansible_user=%s ansible_ssh_pass=%s ansib
 	return inv, cleanup, nil
 }
 
-// runAnsible 执行一条 ansible 命令，返回合并输出与退出码（超时由 ctx 控制）
-func runAnsible(ctx context.Context, inv string, args ...string) (string, int) {
-	full := append([]string{"all", "-i", inv}, args...)
-	cmd := exec.CommandContext(ctx, "ansible", full...)
-	cmd.Env = append(os.Environ(), "ANSIBLE_HOST_KEY_CHECKING=False")
-	out, err := cmd.CombinedOutput()
-	rc := 0
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			rc = ee.ExitCode()
-		} else {
-			rc = -1
-		}
-	}
-	return string(out), rc
-}
-
 // ansibleKindOfAtom 步骤原子 → 执行类型（kind）。空串 = 该 atom 不走平台代执行通道。
 //
-// 单独抽出来是因为这个映射有两个消费方：进程内分发（按 kind 选作业）与 L1 对账桥
+// 单独抽出来是因为这个映射有两个消费方：外部分支分发（按 kind 选投递载荷）与 L1 对账桥
 // （按 kind 选收口口径）。两处各写一套 switch，迟早出现"投递按 A、裁定按 B"。
 func ansibleKindOfAtom(atom string) string {
 	switch atom {
 	case "preflight_host":
 		return "probe"
+	case "preflight_ability":
+		// B4b-2：远程可达性探路（remote.yaml 的 preflight_remote）。语义与 preflight_host 分开——
+		// 它不是 SSH 到主机采事实，而是从采集机侧对「被采对象」做一次协议级+认证级核验
+		// （Redis：AUTH+PING）。原来不在映射里 → 无代执行通道 → 傻等 3600s，这里补上落点。
+		return "probe_remote"
 	case "install_agent":
 		return "install"
 	case "uninstall_agent":
-		// 卸载与安装同一套执行通道：平台持有凭据 + ansible 可用即自动执行。
+		// 卸载与安装同一套执行通道：平台持有凭据，经 L1 Runner 自动执行。
 		// 卸载比安装更依赖"真跑"——卸不干净却报成功，会让运维以为机器已经交还
 		return "uninstall"
 	case "scan_collectors":
@@ -226,89 +271,36 @@ func ansibleKindOfAtom(atom string) string {
 }
 
 // tryAnsibleExecutor 在 external 分支尝试平台代执行。
-// 返回 true 表示已接管（步骤落 running、异步作业已拉起）；
+// 返回 true 表示已接管（步骤落 running、L1 任务已投递）；
 // 返回 false 表示走旧的「执行包 + 人工回报」路径。
+//
+// B5 收口：执行端恒为 L1 Ansible Runner——不再有进程内作业与灰度开关（L1_EXEC_EXECUTOR）。
+// 支持集内的 atom 一律投递 L1，凭据/前置不成立时当场显式失败，绝不回落。
 func tryAnsibleExecutor(catDB *storepkg.DB, agentStore *AgentStore, r *flowRun, step storepkg.FlowStepSnapshot) bool {
-	cred := sshCredOf(r.resource)
-	if !cred.valid() {
-		return false
-	}
 	kind := ansibleKindOfAtom(step.Atom)
 	if kind == "" {
 		return false
 	}
-	// 防并发 + 孤儿兜底。
-	// 超时自动重试时会先登记一次性强制重拉标记：旧作业可能仍挂在进程里，
-	// 此时必须清掉占用并直接重拉，否则"重试"指令永远发不出去
-	// （标记在两条执行路径上都要消费掉，否则会残留到下次进程内调用时被误当作绕过保护）
+	// 超时自动重试时会先登记一次性强制重拉标记：重试已经写好新 attempt 的 running 事件，
+	// 必须绕过重入闸把新尝试真发出去（标记在投递端消费，避免"自动重试"只是改了事件没换执行）
 	forced := takeForcedRestart(r.flow.ID, step.ID)
 
-	// D8 灰度：支持集内的 atom 走 L1 Ansible Runner（B3 install；B4 卸载侧四步）。
-	// 该路径不依赖 L0 本机 ansible——执行端在 L1，L0 只是投递方；
-	// 这正是「L0 不持有被管主机可达」的前置。其余 atom 仍走进程内，故此处才判 ansible 可用性。
-	if l1ExecExecutor() == execRunner && l1ExecSupportedKind(kind) {
-		return deliverStepToRunner(catDB, agentStore, r, step, cred, forced, kind)
-	}
-	if !ansibleAvailable() {
-		return false
-	}
-
-	jobKey := fmt.Sprintf("%d:%s", r.flow.ID, step.ID)
-	if forced {
-		ansibleJobs.Delete(jobKey)
-	} else {
-		if _, busy := ansibleJobs.Load(jobKey); busy {
-			return true // 已有作业在跑：保持 running，不重复拉起也不下发执行包
-		}
-		if last, _ := catDB.LatestEvent(r.flow.ID, step.ID); last != nil && last.Status == stRunning {
-			if t, err := time.ParseInLocation("2006-01-02 15:04:05", last.CreatedAt, time.Local); err == nil {
-				if time.Since(t) < ansibleStaleLimit {
-					return true
-				}
-			}
-		}
+	// SSH 落点 = 承载机（flow.AgentID），不是被采对象（SPEC-B4b §零.三 G1）。
+	// remote 模式下被采对象不是 SSH 落点，取错行会让 ansible 连错机器。
+	cred, derr := flowSSHCred(catDB, r.flow)
+	if derr != nil {
+		// G2：执行端恒 L1 时不回落人工——显式失败 + 可执行诊断，
+		// 绝不静默回落到被采对象凭据（那会掩盖"承载机没登记凭据"这个真实故障）
+		failStep(catDB, agentStore, r.flow.ID, step, l1ExecActionName(kind)+"未启动",
+			derr.summary, map[string]any{
+				"executor": "ansible", "runner": "platform", "exec_channel": execChannelL1,
+				"reason": derr.reason,
+			}, nil, []diag{derr.diag})
+		return true
 	}
 
-	detail := map[string]any{
-		"executor": "ansible",
-		"runner":   "platform",
-		"conn":     credState(cred),
-		"target":   cred.target(),
-		"note":     "平台持有资源 SSH 凭据，ansible 自动执行；完成后自动回报，无需人工操作",
-	}
-	if cred.PortSource == portSourceDefault {
-		detail["diagnosis"] = diagJSON([]diag{portSourceDiag(cred)})
-	}
-	_ = appendStepEvent(catDB, r.flow.ID, step, stRunning,
-		"平台 ansible 执行中（"+cred.target()+"）", detailJSON(detail), 0)
-
-	ansibleJobs.Store(jobKey, true)
-	go func() {
-		defer ansibleJobs.Delete(jobKey)
-		switch kind {
-		case "probe":
-			ansibleProbeJob(catDB, agentStore, r.flow.ID, step, cred)
-		case "uninstall":
-			ansibleUninstallJob(catDB, agentStore, r.flow.ID, step, cred)
-		case "scan_collectors":
-			ansibleScanJob(catDB, agentStore, r.flow.ID, step, cred)
-		case "uninstall_plugins":
-			ansibleUninstallPluginsJob(catDB, agentStore, r.flow.ID, step, cred)
-		case "cleanup_autostart":
-			ansibleCleanupAutostartJob(catDB, agentStore, r.flow.ID, step, cred)
-		case "preflight_upgrade":
-			ansibleSvcJob(catDB, agentStore, r.flow.ID, step, cred, svcSpecForKind("preflight_upgrade"))
-		case "upgrade_agent":
-			ansibleSvcJob(catDB, agentStore, r.flow.ID, step, cred, svcSpecForKind("upgrade_agent"))
-		case "preflight_service":
-			ansibleSvcJob(catDB, agentStore, r.flow.ID, step, cred, svcSpecForKind("preflight_service"))
-		case "service_execute":
-			ansibleSvcJob(catDB, agentStore, r.flow.ID, step, cred, svcSpecForKind("service_execute"))
-		default:
-			ansibleInstallJob(catDB, agentStore, r.flow.ID, step, cred)
-		}
-	}()
-	return true
+	// 恒走 L1 Runner 投递（B5）：投递失败/前置不成立由 deliverStepToRunner 当场判死
+	return deliverStepToRunner(catDB, agentStore, r, step, cred, forced, kind)
 }
 
 // ===================================================================
@@ -800,7 +792,7 @@ func countProbeVerdict(checks []abilityProbe, verdict string) int {
 // execAbilityChecks 在目标机侧逐条执行检查项，返回结论 + 原文证据 + 各次 recap。
 // pyFound=="none" 时不执行：ansible 的 wait_for/uri 都要目标机 Python，
 // 此时"探不通"与"工具不在"无法区分——一律记 unknown 并告警，绝不当作通过
-func execAbilityChecks(inv string, st *stepRunState, hook func(ansibleTask, int),
+func execAbilityChecks(inv string, spec StepTimeout, hook func(ansibleTask, int),
 	checks []abilityProbe, pyFound string) ([]abilityProbe, map[string]any, []map[string]int) {
 	out := make([]abilityProbe, 0, len(checks))
 	raw := map[string]any{}
@@ -817,7 +809,7 @@ func execAbilityChecks(inv string, st *stepRunState, hook func(ansibleTask, int)
 			out = append(out, p)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), phaseBudget(st.spec, budgetCheck))
+		ctx, cancel := context.WithTimeout(context.Background(), phaseBudget(spec, budgetCheck))
 		var res ansibleRunResult
 		switch p.Kind {
 		case "http":
@@ -934,118 +926,6 @@ func parseCandidateProbe(output string) []accessPointCandidate {
 	return out
 }
 
-// ---------------- 接入点自动接管（2026-09-22 用户拍板：只给 IP + 类型 + 凭据） ----------------
-
-// autoResolveAccessPoint 探路发现接入点不可达时的平台自愈：
-// ① 从目标机实测候选地址（host.docker.internal / l0-console:8080），可达即自动写入台账并采用；
-// ② 非 docker（host/auto）→ 平台用台账凭据自动建反向隧道，再从目标机实测 127.0.0.1:18080；
-// ③ 全部不通 → 返回空串，由调用方按一句话结论 fail。
-// 返回（最终接入点、诊断、证据）。host 场景候选探测也执行——真实主机若恰好与平台同内网，直连地址同样能被自动选中
-func autoResolveAccessPoint(st *stepRunState, inv string, catDB *storepkg.DB, flowID int64,
-	cred *sshCred, consoleURL, connCode string) (string, []diag, map[string]any) {
-	diags := []diag{}
-	evidence := map[string]any{"probed_console_url": consoleURL, "conn_code": connCode}
-
-	res, _ := catDB.GetResource(flowResourceID(catDB, flowID))
-	kind := ""
-	if res != nil {
-		kind = strings.TrimSpace(res.TargetKind)
-	}
-
-	// ① 候选地址实测：docker 与 auto 场景的通路；host 明确登记也不放弃——
-	//    真实主机也可能与平台同内网，直连地址试一次代价极小
-	if cands := accessPointCandidates(consoleURL); len(cands) > 0 && connCode != "NO_TOOL" {
-		st.setPhase("ap_auto_candidates")
-		urls := make([]string, 0, len(cands))
-		for _, c := range cands {
-			urls = append(urls, c.URL)
-		}
-		ctxFB, cancelFB := context.WithTimeout(context.Background(), phaseBudget(st.spec, budgetPing))
-		fb := runAnsibleStream(ctxFB, inv, st.taskHook(catDB), "-m", "shell", "-a", candidateProbeCmd(urls))
-		cancelFB()
-		reachable := map[string]string{}
-		for _, c := range parseCandidateProbe(fb.Output) {
-			reachable[c.URL] = c.Tool
-		}
-		rows := []map[string]string{}
-		for _, c := range cands {
-			row := map[string]string{"url": c.URL, "verdict": "unreachable"}
-			if tool, ok := reachable[c.URL]; ok {
-				row["verdict"], row["tool"] = "reachable", tool
-			}
-			rows = append(rows, row)
-		}
-		evidence["candidates"] = rows
-		if url, tool, ok := firstReachableCandidate(cands, reachable); ok {
-			if res != nil {
-				res.AgentConsoleURL = url
-				if err := catDB.UpsertResource(res); err != nil {
-					diags = append(diags, warnDiag("access_point_adopt_failed",
-						"候选地址 "+url+" 可达，但写台账失败："+err.Error(), ""))
-				}
-			}
-			diags = append(diags, infoDiag("access_point_auto_selected",
-				fmt.Sprintf("平台已自动选定接入点 %s（目标机实测 HTTP 200，工具 %s）并写入资源台账——无需人工填写", url, tool)))
-			return url, diags, evidence
-		}
-	}
-
-	// ② 反向隧道自动建立（host / 未登记类型；docker 明确登记时不走隧道）
-	if kind != "docker" {
-		if cred == nil || cred.Pass == "" {
-			diags = append(diags, warnDiag("tunnel_no_credential",
-				"候选地址不可达，且资源缺少 SSH 凭据——平台无法自动建反向隧道", ""))
-		} else {
-			st.setPhase("ap_auto_tunnel")
-			started, err := startReverseTunnel(res.ID, cred)
-			if err != nil {
-				diags = append(diags, warnDiag("tunnel_start_failed",
-					"平台自动建反向隧道失败："+err.Error(), ""))
-			} else {
-				// 隧道刚建立，给 sshd 监听一点落地时间再从目标机实测
-				time.Sleep(2 * time.Second)
-				tunnelURL := fmt.Sprintf("http://127.0.0.1:%d", tunnelRemotePort())
-				ctxT, cancelT := context.WithTimeout(context.Background(), phaseBudget(st.spec, budgetPing))
-				tr := runAnsibleStream(ctxT, inv, st.taskHook(catDB), "-m", "shell", "-a", candidateProbeCmd([]string{tunnelURL}))
-				cancelT()
-				tunnelOK := ""
-				for _, c := range parseCandidateProbe(tr.Output) {
-					if c.URL == tunnelURL {
-						tunnelOK = c.Tool
-					}
-				}
-				evidence["tunnel"] = map[string]any{
-					"started": started, "url": tunnelURL, "reachable": tunnelOK != "",
-				}
-				if tunnelOK != "" {
-					if res != nil {
-						res.AgentConsoleURL = tunnelURL
-						if err := catDB.UpsertResource(res); err != nil {
-							diags = append(diags, warnDiag("access_point_adopt_failed",
-								"隧道可达，但写台账失败："+err.Error(), ""))
-						}
-					}
-					note := "平台已自动建立反向隧道"
-					if !started {
-						note = "平台复用已在跑的反向隧道"
-					}
-					diags = append(diags, infoDiag("access_point_auto_selected",
-						fmt.Sprintf("%s：目标机 127.0.0.1:%d → 平台 %d，实测 HTTP 200（工具 %s），接入点已写入台账——无需人工填写",
-							note, tunnelRemotePort(), platformPort(), tunnelOK)))
-					return tunnelURL, diags, evidence
-				}
-				diags = append(diags, warnDiag("tunnel_established_but_unreachable",
-					"反向隧道已建立，但目标机实测 127.0.0.1:"+fmt.Sprint(tunnelRemotePort())+" 仍不可达——目标机侧监听未生效或 sshd 转发被禁",
-					"核对目标机 sshd_config 的 AllowTcpForwarding 是否为 yes；点「↻ 重试该步」让平台再试"))
-			}
-		}
-	}
-
-	// ③ 全部不通 → 一句话结论（原始证据已在 evidence，界面「原始输出」可复核）
-	evidence["resolved"] = false
-	return "", diags, evidence
-}
-
 // firstReachableCandidate 候选里第一个实测可达的地址（保持声明顺序 = 优先级）
 func firstReachableCandidate(cands []accessPointCandidate, reachable map[string]string) (string, string, bool) {
 	for _, c := range cands {
@@ -1056,141 +936,172 @@ func firstReachableCandidate(cands []accessPointCandidate, reachable map[string]
 	return "", "", false
 }
 
-// ---------------- 主机探路作业 ----------------
+// ===================================================================
+//  探路共享内核（SPEC-B4b §2.3：执行端只回原始事实，L0 持唯一判据）
+//
+//  L1 Runner 执行端 + L0 对账桥（l1ProbeReconcile）共用下面两个函数：
+//    runProbePhases —— 五阶段（ping/port_check/setup/facts/df/env/ability）的执行与解析
+//    probeFinish    —— blockerFail 门禁 + 台账回写 + 回报（结论只能有一份实现）
+//
+//  为什么必须共用：执行端只回事实，判据在 L0 只能有一套实现，
+//  两套判据并存会互相打架（SPEC-B4b §六）。
+// ===================================================================
 
-// ansibleProbeJob 联通性测试 + 端口核对 + 事实采集 + 能力可行性检查，
-// 自动回填台账并回报 preflight_host（含原「能力探路」的检查内容）。
-// 全过程信息回传（2026-09-21 用户要求）：每个 ansible 任务的状态/变更/输出/失败原因
-// 随进度事件回到界面；终态同样带证据——不存在"黑盒成功"。
-// 任何一步失败 → 步骤 fail（全量原文 + 分级诊断留痕），人工可重试/强制。
-func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred) {
-	st := newStepRunState(catDB, flowID, step, cred)
-	defer st.startHeartbeat(catDB)()
-	myAttempt := st.attempt
-	hook := st.taskHook(catDB)
+// probeOutcome 探路各阶段的**原始事实**（Runner 回执与 L0 侧解析同一形状）。
+// 只装事实，不装结论——结论由 probeFinish 在 L0 侧落笔。
+type probeOutcome struct {
+	// ① ping 联通性
+	PingOutput string
+	PingRC     int
+	PingRecap  map[string]int
+	// ② sshd 端口核对
+	PortDiags    []diag
+	PortEvidence map[string]any
+	// ③ setup 事实采集
+	SetupOutput string
+	SetupRC     int
+	SetupRecap  map[string]int
+	// ④ facts 解析 + df 磁盘兜底
+	Facts    *facts
+	DFOutput string
+	DFRC     int
+	DFRecap  map[string]int
+	DFUsed   bool
+	// ⑤ env_check 装机前置条件
+	EnvRC       int
+	EnvOutput   string
+	EnvRecap    map[string]int
+	ConsoleURL  string
+	Python      string
+	ConnCode    string
+	ConnTool    string
+	TimeSkew    int64
+	Glibc       string
+	EnvDiags    []diag
+	EnvEvidence map[string]any
+	AutoResolve map[string]any
+	// ⑥ ability_check 能力可行性
+	Probes          []abilityProbe
+	AbilityEvidence map[string]any
+	AbilityRecaps   []map[string]int
+}
 
-	// fail 收口：已被超时重试接管的旧尝试，其结果一律丢弃——
-	// 否则旧作业晚到的失败会把新尝试的进展覆盖掉
-	fail := func(summary string, detail map[string]any, ds []diag) {
-		if !jobStillCurrent(catDB, flowID, step.ID, myAttempt) {
-			return
+// probeAbort 探路在某一阶段硬中断（与进程内 fail 闭包同形）。
+type probeAbort struct {
+	summary string
+	detail  map[string]any
+	diags   []diag
+}
+
+// probeResolveFunc 接入点不可达时的兜底回调，返回（最终接入点、诊断、证据）。
+// L1 Runner 侧做目标机候选实测 + 隧道（B4b-3），自动选定与台账写入仍回 L0（对账桥）。
+type probeResolveFunc func(consoleURL, connCode string) (string, []diag, map[string]any)
+
+// runProbePhases 执行探路的五个阶段并解析出原始事实。
+// inv/spec/hook 是执行面（L1 Runner 执行端传入），resolve 是接入点兜底回调。
+// 任一阶段硬中断 → 返回 probeAbort（调用方按自己的失败收口落笔）。
+func runProbePhases(inv string, spec StepTimeout, cred *sshCred, hook func(ansibleTask, int),
+	consoleURL string, probes []abilityProbe, onPhase func(string), onDiags func([]diag),
+	resolve probeResolveFunc) (*probeOutcome, *probeAbort) {
+
+	po := &probeOutcome{ConsoleURL: consoleURL}
+	abort := func(summary string, phase string, ev map[string]any, ds []diag) (*probeOutcome, *probeAbort) {
+		return nil, &probeAbort{
+			summary: summary,
+			detail:  map[string]any{"phase": phase, "evidence": ev},
+			diags:   ds,
 		}
-		if detail == nil {
-			detail = map[string]any{}
-		}
-		detail["attempt"] = myAttempt
-		detail["attempts"] = st.endAttempt("fail", summary)
-		detail["tasks"] = st.tasksSnapshot()
-		failStep(catDB, agentStore, flowID, step, "ansible 探路失败", summary, detail, cred, ds)
 	}
-
-	inv, cleanup, err := writeInventory(cred)
-	if err != nil {
-		fail("生成 ansible inventory 失败："+err.Error(), nil,
-			[]diag{fatalDiag("inventory_write_failed", "生成 ansible inventory 失败："+err.Error(),
-				"检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer cleanup()
 
 	// ① 联通性测试（预算 = RunSec × budgetPing，随配置走）
-	st.setPhase("ping")
-	pingBudget := phaseBudget(st.spec, budgetPing)
+	onPhase("ping")
+	pingBudget := phaseBudget(spec, budgetPing)
 	ctxPing, cancelPing := context.WithTimeout(context.Background(), pingBudget)
-	defer cancelPing()
 	rp := runAnsibleStream(ctxPing, inv, hook, "-m", "ping")
+	cancelPing()
+	po.PingOutput, po.PingRC, po.PingRecap = rp.Output, rp.RC, rp.Recap
 	if rp.TimedOut {
-		fail(fmt.Sprintf("联通性测试超时（%ds 未返回）", budgetSec(pingBudget)), map[string]any{
-			"phase": "ping", "evidence": probePhaseEvidence("ping", rp),
-		}, []diag{fatalDiag("ansible_phase_timeout",
-			fmt.Sprintf("ansible ping 超过 %ds 未返回（预算由 preflight_host.run_sec 推导）", budgetSec(pingBudget)),
-			"目标机不可达或响应极慢：核对网络连通性与目标机负载后，点「↻ 重试该步」")})
-		return
+		return abort(fmt.Sprintf("联通性测试超时（%ds 未返回）", budgetSec(pingBudget)), "ping",
+			probePhaseEvidence("ping", rp),
+			[]diag{fatalDiag("ansible_phase_timeout",
+				fmt.Sprintf("ansible ping 超过 %ds 未返回（预算由 preflight_host.run_sec 推导）", budgetSec(pingBudget)),
+				"目标机不可达或响应极慢：核对网络连通性与目标机负载后，点「↻ 重试该步」")})
 	}
 	if rp.RC != 0 {
 		d := classifySSHFailure(rp.Output, rp.RC)
-		fail("联通性测试失败："+d.Message, map[string]any{
-			"phase": "ping", "evidence": probePhaseEvidence("ping", rp),
-		}, withPortSource(cred, []diag{d}))
-		return
+		return abort("联通性测试失败："+d.Message, "ping", probePhaseEvidence("ping", rp), withPortSource(cred, []diag{d}))
 	}
 
 	// ② sshd 端口核对：连上了 ≠ 连对了（"端口登记 22 / 实际 22022" 只能靠这里暴露）
-	st.setPhase("port_check")
-	portDiags, portEvidence := sshdPortCheck(inv, st.spec, cred, hook)
+	onPhase("port_check")
+	portDiags, portEvidence := sshdPortCheck(inv, spec, cred, hook)
 	portDiags = withPortSource(cred, portDiags)
-	st.setDiags(portDiags) // 端口异常提前进进度事件：不用等探路跑完才知道
+	po.PortDiags, po.PortEvidence = portDiags, portEvidence
+	if onDiags != nil {
+		onDiags(portDiags)
+	}
 
 	// ③ 事实采集（setup：OS/架构/内核/内存/磁盘一次拿全）
-	st.setPhase("setup")
+	onPhase("setup")
 	treeDir, err := os.MkdirTemp("", "l0-facts-*")
 	if err != nil {
-		fail("创建 facts 目录失败："+err.Error(), nil,
-			[]diag{fatalDiag("facts_dir_failed", "创建 facts 临时目录失败："+err.Error(), "检查平台容器内 /tmp 是否可写")})
-		return
+		return abort("创建 facts 目录失败："+err.Error(), "setup", nil,
+			[]diag{fatalDiag("facts_dir_failed", "创建 facts 临时目录失败："+err.Error(), "检查执行端容器内 /tmp 是否可写")})
 	}
 	defer os.RemoveAll(treeDir)
-	setupBudget := phaseBudget(st.spec, budgetSetup)
+	setupBudget := phaseBudget(spec, budgetSetup)
 	ctxSetup, cancelSetup := context.WithTimeout(context.Background(), setupBudget)
-	defer cancelSetup()
 	rs := runAnsibleStream(ctxSetup, inv, hook, "-m", "setup", "--tree", treeDir)
+	cancelSetup()
+	po.SetupOutput, po.SetupRC, po.SetupRecap = rs.Output, rs.RC, rs.Recap
 	if rs.TimedOut {
-		fail(fmt.Sprintf("事实采集超时（%ds 未返回）", budgetSec(setupBudget)), map[string]any{
-			"phase": "setup", "evidence": probePhaseEvidence("setup", rs),
-		}, append(portDiags, fatalDiag("ansible_phase_timeout",
-			fmt.Sprintf("ansible setup 超过 %ds 未返回（预算由 preflight_host.run_sec 推导）", budgetSec(setupBudget)),
-			"目标机负载过高或 facts 采集被阻塞；确认后点「↻ 重试该步」")))
-		return
+		return abort(fmt.Sprintf("事实采集超时（%ds 未返回）", budgetSec(setupBudget)), "setup",
+			probePhaseEvidence("setup", rs),
+			append(portDiags, fatalDiag("ansible_phase_timeout",
+				fmt.Sprintf("ansible setup 超过 %ds 未返回（预算由 preflight_host.run_sec 推导）", budgetSec(setupBudget)),
+				"目标机负载过高或 facts 采集被阻塞；确认后点「↻ 重试该步」")))
 	}
 	if rs.RC != 0 {
 		ev := probePhaseEvidence("setup", rs)
 		ev["ping_output"] = clip(rp.Output, 1500)
-		fail("事实采集失败（ansible setup rc="+fmt.Sprint(rs.RC)+"）",
-			map[string]any{"phase": "setup", "evidence": ev},
+		return abort("事实采集失败（ansible setup rc="+fmt.Sprint(rs.RC)+"）", "setup", ev,
 			append(portDiags, classifySSHFailure(rs.Output, rs.RC)))
-		return
 	}
 
 	// ④ 解析 facts + 磁盘兜底采集：alpine 等精简系统没有 lsblk，setup 的 ansible_mounts
 	//    会是空的，disk_free_gb 会恒 0。df -k 各发行版（含 busybox）都支持，独立采一次覆盖
-	facts, err := parseFactsTree(treeDir)
+	factsOut, err := parseFactsTree(treeDir)
 	if err != nil {
-		fail("解析 facts 失败："+err.Error(), map[string]any{
-			"phase": "parse", "evidence": probePhaseEvidence("setup", rs),
-		}, append(portDiags, fatalDiag("facts_parse_failed", "解析 setup 输出失败："+err.Error(),
-			"setup --tree 未产出可解析文件；目标机可能不可达或 facts 被裁剪（gather_subset）")))
-		return
+		return abort("解析 facts 失败："+err.Error(), "parse", probePhaseEvidence("setup", rs),
+			append(portDiags, fatalDiag("facts_parse_failed", "解析 setup 输出失败："+err.Error(),
+				"setup --tree 未产出可解析文件；目标机可能不可达或 facts 被裁剪（gather_subset）")))
 	}
-	st.setPhase("df")
-	ctxDisk, cancelDisk := context.WithTimeout(context.Background(), phaseBudget(st.spec, budgetDisk))
-	defer cancelDisk()
+	po.Facts = factsOut
+	onPhase("df")
+	ctxDisk, cancelDisk := context.WithTimeout(context.Background(), phaseBudget(spec, budgetDisk))
 	rd := runAnsibleStream(ctxDisk, inv, hook, "-m", "shell", "-a", "df -k / | tail -1")
-	diskFromDF := false
+	cancelDisk()
+	po.DFOutput, po.DFRC, po.DFRecap = rd.Output, rd.RC, rd.Recap
 	if fields := strings.Fields(strings.TrimSpace(rd.Output)); len(fields) >= 4 {
 		if kb, err := strconv.ParseFloat(fields[len(fields)-4], 64); err == nil && kb > 0 {
-			facts.DiskFreeGB = kb / 1048576
-			diskFromDF = true
+			factsOut.DiskFreeGB = kb / 1048576
+			po.DFUsed = true
 		}
 	}
 
 	// ⑤ 环境预检（装机前置条件，探路阶段一次查完）：Python 依赖 / 平台接入点可达性 / 时间同步。
 	//    「装完才发现 Agent 回连不通、流程卡在等回报」是真实踩过的坑——可达性必须在这里提前暴露
-	st.setPhase("env_check")
-	envRes, _ := catDB.GetResource(flowResourceID(catDB, flowID))
-	consoleURL := l0AgentURL()
-	if envRes != nil && strings.TrimSpace(envRes.AgentConsoleURL) != "" {
-		consoleURL = strings.TrimSpace(envRes.AgentConsoleURL)
-	}
+	onPhase("env_check")
 	envCmd := fmt.Sprintf(
 		// 探测链（2026-09-21 用户评审后加固）：curl 失败/缺失时回落 wget——
 		// alpine 等精简系统常没有 curl，只认 curl 会把「工具不在」误报成「不可达」。
 		// 两个工具都给不出 200 才算真不可达；一个都没有记 NO_TOOL（未核实，不阻断）
 		`sh -c 'command -v python3 >/dev/null 2>&1 && echo PY:$(python3 -V 2>&1) || (command -v python >/dev/null 2>&1 && echo PY:$(python -V 2>&1) || echo PY:NONE); echo EPOCH:$(date +%%s); C=$(curl -s -o /dev/null -w "%%{http_code}" --connect-timeout 5 %s/api/onboard/templates 2>/dev/null); RC=$?; if [ "$RC" = 0 ] && [ "$C" != "000" ]; then echo CONN:$C TOOL:curl; elif command -v wget >/dev/null 2>&1; then if wget -q -O /dev/null -T 5 %s/api/onboard/templates 2>/dev/null; then echo CONN:200 TOOL:wget; else echo CONN:FAIL TOOL:wget; fi; else echo CONN:NO_TOOL TOOL:none; fi%s'`,
 		consoleURL, consoleURL, glibcProbeShell())
-	ctxEnv, cancelEnv := context.WithTimeout(context.Background(), phaseBudget(st.spec, budgetDisk))
-	defer cancelEnv()
+	ctxEnv, cancelEnv := context.WithTimeout(context.Background(), phaseBudget(spec, budgetDisk))
 	re := runAnsibleStream(ctxEnv, inv, hook, "-m", "shell", "-a", envCmd)
+	cancelEnv()
+	po.EnvRC, po.EnvOutput, po.EnvRecap = re.RC, re.Output, re.Recap
 	envDiags := []diag{}
 	envEvidence := map[string]any{
 		"console_url": consoleURL, "rc": re.RC, "output": clip(re.Output, 1200),
@@ -1213,20 +1124,21 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 	// 门禁语义：真不可达 → 平台先自动接管（2026-09-22：候选自动选定 + 反向隧道自动建立），
 	// 全部通路都不通才 fail——不再把"平台自己能解决的事"甩给运维
 	if apFatal {
-		resolvedURL, resDiags, resEvidence := autoResolveAccessPoint(st, inv, catDB, flowID, cred, consoleURL, connCode)
+		resolvedURL, resDiags, resEvidence := resolve(consoleURL, connCode)
+		po.AutoResolve = resEvidence
 		envDiags = append(envDiags, resDiags...)
 		envEvidence["auto_resolve"] = resEvidence
 		if resolvedURL != "" {
 			// 自动选定成功：换地址继续流程（可达性已由目标机实测 HTTP 200 确认）
 			consoleURL = resolvedURL
+			po.ConsoleURL = resolvedURL
+			connCode = "200"
 			envEvidence["console_url"] = consoleURL
 			envEvidence["access_point_code"] = "200"
 		} else {
 			// 一句话结论；候选/隧道明细与原始输出都在 evidence，界面「原始输出」可复核
-			fail(fmt.Sprintf("目标机无法回连平台（已自动尝试直连候选地址与反向隧道，均不可达）——请确认目标类型（docker 容器 / 真实主机）与网络策略后点「↻ 重试该步」"),
-				map[string]any{"phase": "env_check", "evidence": map[string]any{"env_check": envEvidence}},
-				envDiags)
-			return
+			return abort("目标机无法回连平台（已自动尝试直连候选地址与反向隧道，均不可达）——请确认目标类型（docker 容器 / 真实主机）与网络策略后点「↻ 重试该步」",
+				"env_check", map[string]any{"env_check": envEvidence}, envDiags)
 		}
 	}
 	if epochSkew > 300 {
@@ -1234,27 +1146,67 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 			fmt.Sprintf("目标机与平台时间偏差 %d 秒（>300s）——影响指标时间对齐与心跳判定", epochSkew),
 			"在目标机校准时间（chronyd/ntpd）后重试探路"))
 	}
+	po.EnvDiags, po.EnvEvidence = envDiags, envEvidence
+	po.Python, po.ConnCode, po.ConnTool, po.TimeSkew, po.Glibc = pyFound, connCode, connTool, epochSkew, glibcVer
 
 	// ⑥ 能力可行性检查（2026-09-21：原「能力探路」环节并入本步骤）：按所选能力的
 	//    参数声明，从目标机侧核对目标可达性。放在装机之前——装完才发现采不到，
 	//    要多付一次"装 + 卸"的代价，而这一半的答案在探路阶段就能拿到
-	st.setPhase("ability_check")
-	flowRow, _ := catDB.GetFlow(flowID)
-	probes := []abilityProbe{}
-	if flowRow != nil {
-		probes = abilityProbeChecks(loadAbilities(onboardCfg, integrationsDir), flowRow.Abilities, flowRow.Params())
-	}
-	abilityDiags := []diag{}
+	onPhase("ability_check")
 	abilityEvidence := map[string]any{}
 	abilityRecaps := []map[string]int{}
 	if len(probes) == 0 {
 		abilityEvidence["note"] = "所选能力未声明可自动核对的检查项（params.yaml 的 probe 绑定），本步只做主机事实采集"
 	} else {
-		probes, abilityEvidence, abilityRecaps = execAbilityChecks(inv, st, hook, probes, pyFound)
+		probes, abilityEvidence, abilityRecaps = execAbilityChecks(inv, spec, hook, probes, pyFound)
 		abilityEvidence["checks"] = probes
 	}
+	po.Probes, po.AbilityEvidence, po.AbilityRecaps = probes, abilityEvidence, abilityRecaps
+
+	return po, nil
+}
+
+// probeVerdictInput probeFinish 的入参：阶段事实 + 执行面证据。
+// L1 Runner 执行端与 L0 对账桥各自把 probeOutcome 映射成这个形状（一次映射，两处同源）。
+type probeVerdictInput struct {
+	PortDiags  []diag
+	EnvDiags   []diag
+	Probes     []abilityProbe
+	Facts      *facts
+	DiskFromDF bool
+
+	PyFound    string
+	ConsoleURL string
+	ConnCode   string
+	GlibcVer   string
+	EpochSkew  int64
+
+	PingOutput      string
+	PingRecap       map[string]int
+	SetupOutput     string
+	SetupRecap      map[string]int
+	DFOutput        string
+	DFRC            int
+	DFRecap         map[string]int
+	PortEvidence    map[string]any
+	EnvEvidence     map[string]any
+	AbilityEvidence map[string]any
+	AbilityRecaps   []map[string]int
+}
+
+// probeFinish 探路收口（唯一判据实现）：
+//   - blockerFail 非空 → 本步 fail（就在装机之前拦住，不生成配置、不下发）
+//   - 回填台账（实测值权威）
+//   - 回报 preflight_host（ok），evidence/tasks/recap 全量回传
+func probeFinish(catDB *storepkg.DB, agentStore *AgentStore, flowID int64, step storepkg.FlowStepSnapshot,
+	cred *sshCred, in probeVerdictInput, myAttempt int, tasks []ansibleTask,
+	endAttempt func(result, note string) []attemptRec,
+	setDiags func([]diag), fail func(summary string, detail map[string]any, ds []diag)) {
+
+	// 能力可行性裁定：blocker 未过 → 装机之前就地拦住
+	abilityDiags := []diag{}
 	blockerFail := []abilityProbe{}
-	for _, p := range probes {
+	for _, p := range in.Probes {
 		switch {
 		case p.Verdict == "fail" && p.Level == "blocker":
 			blockerFail = append(blockerFail, p)
@@ -1269,17 +1221,23 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 	}
 	abilityDiags = append(abilityDiags, infoDiag("ability_checked",
 		fmt.Sprintf("能力可行性检查：%d 项（通过 %d / 未通过 %d / 未核实 %d / 交由 Agent 侧验证 %d）；未通过项在装机之前就地拦住，交由 Agent 侧验证的是需要凭据的账号类检查",
-			len(probes), countProbeVerdict(probes, "ok"), len(blockerFail),
-			countProbeVerdict(probes, "unknown"), countProbeVerdict(probes, "delegated"))))
+			len(in.Probes), countProbeVerdict(in.Probes, "ok"), len(blockerFail),
+			countProbeVerdict(in.Probes, "unknown"), countProbeVerdict(in.Probes, "delegated"))))
 
-	// 门禁语义：能力可行性不过 → 本步 fail（就在装机之前拦住，不生成配置、不下发）
 	if len(blockerFail) > 0 {
 		b := blockerFail[0]
 		fail(fmt.Sprintf("能力可行性检查未通过：%s 目标 %s 不可达", b.Ability, b.Target),
 			map[string]any{
-				"phase": "ability_check", "ability": map[string]any{"checks": probes, "blocker_fail": blockerFail},
+				"phase": "ability_check", "ability": map[string]any{"checks": in.Probes, "blocker_fail": blockerFail},
 			},
-			append(append([]diag{}, portDiags...), append(envDiags, abilityDiags...)...))
+			append(append([]diag{}, in.PortDiags...), append(in.EnvDiags, abilityDiags...)...))
+		return
+	}
+
+	facts := in.Facts
+	if facts == nil {
+		fail("探路事实缺失（facts 未采集到）", map[string]any{"phase": "parse"},
+			append(append([]diag{}, in.PortDiags...), in.EnvDiags...))
 		return
 	}
 
@@ -1295,8 +1253,10 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 			"未采集到根分区可用磁盘（ansible_mounts 无 / 且 df 兜底也未取到）",
 			"请人工在目标机执行 df -BG / 核对；disk_free_gb=0 表示未采到，不代表真实为 0"))
 	}
-	diags := append(append(append(append([]diag{}, portDiags...), envDiags...), abilityDiags...), factDiags...)
-	st.setDiags(diags)
+	diags := append(append(append(append([]diag{}, in.PortDiags...), in.EnvDiags...), abilityDiags...), factDiags...)
+	if setDiags != nil {
+		setDiags(diags)
+	}
 
 	// ⑧ 回填台账（实测值权威）
 	osName := normOS(facts.System)
@@ -1305,23 +1265,23 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 		"os": osName, "arch": arch, "kernel": facts.Kernel,
 		"mem_mb": facts.MemTotalMB, "disk_free_gb": facts.DiskFreeGB,
 		"mem_measured":  facts.MemTotalMB > 0,
-		"disk_measured": diskFromDF || facts.DiskFreeGB > 0,
+		"disk_measured": in.DiskFromDF || facts.DiskFreeGB > 0,
 		"distribution":  facts.Distribution + " " + facts.DistVersion,
 		"probed_by":     "ansible_platform",
 		"probed_at":     time.Now().Format("2006-01-02 15:04:05"),
 		"probe_port":    cred.Port,
 		"port_source":   cred.PortSource,
-		"python":        pyFound,
-		"console_url":   consoleURL,
-		"console_reach": connCode,
+		"python":        in.PyFound,
+		"console_url":   in.ConsoleURL,
+		"console_reach": in.ConnCode,
 		// libc 版本：自动选版的兼容判据（含 glibc 依赖组件的版本在 musl 目标上不可装）
-		"glibc":         glibcVer,
-		"time_skew_sec": epochSkew,
+		"glibc":         in.GlibcVer,
+		"time_skew_sec": in.EpochSkew,
 		// 能力可行性结论只留计数进台账：逐项结论属流水线证据（见步骤 detail.ability），
 		// 台账是"这台机器是什么"的档案，不该塞一次探路的明细
-		"ability_checked": countProbeVerdict(probes, "ok"),
+		"ability_checked": countProbeVerdict(in.Probes, "ok"),
 		"ability_failed":  len(blockerFail),
-		"ability_unknown": countProbeVerdict(probes, "unknown"),
+		"ability_unknown": countProbeVerdict(in.Probes, "unknown"),
 		"warn_count":      countWarn(diags),
 		// 资源信息反哺（2026-09-22 用户拍板：全量采集保持现状，结构化落库供资源档案用）。
 		// 空值就存空——台账要"未采到"可见，不要假 0
@@ -1345,9 +1305,9 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 	}
 	reason := fmt.Sprintf("ansible 实测 OS=%s(%s) arch=%s kernel=%s mem=%.0fMB disk_free=%.1fGB",
 		osName, probe["distribution"], arch, facts.Kernel, facts.MemTotalMB, facts.DiskFreeGB)
-	if n := len(probes); n > 0 {
+	if n := len(in.Probes); n > 0 {
 		reason += fmt.Sprintf(" · 能力可行性 %d 项（未通过 %d / 未核实 %d）",
-			n, len(blockerFail), countProbeVerdict(probes, "unknown"))
+			n, len(blockerFail), countProbeVerdict(in.Probes, "unknown"))
 	}
 	if n := countWarn(diags); n > 0 {
 		reason += fmt.Sprintf(" ⚠ %d 项待复核（已展开在步骤告警，请人工确认）", n)
@@ -1359,39 +1319,55 @@ func ansibleProbeJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 		"facts":     probe,
 		"ping":      "ok",
 		"diagnosis": diagJSON(diags),
-		"tasks":     st.tasksSnapshot(),
-		"recap":     mergeRecaps(append([]map[string]int{rp.Recap, rs.Recap, rd.Recap}, abilityRecaps...)...),
+		"tasks":     tasks,
+		"recap":     mergeRecaps(append([]map[string]int{in.PingRecap, in.SetupRecap, in.DFRecap}, in.AbilityRecaps...)...),
 		"attempt":   myAttempt,
-		"attempts":  st.endAttempt("ok", reason),
+		"attempts":  endAttempt("ok", reason),
 		// 能力可行性逐项结论（含未通过/未核实/委派给 Agent 侧的），界面按项呈报
 		"ability": map[string]any{
-			"checks": probes, "blocker_fail": blockerFail,
+			"checks": in.Probes, "blocker_fail": blockerFail,
 			"counts": map[string]int{
-				"total": len(probes), "ok": countProbeVerdict(probes, "ok"),
-				"fail": len(blockerFail), "unknown": countProbeVerdict(probes, "unknown"),
-				"delegated": countProbeVerdict(probes, "delegated"),
+				"total": len(in.Probes), "ok": countProbeVerdict(in.Probes, "ok"),
+				"fail": len(blockerFail), "unknown": countProbeVerdict(in.Probes, "unknown"),
+				"delegated": countProbeVerdict(in.Probes, "delegated"),
 			},
 		},
 		"evidence": map[string]any{
-			"ping_output": clip(rp.Output, 3000),
+			"ping_output": clip(in.PingOutput, 3000),
 			// setup 原文是几百 KB 的 facts dump（实测 297KB），结构化结果已单列在 facts 字段；
 			// 这里只留一段指纹，逐任务原文在 tasks[].lines 里
-			"setup_output":  clip(rs.Output, 2500),
-			"df_output":     clip(rd.Output, 1000),
-			"df_rc":         rd.RC,
-			"df_used":       diskFromDF,
-			"port_check":    portEvidence,
-			"env_check":     envEvidence,
-			"ability_check": abilityEvidence,
+			"setup_output":  clip(in.SetupOutput, 2500),
+			"df_output":     clip(in.DFOutput, 1000),
+			"df_rc":         in.DFRC,
+			"df_used":       in.DiskFromDF,
+			"port_check":    in.PortEvidence,
+			"env_check":     in.EnvEvidence,
+			"ability_check": in.AbilityEvidence,
 		},
 	}
 	if msg := autoReportStep(catDB, agentStore, flowID, step.ID, reason, extra); msg != "" {
-		fail("探路回报被拒："+msg, map[string]any{"probe": probe, "tasks": st.tasksSnapshot()},
+		fail("探路回报被拒："+msg, map[string]any{"probe": probe, "tasks": tasks},
 			append(diags, fatalDiag("probe_report_rejected", "探路回报被拒："+msg,
 				"步骤可能已被人工重置；点「↻ 重试该步」重新执行")))
 		return
 	}
 	addAudit("ansible 探路完成", step.ID, "接入中心", reason)
+}
+
+// probeInputOf 把阶段事实映射成收口入参（L1 Runner 执行端与对账桥共用同一张映射表）。
+func probeInputOf(po *probeOutcome) probeVerdictInput {
+	in := probeVerdictInput{
+		PortDiags: po.PortDiags, EnvDiags: po.EnvDiags, Probes: po.Probes,
+		Facts: po.Facts, DiskFromDF: po.DFUsed,
+		PyFound: po.Python, ConsoleURL: po.ConsoleURL, ConnCode: po.ConnCode,
+		GlibcVer: po.Glibc, EpochSkew: po.TimeSkew,
+		PingOutput: po.PingOutput, PingRecap: po.PingRecap,
+		SetupOutput: po.SetupOutput, SetupRecap: po.SetupRecap,
+		DFOutput: po.DFOutput, DFRC: po.DFRC, DFRecap: po.DFRecap,
+		PortEvidence: po.PortEvidence, EnvEvidence: po.EnvEvidence,
+		AbilityEvidence: po.AbilityEvidence, AbilityRecaps: po.AbilityRecaps,
+	}
+	return in
 }
 
 // facts 目标机关键事实（setup 采集）。
@@ -1511,7 +1487,7 @@ func flowResourceID(catDB *storepkg.DB, flowID int64) string {
 	return f.ResourceID
 }
 
-// ---------------- 安装作业 ----------------
+// ---------------- 安装执行共用件（L1 Runner 执行端与 L0 投递端共用） ----------------
 
 // sagentConfigTpl 安装时渲染的目标机 SAgent 配置（host_metrics 地基能力 + L0 回传通道）。
 // 资源身份 = 流水线资源 ID（与 pick_agent 的预期 agent_id 对齐）；
@@ -1622,304 +1598,46 @@ func loadInstallPlaybook(binSrc, binSHA, cfgSrc, destHome string) string {
 	).Replace(tpl)
 }
 
-// registerScrapeTarget 装机成功后把新主机的 /metrics 登记进 vmagent file_sd
-// （共享卷挂载，vmagent 自动热加载，无需重启）。文件名=资源 ID，重复安装覆盖写。
+// registerScrapeTarget 装机成功后把新主机的 /metrics 登记进 vmagent 采集池。
+// 池化后账本唯一落笔点是调度器（vmpRewriteAllSd）：本函数把目标写进归属表
+// （preferred 空 → 调度器自动分派健康成员），并保留旧共享目录的 file_sd 文件落笔
+// 作为离线证据（不再被 vmagent 读取，仅供排障核对）。
 // 端口取 AGENT_HTTP_PORT（与渲染给目标机的 listen 同源）
-func registerScrapeTarget(resourceID, host string) (string, error) {
+func registerScrapeTarget(catDB *storepkg.DB, resourceID, host string) (string, error) {
 	dir := filepath.Join("data", "scrape-sd")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	addr := host + ":" + cfgAgentHTTPPort
 	doc := []map[string]any{{
-		"targets": []string{host + ":" + cfgAgentHTTPPort},
+		"targets": []string{addr},
 		"labels":  map[string]string{"resource_id": resourceID, "source": "onboard_flow"},
 	}}
 	b, _ := json.Marshal(doc)
 	p := filepath.Join(dir, resourceID+".json")
-	return p, os.WriteFile(p, b, 0o644)
-}
-
-// unregisterScrapeTarget 从 vmagent file_sd 里摘除该资源的抓取目标（卸载：不再抓一台
-// 已经卸干净的机器，否则目标会长期处于 down 状态，把真实故障淹没在噪声里）。
-// 幂等：文件本来就不存在（从未登记 / 已撤过）同样算成功。
-// 返回 SD 文件路径，便于把"撤的是哪个文件"写进证据
-func unregisterScrapeTarget(resourceID string) (string, error) {
-	p := filepath.Join("data", "scrape-sd", resourceID+".json")
-	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		return "", err
+	}
+	// 池登记（账本轨）：失败不影响已写好的证据文件，调用方按原口径降级 warn
+	if err := vmpRegisterOnboarded(catDB, resourceID, addr); err != nil {
 		return p, err
 	}
 	return p, nil
 }
 
-// ansibleInstallJob 按人工选定的版本安装 SAgent：分发二进制（平台本地版本库）→
-// sha256 校验 → 写配置 → 启动 → 进程存活验证。
-//
-// 安装全过程回传（2026-09-21 用户要求）：playbook 每个 TASK 的名称/状态/变更/输出摘要
-// 随进度事件实时回到界面，终态带逐任务结果、PLAY RECAP、阶段记录与全量原文——
-// 运维看到的是"第 3/7 个任务 make dirs 失败：Permission denied: /home/deploy"，
-// 而不是一坨需要自己翻的日志
-func ansibleInstallJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred) {
-	st := newStepRunState(catDB, flowID, step, cred)
-	defer st.startHeartbeat(catDB)()
-	myAttempt := st.attempt
-	hook := st.taskHook(catDB)
-
-	// fail 收口：已被超时重试接管的旧尝试不再写库（避免旧结果覆盖新尝试的进展）
-	fail := func(summary string, detail map[string]any, ds []diag) {
-		if !jobStillCurrent(catDB, flowID, step.ID, myAttempt) {
-			return
-		}
-		if detail == nil {
-			detail = map[string]any{}
-		}
-		detail["attempt"] = myAttempt
-		detail["attempts"] = st.endAttempt("fail", summary)
-		detail["tasks"] = compactTasks(st.tasksSnapshot())
-		failStep(catDB, agentStore, flowID, step, "ansible 安装失败", summary, detail, cred, ds)
+// unregisterScrapeTarget 卸载时摘除该资源的抓取目标（不再抓一台已经卸干净的机器，
+// 否则目标会长期处于 down 状态，把真实故障淹没在噪声里）。
+// 幂等：文件本来就不存在（从未登记 / 已撤过）同样算成功；池归属表同步摘除。
+// 返回 SD 文件路径，便于把"撤的是哪个文件"写进证据
+func unregisterScrapeTarget(catDB *storepkg.DB, resourceID string) (string, error) {
+	p := filepath.Join("data", "scrape-sd", resourceID+".json")
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return p, err
 	}
-
-	phases := []map[string]any{}
-
-	// ① 版本取自人工选定事件（pick_version OK 事件 detail.tag）——安装只装人选的版本
-	tag := pickedVersionTag(catDB, flowID)
-	if tag == "" {
-		fail("未找到人工选定版本（pick_version 无确认记录），拒绝安装", map[string]any{"reason": "no_human_pick"},
-			[]diag{fatalDiag("no_human_pick", "未找到人工选定版本，拒绝安装",
-				"先在「选择 SAgent 版本」环节由人工确认版本；平台不使用 latest 兜底")})
-		return
+	if err := vmpUnregisterOnboarded(catDB, resourceID); err != nil {
+		return p, err
 	}
-	ver := versionByTag(tag)
-	if ver == nil {
-		fail("版本清单中无 "+tag+"，拒绝安装", map[string]any{"tag": tag},
-			[]diag{fatalDiag("version_not_in_catalog", "版本清单中无 "+tag+"，拒绝安装",
-				"检查 data/versions.yaml 登记项，或重新人工选版")})
-		return
-	}
-
-	// ② 平台本地版本库取二进制 + sha256 与清单核对
-	flow, _ := catDB.GetFlow(flowID)
-	if flow == nil {
-		fail("流水线不存在", nil, []diag{fatalDiag("flow_not_found", "流水线不存在", "")})
-		return
-	}
-	res, _ := catDB.GetResource(flow.ResourceID)
-	if res == nil {
-		fail("资源对象不存在", nil, []diag{fatalDiag("resource_not_found", "资源对象不存在", "检查资源台账")})
-		return
-	}
-	// ② 就近取包（L1 Package Cache，架构 D5）：优先校验通过的缓存，失效回源 L0 重建，
-	//    重建后仍不一致则拒绝安装（不允许降级用旧包）。配置 L1_PACKAGE_CACHE_URL 时经独立
-	//    Package Cache 进程 HTTP resolve，缺省进程内 resolveInstallBinary（红线语义一致）。
-	binPath, err := resolveInstallBinaryAny(tag)
-	if err != nil {
-		// 证据链 P2：被拒绝的 resolve 同样留痕（此前只有成功安装才有回执，拒绝即蒸发）
-		_ = catDB.RecordPackageDownload(storepkg.PackageDownloadRow{
-			Caller: "install-flow:" + itoa64(flowID), ResourceID: res.ID, Tag: tag,
-			Verified: false, Source: "rejected", Note: err.Error(),
-		})
-		fail("L1 包缓存就近取包失败/拒绝（"+tag+"）", map[string]any{"tag": tag, "cache": packageCacheRoot()},
-			[]diag{fatalDiag("binary_not_found", "L1 包缓存就近取包失败/拒绝："+err.Error(),
-				"确认平台版本库有该版本的二进制（data/binaries/<tag>/SAgent 随镜像分发），且缓存/清单 sha256 一致；平台不作旧包降级兜底")})
-		return
-	}
-	binData, err := os.ReadFile(binPath)
-	if err != nil {
-		fail("平台版本库/缓存无该二进制（"+binPath+"），请随镜像分发", map[string]any{"tag": tag, "path": binPath},
-			[]diag{fatalDiag("binary_not_found", "平台版本库/缓存无 "+tag+" 的二进制："+err.Error(),
-				"把二进制放进 data/binaries/"+tag+"/ 并同步 Dockerfile 的 COPY（工作目录 + /opt/l0-seed 两处），或触发 /api/package-cache/sync")})
-		return
-	}
-	sum := sha256.Sum256(binData)
-	fileSHA := hex.EncodeToString(sum[:])
-	// 证据链 P2：取包成功即留痕（来源：独立 Package Cache 进程 HTTP resolve 或进程内缓存）
-	dlSource := "cache-hit"
-	if strings.TrimSpace(os.Getenv("L1_PACKAGE_CACHE_URL")) != "" {
-		dlSource = "remote-resolve"
-	}
-	_ = catDB.RecordPackageDownload(storepkg.PackageDownloadRow{
-		Caller: "install-flow:" + itoa64(flowID), ResourceID: res.ID, Tag: tag,
-		SHA256: fileSHA, Verified: ver.SHA256 == "" || ver.SHA256 == fileSHA, Source: dlSource,
-	})
-	if ver.SHA256 != "" && ver.SHA256 != fileSHA {
-		fail("二进制 sha256 与版本清单不一致（清单登记的版本可能已被篡改或未同步），拒绝安装",
-			map[string]any{"tag": tag, "catalog": ver.SHA256, "actual": fileSHA},
-			[]diag{fatalDiag("binary_sha256_mismatch", "二进制 sha256 与版本清单不一致，拒绝安装",
-				"清单登记="+ver.SHA256+"，实际="+fileSHA+"；重新分发二进制或修正 versions.yaml")})
-		return
-	}
-
-	// ③ 本地临时产物：配置渲染 + playbook
-	work, err := os.MkdirTemp("", "l0-install-*")
-	if err != nil {
-		fail("创建安装临时目录失败："+err.Error(), nil,
-			[]diag{fatalDiag("install_tmp_failed", "创建安装临时目录失败："+err.Error(), "检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer os.RemoveAll(work)
-	agentID := flow.AgentID
-	if agentID == "" {
-		agentID = flow.ResourceID
-	}
-	// 控制通道接入点：资源台账的下发值优先（按资源网络分区给可达接入点），无则用平台默认
-	consoleURL := res.AgentConsoleURL
-	if strings.TrimSpace(consoleURL) == "" {
-		consoleURL = l0AgentURL()
-	}
-	// 采集机池归属：复用/重装既有采集机时沿用其已登记池标签（池是漂移边界，重装不得丢失）
-	colPool := ""
-	if isCollectorMode(flow.Mode) {
-		if ca := agentStore.Get(agentID); ca != nil {
-			colPool = ca.Labels["pool"]
-		}
-	}
-	cfgContent := renderSagentConfig(agentID, consoleURL, isCollectorMode(flow.Mode), colPool)
-	cfgPath := filepath.Join(work, "SAgent.yaml")
-	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
-		fail("渲染 SAgent 配置失败："+err.Error(), nil,
-			[]diag{fatalDiag("config_render_failed", "渲染 SAgent 配置失败："+err.Error(), "")})
-		return
-	}
-	pbPath := filepath.Join(work, "install.yml")
-	destHome := destHomeFor(cred)
-	pb := loadInstallPlaybook(filepath.Join(mustAbs(binPath)), fileSHA, cfgPath, destHome)
-	if err := os.WriteFile(pbPath, []byte(pb), 0o644); err != nil {
-		fail("生成安装 playbook 失败："+err.Error(), nil,
-			[]diag{fatalDiag("playbook_render_failed", "生成安装 playbook 失败："+err.Error(), "")})
-		return
-	}
-	inv, cleanupInv, err := writeInventory(cred)
-	if err != nil {
-		fail("生成 ansible inventory 失败："+err.Error(), nil,
-			[]diag{fatalDiag("inventory_write_failed", "生成 ansible inventory 失败："+err.Error(),
-				"检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer cleanupInv()
-
-	// ④ 语法门禁：playbook 先过 --syntax-check，语法错误在碰目标机前就拦下
-	st.setPhase("syntax")
-	st.flush(catDB, "平台 ansible 启动 · playbook 语法校验中（尚未触碰目标机）")
-	synCmd := exec.Command("ansible-playbook", "-i", inv, pbPath, "--syntax-check")
-	synCmd.Env = append(os.Environ(), "ANSIBLE_HOST_KEY_CHECKING=False")
-	synOut, synErr := synCmd.CombinedOutput()
-	phases = append(phases, map[string]any{
-		"phase": "syntax", "status": map[bool]string{true: "failed", false: "ok"}[synErr != nil],
-		"output": clip(string(synOut), 1500),
-	})
-	if synErr != nil {
-		fail("playbook 语法校验未过（未触碰目标机）", map[string]any{
-			"syntax_output": clip(string(synOut), 2000), "phases": phases,
-		}, []diag{fatalDiag("playbook_syntax_failed", "playbook 语法校验未过：检查 data/playbooks/install.yml",
-			"外置 playbook 语法错误；修正后点「↻ 重试该步」")})
-		return
-	}
-
-	// ⑤ 执行安装（流式：每个 TASK 落一次进度事件，界面实时可见）
-	st.setPhase("playbook")
-	st.flush(catDB, "平台 ansible 执行中 · 安装 playbook 开始（逐任务回报）")
-	// 兜底 ctx 带 execGrace：清扫器（按 install_agent.run_sec 判定，含自动重试）
-	// 必须先到，否则执行层会抢在清扫器前面把步骤判死，重试额度白白浪费
-	pbBudget := execBudget(st.spec, budgetPlaybook)
-	ctx, cancel := context.WithTimeout(context.Background(), pbBudget)
-	defer cancel()
-	pr := runPlaybookStream(ctx, inv, pbPath, hook)
-	rc := pr.RC
-
-	evidence := map[string]any{
-		"output": clip(pr.Output, 20000), "output_bytes": len(pr.Output),
-		"truncated": len(pr.Output) > 20000,
-	}
-	// 失败任务的原行单独留一份：总原文被截断时，它仍是最直接的证据
-	if ft := taskFailures(pr.Tasks); len(ft) > 0 {
-		lines := []string{}
-		for _, t := range ft {
-			lines = append(lines, t.Lines...)
-		}
-		evidence["failed_task_lines"] = clip(strings.Join(lines, "\n"), 6000)
-	}
-	phases = append(phases, map[string]any{
-		"phase": "playbook", "rc": rc, "timed_out": pr.TimedOut,
-		"tasks": len(pr.Tasks), "recap": recapLine(pr.Recap, pr.RecapSeq),
-	})
-
-	detail := map[string]any{
-		"tag": tag, "sha256": fileSHA, "sha_verified": true, "version": ver.Version,
-		"conn": credState(cred), "target": cred.target(),
-		"config": cfgContent, "rc": rc, "timed_out": pr.TimedOut,
-		"tasks": compactTasks(pr.Tasks), "recap": pr.Recap,
-		"recap_line": recapLine(pr.Recap, pr.RecapSeq),
-		"phases":     phases, "attempt": myAttempt,
-		"evidence": evidence,
-	}
-	if pr.TimedOut {
-		detail["attempts"] = st.endAttempt("timeout_run", fmt.Sprintf("playbook 超过 %ds 未返回", budgetSec(pbBudget)))
-		fail(fmt.Sprintf("安装 playbook 超过 %ds 未返回（平台已终止）", budgetSec(pbBudget)), detail,
-			withPortSource(cred, []diag{fatalDiag("ansible_phase_timeout",
-				fmt.Sprintf("安装 playbook 超过 %ds 未返回（install_agent.run_sec 推导 + %ds 宽限）",
-					budgetSec(pbBudget), int(execGrace.Seconds())),
-				"目标机负载过高或 playbook 卡住；核对目标机后点「↻ 重试该步」")}))
-		return
-	}
-	if rc != 0 {
-		// 归因优先用「失败任务自己的原文」——比整段输出更准，首个 FAILED! 就是真因所在
-		failText := taskFirstFailureText(pr.Tasks)
-		if strings.TrimSpace(failText) == "" {
-			failText = pr.Output
-		}
-		d := classifyPlaybookFailure(failText, rc)
-		detail["attempts"] = st.endAttempt("fail", d.Message)
-		fail("安装失败："+d.Message+"（rc="+fmt.Sprint(rc)+"）", detail,
-			withPortSource(cred, []diag{d}))
-		return
-	}
-
-	// ⑥ 采集目标登记：写 vmagent file_sd（共享卷热加载）——装机完成即入采集网，观察环节才有据可核
-	st.setPhase("register")
-	diags := withPortSource(cred, []diag{})
-	reason := fmt.Sprintf("ansible 安装完成 tag=%s sha256=前8位%s 目标=%s 配置已下发 agent_id=%s",
-		tag, fileSHA[:8], cred.target(), agentID)
-	if sdPath, sdErr := registerScrapeTarget(flow.ResourceID, cred.Host); sdErr != nil {
-		detail["scrape_sd_error"] = sdErr.Error()
-		diags = append(diags, warnDiag("scrape_sd_failed",
-			"采集目标登记 vmagent file_sd 失败："+sdErr.Error(),
-			"检查 data/scrape-sd 目录是否可写；不登记则采集观察环节无法确认入库"))
-		reason += " ⚠ 采集目标登记失败（vmagent file_sd 写入失败，采集观察环节将无法确认入库）"
-	} else {
-		detail["scrape_sd"] = sdPath
-		phases = append(phases, map[string]any{"phase": "register", "status": "ok", "path": sdPath})
-		reason += " 采集目标已登记 vmagent"
-	}
-	if n := countWarn(diags); n > 0 {
-		reason += fmt.Sprintf(" ⚠ %d 项待复核（见步骤告警）", n)
-	}
-	detail["phases"] = phases
-	// 成功路径同样要留尝试记录：运维需要看到"这一版是第几次尝试装成的、跑了多久"。
-	// 曾经这里用 historySnapshot()（只读不追加）——成功时永远是空数组，
-	// 而失败路径走 endAttempt 有记录，同一张卡片成功/失败显示内容不对称
-	attempts := st.endAttempt("ok", reason)
-	extra := map[string]any{
-		"source": "ansible_install", "detail": detail,
-		"conn": credState(cred), "target": cred.target(),
-		"tasks": compactTasks(pr.Tasks), "recap": pr.Recap,
-		"task_total": len(pr.Tasks), "recap_line": recapLine(pr.Recap, pr.RecapSeq),
-		// phases 必须平铺在顶层：界面按 dd.phases 取，藏在 detail 里等于没回传
-		"phases":    phases,
-		"attempt":   myAttempt,
-		"attempts":  attempts,
-		"diagnosis": diagJSON(diags), "evidence": evidence,
-	}
-	if msg := autoReportStep(catDB, agentStore, flowID, step.ID, reason, extra); msg != "" {
-		fail("安装回报被拒："+msg, detail,
-			withPortSource(cred, []diag{fatalDiag("install_report_rejected", "安装回报被拒："+msg,
-				"步骤可能已被人工重置；点「↻ 重试该步」重新执行")}))
-		return
-	}
-	// 台账记下"这台机装的是哪个 tag"：Agent 自报版本是编译常量，不能当安装版本用
-	if err := catDB.SetResourceInstalledTag(flow.ResourceID, tag); err != nil {
-		log.Printf("[onboard] 记录 installed_tag 失败 resource=%s tag=%s: %v", flow.ResourceID, tag, err)
-	}
-	addAudit("ansible 安装 SAgent", flow.ResourceID, "接入中心", reason)
+	return p, nil
 }
 
 // uninstallPlaybookTpl 内置兜底模板：外置 data/playbooks/uninstall.yml 缺失时回落用。
@@ -2082,112 +1800,10 @@ func classifyUninstallFailure(out string, rc int) diag {
 		"查看下方原始输出，定位第一个 FAILED! 的任务")
 }
 
-// ansibleUninstallJob 卸载 SAgent：按 pid 停进程 → 删安装目录 → 目标机自证核对。
-//
-// 与安装作业同构：语法门禁（不碰目标机）→ 流式执行（逐任务回报）→ 终态带逐任务结果、
-// PLAY RECAP、阶段记录与全量原文。区别在"成功"的定义更严——卸载必须由目标机自己
-// 核对（目录 / 进程 / 端口）通过，playbook 里的断言不过就是 fail，平台不替它圆场。
-func ansibleUninstallJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred) {
-	st := newStepRunState(catDB, flowID, step, cred)
-	defer st.startHeartbeat(catDB)()
-	myAttempt := st.attempt
-	hook := st.taskHook(catDB)
-
-	// fail 收口：已被超时重试接管的旧尝试不再写库（避免旧结果覆盖新尝试的进展）
-	fail := func(summary string, detail map[string]any, ds []diag) {
-		if !jobStillCurrent(catDB, flowID, step.ID, myAttempt) {
-			return
-		}
-		if detail == nil {
-			detail = map[string]any{}
-		}
-		detail["attempt"] = myAttempt
-		// attempts 已由收口函数（uninstallFinish）写入时不再追加：同一次尝试在历史里只应有一行。
-		// 早退路径（流水线/资源/临时目录/语法门禁）没经过收口，这里兜底补一条
-		if _, ok := detail["attempts"]; !ok {
-			detail["attempts"] = st.endAttempt("fail", summary)
-		}
-		detail["tasks"] = compactTasks(st.tasksSnapshot())
-		failStep(catDB, agentStore, flowID, step, "ansible 卸载失败", summary, detail, cred, ds)
-	}
-
-	flow, _ := catDB.GetFlow(flowID)
-	if flow == nil {
-		fail("流水线不存在", nil, []diag{fatalDiag("flow_not_found", "流水线不存在", "")})
-		return
-	}
-	res, _ := catDB.GetResource(flow.ResourceID)
-	if res == nil {
-		fail("资源对象不存在", nil, []diag{fatalDiag("resource_not_found", "资源对象不存在", "检查资源台账")})
-		return
-	}
-
-	phases := []map[string]any{}
-	work, err := os.MkdirTemp("", "l0-uninstall-*")
-	if err != nil {
-		fail("创建卸载临时目录失败："+err.Error(), nil,
-			[]diag{fatalDiag("uninstall_tmp_failed", "创建卸载临时目录失败："+err.Error(), "检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer os.RemoveAll(work)
-	// 卸载目录口径与安装完全一致（destHomeFor）：装在哪就卸哪，
-	// 不允许两侧各写一套推导逻辑——否则会"装到 A 却去删 B"，看着成功其实什么都没卸
-	destHome := destHomeFor(cred)
-	pbPath := filepath.Join(work, "uninstall.yml")
-	if err := os.WriteFile(pbPath, []byte(loadUninstallPlaybook(destHome)), 0o644); err != nil {
-		fail("生成卸载 playbook 失败："+err.Error(), nil,
-			[]diag{fatalDiag("playbook_render_failed", "生成卸载 playbook 失败："+err.Error(), "")})
-		return
-	}
-	inv, cleanupInv, err := writeInventory(cred)
-	if err != nil {
-		fail("生成 ansible inventory 失败："+err.Error(), nil,
-			[]diag{fatalDiag("inventory_write_failed", "生成 ansible inventory 失败："+err.Error(),
-				"检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer cleanupInv()
-
-	// 语法门禁：语法错误在碰目标机前就拦下（与安装同一原则）
-	st.setPhase("syntax")
-	st.flush(catDB, "平台 ansible 启动 · 卸载 playbook 语法校验中（尚未触碰目标机）")
-	synCmd := exec.Command("ansible-playbook", "-i", inv, pbPath, "--syntax-check")
-	synCmd.Env = append(os.Environ(), "ANSIBLE_HOST_KEY_CHECKING=False")
-	synOut, synErr := synCmd.CombinedOutput()
-	phases = append(phases, map[string]any{
-		"phase": "syntax", "status": map[bool]string{true: "failed", false: "ok"}[synErr != nil],
-		"output": clip(string(synOut), 1500),
-	})
-	if synErr != nil {
-		fail("卸载 playbook 语法校验未过（未触碰目标机）", map[string]any{
-			"syntax_output": clip(string(synOut), 2000), "phases": phases,
-		}, []diag{fatalDiag("playbook_syntax_failed", "卸载 playbook 语法校验未过：检查 data/playbooks/uninstall.yml",
-			"外置 playbook 语法错误；修正后点「↻ 重试该步」")})
-		return
-	}
-
-	// 执行卸载（流式：每个 TASK 落一次进度事件，界面实时可见）
-	st.setPhase("playbook")
-	st.flush(catDB, "平台 ansible 执行中 · 卸载 playbook 开始（逐任务回报）")
-	pbBudget := execBudget(st.spec, budgetPlaybook)
-	ctx, cancel := context.WithTimeout(context.Background(), pbBudget)
-	defer cancel()
-	pr := runPlaybookStream(ctx, inv, pbPath, hook)
-	phases = append(phases, map[string]any{
-		"phase": "playbook", "rc": pr.RC, "timed_out": pr.TimedOut,
-		"tasks": len(pr.Tasks), "recap": recapLine(pr.Recap, pr.RecapSeq),
-	})
-
-	// L0 收口：与 L1 回执对账桥共用同一份实现（SPEC-D5-IN5 B4）
-	uninstallFinish(catDB, agentStore, flowID, step, cred, pr, phases, destHome,
-		myAttempt, pbBudget, st.endAttempt, st.setPhase, fail, nil)
-}
-
 // uninstallFinish 卸载作业的 L0 收口：判定成败 → 写步骤终态 → 审计。
 //
-// 与 offboardFinish 同构（SPEC-D5-IN5 B4）：执行端搬到 L1 后，步骤终态改由回执对账桥驱动，
-// 但"这次算不算卸干净"的判据只能有一套——否则切了开关结论就变了。
+// 与 offboardFinish 同构（SPEC-D5-IN5 B4）：执行端在 L1，步骤终态由回执对账桥驱动，
+// 但"这次算不算卸干净"的判据只能有一套——执行端只回事实，收口裁定在 L0 落笔。
 // 差别只在收口口径：卸载认的是目标机三口径自证核对行（目录 / 进程 / 端口）。
 func uninstallFinish(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
 	step storepkg.FlowStepSnapshot, cred *sshCred,

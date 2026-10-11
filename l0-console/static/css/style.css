@@ -39,10 +39,19 @@ body {
 nav {
   width: 220px; background: linear-gradient(180deg, var(--sidebar) 0%, var(--sidebar-2) 100%);
   color: var(--on-dark); padding: 18px 0; display: flex; flex-direction: column; flex-shrink: 0;
+  /* 菜单组增多（2026-09-27 新增"高可用验证"组）后单屏放不下：nav 自身出纵向细滚动条，
+     logo 吸顶 / nav-foot 吸底，滚动只发生在中间菜单区 */
+  overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.18) transparent;
 }
+nav::-webkit-scrollbar { width: 5px; }
+nav::-webkit-scrollbar-track { background: transparent; }
+nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 3px; }
+nav::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.3); }
 nav .logo {
   padding: 0 16px 16px; font-weight: 700; font-size: 15px;
   color: #ffffff; letter-spacing: .5px; border-bottom: 1px solid rgba(255,255,255,.08); margin-bottom: 8px;
+  /* 吸顶：长菜单下滚时 logo 常驻（顶 padding 随内容滚走，logo 钉在 scrollport 顶） */
+  position: sticky; top: 0; background: var(--sidebar); z-index: 5;
 }
 nav .logo small { display: block; color: #70d6cc; font-weight: 500; font-size: 11px; letter-spacing: .5px; margin-top: 2px; }
 nav .nav-section {
@@ -66,6 +75,8 @@ nav .nav-badge {
 nav .nav-foot {
   margin-top: auto; padding: 12px 16px; font-size: 11px;
   color: var(--on-dark-muted); border-top: 1px solid rgba(255,255,255,.08);
+  /* 吸底：长菜单滚动时版本脚注常驻，菜单项从其下方滚过 */
+  position: sticky; bottom: 0; background: var(--sidebar-2); z-index: 5;
 }
 
 /* 证据链概要条：五段串行链路 + 汇总门（已应用 ≠ 已入库） */
@@ -145,6 +156,17 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-hei
 }
 .card-hd .tabs span.active { background: var(--primary); color: #fff; }
 .card-bd { padding: 16px 20px; overflow-x: auto; }
+
+/* 采集健康页（.no-hscroll）：所有表格禁止横向滚动条。
+   表格恒等于容器宽，全局 td 的 white-space:nowrap 放开为自动换行，
+   长目标名/地址/原因列就地折行，不再把卡体撑出 overflow-x 滚动条。 */
+.no-hscroll .card-bd { overflow-x: visible; }
+.no-hscroll table { width: 100%; }
+.no-hscroll th, .no-hscroll td {
+  white-space: normal; word-break: break-word;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.no-hscroll td code { white-space: normal; word-break: break-all; }
 
 /* Group grid */
 .group-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }

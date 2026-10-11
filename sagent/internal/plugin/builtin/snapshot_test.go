@@ -19,7 +19,7 @@ func CollectMySQLForTest(target config.MySQLTarget, client *http.Client) []Metri
 	m := NewMySQLProbe(config.MySQLProbeConfig{Targets: []config.MySQLTarget{target}})
 	m.client = client
 	out := make(chan MetricBatch, 4)
-	m.scrape(out)
+	m.scrape(out, m.stopCh)
 	close(out)
 	var batches []MetricBatch
 	for batch := range out {
@@ -59,7 +59,7 @@ func TestMySQLTargetSnapshots(t *testing.T) {
 	}})
 	m.client = &http.Client{Transport: probeTransport{endpoint}, Timeout: time.Second}
 	out := make(chan MetricBatch, 4)
-	m.scrape(out)
+	m.scrape(out, m.stopCh)
 	first, firstHealth, second, secondHealth := <-out, <-out, <-out, <-out
 	if first.Err != nil || second.Err != nil || first.Source == second.Source || first.Metrics[0].Labels["resource_id"] != "db-1" || second.Metrics[0].Labels["resource_id"] != "db-2" {
 		t.Fatalf("targets not isolated: %+v %+v", first, second)
@@ -82,7 +82,7 @@ func TestMySQLTargetSnapshots(t *testing.T) {
 			mu.Lock()
 			status, body, truncated = tc.status, tc.body, tc.truncated
 			mu.Unlock()
-			m.scrape(out)
+			m.scrape(out, m.stopCh)
 			for i, source := range []string{first.Source, second.Source} {
 				batch, health := <-out, <-out
 				if batch.Source != source || (batch.Err != nil) != tc.failure || len(batch.Metrics) != 0 {
@@ -96,7 +96,7 @@ func TestMySQLTargetSnapshots(t *testing.T) {
 		})
 	}
 	srv.Close()
-	m.scrape(out)
+	m.scrape(out, m.stopCh)
 	for range m.targets {
 		batch, health := <-out, <-out
 		if batch.Err == nil || health.Err != nil || len(health.Metrics) != 1 || health.Metrics[0].Value != 0 {
@@ -169,7 +169,7 @@ func TestSnapshotSendsRespondToStop(t *testing.T) {
 	}{
 		{"host", h.runOnce, h.stopCh}, {"scrape", s.scrape, s.stopCh}, {"port", p.check, p.stopCh},
 		{"exec", func(ch chan<- MetricBatch) { e.executeOnce(config.ExecScript{Command: "true"}, ch, time.Second) }, e.stopCh},
-		{"mysql", m.scrape, m.stopCh},
+		{"mysql", func(ch chan<- MetricBatch) { m.scrape(ch, m.stopCh) }, m.stopCh},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := make(chan MetricBatch, 1)

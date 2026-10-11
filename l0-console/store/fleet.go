@@ -46,8 +46,10 @@ type TargetRow struct {
 	LastTestResult string `json:"last_test_result"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
-	TenantID      string `json:"tenant_id"` // 归属租户（架构 D3 隔离），空按 default
-	Region        string `json:"region"`    // 候选地域（HA-3 跨 L1 迁移候选集限定）
+	TenantID      string `json:"tenant_id"`       // 归属租户（架构 D3 隔离），空按 default
+	Region        string `json:"region"`          // 候选地域（HA-3 跨 L1 迁移候选集限定）
+	CandidatesJSON string `json:"candidates_json"` // 规则级候选采集机集合（JSON 数组；空=回落池成员全集口径）
+	PreferredOwner string `json:"preferred_owner"` // 首选采集机（回切归位目标；空=未指定）
 }
 
 // InitFleet 创建 M0 三张表（agents / targets / agent_config）
@@ -108,6 +110,9 @@ func (s *DB) InitFleet() error {
 		{"agents", `ALTER TABLE agents ADD COLUMN tenant_id TEXT DEFAULT 'default'`},
 		{"targets", `ALTER TABLE targets ADD COLUMN tenant_id TEXT DEFAULT 'default'`},
 	{"targets", `ALTER TABLE targets ADD COLUMN region TEXT DEFAULT ''`},
+		// SPEC-exporter采集机池人工触发漂移与回切 E1：规则级候选集 + 首选归属（回切目标）
+		{"targets", `ALTER TABLE targets ADD COLUMN candidates_json TEXT DEFAULT '[]'`},
+		{"targets", `ALTER TABLE targets ADD COLUMN preferred_owner TEXT DEFAULT ''`},
 	}
 	for _, a := range alters {
 		cols, err := s.tableColumns(a.table)
@@ -177,6 +182,21 @@ func (s *DB) GetAgentSource(id string) (string, error) {
 		return "", nil
 	}
 	return src, err
+}
+
+// GetAgentRow 查单台 Agent 台账行（不存在返回 nil, nil）。
+// R0-3 能力协商用：syncAgentConfig gate / 心跳版本变更比对都要按 id 取版本，不能全表扫。
+func (s *DB) GetAgentRow(id string) (*AgentRow, error) {
+	rows, err := s.ListAgentRows()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	return nil, nil
 }
 
 // DeleteAgent 注销 Agent 的 DB 行（重装/换机重新接入前清身份用），
@@ -270,7 +290,7 @@ func (s *DB) GetAgentConfig(agentID string) (int, string, error) {
 
 // ListTargets 全部采集目标
 func (s *DB) ListTargets() ([]*TargetRow, error) {
-	rows, err := s.db.Query(`SELECT id,name,type,address,COALESCE(agent_id,''),COALESCE(plugin,''),COALESCE(note,''),COALESCE(params_json,'{}'),COALESCE(resource_id,''),COALESCE(flow_id,0),COALESCE(last_test_at,''),COALESCE(last_test_result,''),created_at,updated_at,COALESCE(tenant_id,'default'),COALESCE(region,'') FROM targets ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id,name,type,address,COALESCE(agent_id,''),COALESCE(plugin,''),COALESCE(note,''),COALESCE(params_json,'{}'),COALESCE(resource_id,''),COALESCE(flow_id,0),COALESCE(last_test_at,''),COALESCE(last_test_result,''),created_at,updated_at,COALESCE(tenant_id,'default'),COALESCE(region,''),COALESCE(candidates_json,'[]'),COALESCE(preferred_owner,'') FROM targets ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +298,7 @@ func (s *DB) ListTargets() ([]*TargetRow, error) {
 	out := []*TargetRow{}
 	for rows.Next() {
 		t := &TargetRow{}
-		if err := rows.Scan(&t.ID, &t.Name, &t.Type, &t.Address, &t.AgentID, &t.Plugin, &t.Note, &t.ParamsJSON, &t.ResourceID, &t.FlowID, &t.LastTestAt, &t.LastTestResult, &t.CreatedAt, &t.UpdatedAt, &t.TenantID, &t.Region); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Type, &t.Address, &t.AgentID, &t.Plugin, &t.Note, &t.ParamsJSON, &t.ResourceID, &t.FlowID, &t.LastTestAt, &t.LastTestResult, &t.CreatedAt, &t.UpdatedAt, &t.TenantID, &t.Region, &t.CandidatesJSON, &t.PreferredOwner); err != nil {
 			continue
 		}
 		out = append(out, t)
@@ -300,8 +320,8 @@ func (s *DB) UpdateTarget(t *TargetRow) error {
 	if t.ParamsJSON == "" {
 		t.ParamsJSON = "{}"
 	}
-	_, err := s.db.Exec(`UPDATE targets SET name=?, type=?, address=?, agent_id=?, plugin=?, note=?, params_json=?, tenant_id=?, region=?, updated_at=to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id=?`,
-		t.Name, t.Type, t.Address, t.AgentID, t.Plugin, t.Note, t.ParamsJSON, t.TenantID, t.Region, t.ID)
+	_, err := s.db.Exec(`UPDATE targets SET name=?, type=?, address=?, agent_id=?, plugin=?, note=?, params_json=?, tenant_id=?, region=?, candidates_json=?, preferred_owner=?, updated_at=to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id=?`,
+		t.Name, t.Type, t.Address, t.AgentID, t.Plugin, t.Note, t.ParamsJSON, t.TenantID, t.Region, orDefault(t.CandidatesJSON, "[]"), t.PreferredOwner, t.ID)
 	return err
 }
 
@@ -320,10 +340,10 @@ func (s *DB) UpdateTargetTest(id int64, result string) error {
 // GetTarget 按 id 取采集目标
 func (s *DB) GetTarget(id int64) (*TargetRow, error) {
 	var t TargetRow
-	err := s.db.QueryRow(`SELECT id,name,type,address,COALESCE(agent_id,''),COALESCE(plugin,''),COALESCE(note,''),COALESCE(params_json,'{}'),COALESCE(resource_id,''),COALESCE(flow_id,0),COALESCE(last_test_at,''),COALESCE(last_test_result,''),created_at,updated_at,COALESCE(tenant_id,'default'),COALESCE(region,'')
+	err := s.db.QueryRow(`SELECT id,name,type,address,COALESCE(agent_id,''),COALESCE(plugin,''),COALESCE(note,''),COALESCE(params_json,'{}'),COALESCE(resource_id,''),COALESCE(flow_id,0),COALESCE(last_test_at,''),COALESCE(last_test_result,''),created_at,updated_at,COALESCE(tenant_id,'default'),COALESCE(region,''),COALESCE(candidates_json,'[]'),COALESCE(preferred_owner,'')
 		FROM targets WHERE id=?`, id).
 		Scan(&t.ID, &t.Name, &t.Type, &t.Address, &t.AgentID, &t.Plugin, &t.Note, &t.ParamsJSON,
-			&t.ResourceID, &t.FlowID, &t.LastTestAt, &t.LastTestResult, &t.CreatedAt, &t.UpdatedAt, &t.TenantID, &t.Region)
+			&t.ResourceID, &t.FlowID, &t.LastTestAt, &t.LastTestResult, &t.CreatedAt, &t.UpdatedAt, &t.TenantID, &t.Region, &t.CandidatesJSON, &t.PreferredOwner)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -356,6 +376,25 @@ func (s *DB) UpdateTargetOwner(id int64, toAgent string) (int64, error) {
 func (s *DB) SetTargetRegion(id int64, region string) error {
 	_, err := s.db.Exec(`UPDATE targets SET region=?, updated_at=to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id=?`, region, id)
 	return err
+}
+
+// SetTargetCandidates 登记规则级候选采集机集合与首选归属（SPEC-exporter采集机池 E1）。
+// candidatesJSON 为 JSON 数组串（如 ["a","b"]）；preferred 为回切归位目标，可空。
+func (s *DB) SetTargetCandidates(id int64, candidatesJSON, preferred string) error {
+	if candidatesJSON == "" {
+		candidatesJSON = "[]"
+	}
+	_, err := s.db.Exec(`UPDATE targets SET candidates_json=?, preferred_owner=?, updated_at=to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id=?`,
+		candidatesJSON, preferred, id)
+	return err
+}
+
+// orDefault 空串回落默认值（SQL 层占位统一）。
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // FindTargetByName 按名称查目标（接入流程幂等用：同名则复用不重复建）

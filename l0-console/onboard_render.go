@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	storepkg "github.com/sagent/l0-console/store"
@@ -171,34 +170,4 @@ func defaultExporterPort(plugin string) string {
 		}
 	}
 	return "9100"
-}
-
-// exporterURL 供安装命令与探路复用：把 target 的抓取地址拼出来
-func exporterURL(host, port, plugin string) string {
-	if host == "" {
-		return ""
-	}
-	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
-		return host
-	}
-	if port == "" {
-		port = defaultExporterPort(plugin)
-	}
-	return "http://" + host + ":" + port + "/metrics"
-}
-
-// atoiSafe 宽松解析整数（渲染器里用于端口等）
-func atoiSafe(s, def string) string {
-	if _, err := strconv.Atoi(strings.TrimSpace(s)); err != nil {
-		return def
-	}
-	return s
-}
-
-// skillVersionTag 由实测 OS/架构生成镜像 tag（与 pick_version 同一套规则）
-func skillVersionTag(osName, arch string) string {
-	if osName == "" || arch == "" {
-		return "latest"
-	}
-	return strings.ToLower(osName) + "-" + strings.ToLower(arch) + "-" + cfgSAVersion
 }

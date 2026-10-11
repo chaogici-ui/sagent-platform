@@ -77,11 +77,11 @@ type flowRun struct {
 	// 用于把「被阻断」和「等人工决策」在文案上分开——两者都不是失败，但对运维是两件事
 	stepWaiting map[string]string
 	// stepProgress / stepAttempts 每步最新的运行期元数据（超时判定基准 + 尝试历史）。
-	// 重新下发执行包时必须原样带上：丢了等于把"第几次尝试、还能等多久"一起丢掉，
+	// 重新下发/自动重试时必须原样带上：丢了等于把"第几次尝试、还能等多久"一起丢掉，
 	// 超时判定就只能靠事件时间戳猜
 	stepProgress map[string]any
 	stepAttempts map[string]any
-	// stepDiags 每步上一轮的诊断：重新下发执行包时不能把已有诊断冲掉——
+	// stepDiags 每步上一轮的诊断：重试重新下发时不能把已有诊断冲掉——
 	// "平台已自动重试过一次"这类告知一旦被"已下发等待回报"覆盖，运维就再也看不到
 	stepDiags map[string][]diag
 }
@@ -216,9 +216,10 @@ func advanceFlow(catDB *storepkg.DB, agentStore *AgentStore, flowID int64) error
 
 		// 依赖就绪：平台侧当场执行，其它下发后等待
 		if step.Scope != "platform" {
-			// 平台 ansible 执行器优先接管（探路/安装：凭据齐备 + ansible 可用）——
-			// 步骤落 running、异步作业拉起后自动回报；凭据缺失或 ansible 不可用时
-			// 回落旧的「执行包 + 人工回报」路径
+			// B5 收口后执行端恒为 L1 Runner：ansible 类步骤一律被 tryAnsibleExecutor
+			// 接管（投递 L1 或当场显式失败），不再回落「执行包 + 人工回报」路径；
+			// 走到这里的只有 agent 步骤（verify_probe/observe_collect 等，atom 不在
+			// ansibleKindOfAtom 映射）——落 running 等 Agent 侧自动回报
 			if tryAnsibleExecutor(catDB, agentStore, run, step) {
 				continue
 			}
@@ -229,30 +230,7 @@ func advanceFlow(catDB *storepkg.DB, agentStore *AgentStore, flowID int64) error
 				"atom":  step.Atom,
 				"hint":  step.Hint,
 			}
-			// 为什么没走平台自动执行，必须给人看见（凭据缺失 / 环境缺 ansible）。
-			// 已有诊断（端口来源可疑、超时自动重试…）先原样保留再追加，不做替换：
-			// 界面上"平台救过一次"的信息不该被一条 fallback 提示冲掉
-			dsList := append([]diag{}, run.stepDiags[step.ID]...)
-			if why := ansibleFallbackReason(run.resource); why != "" {
-				detail["ansible_fallback"] = why
-				detail["cred_state"] = credState(sshCredOf(run.resource))
-				dsList = append(dsList, warnDiag("ansible_fallback", why,
-					"在资源台账补齐 SSH 凭据后，重试本环节即可改为平台自动执行"))
-			}
-			if len(dsList) > 0 {
-				detail["diagnosis"] = diagJSON(dsList)
-			}
-			// 执行包：实时取当前模板（模板改命令即时生效），快照字段兜底。
-			// {{.ip}} 渲染为目标资源 IP；前端对带 instruction 的 running 步骤
-			// 渲染可复制命令 + 结构化回报表单
-			insTpl := step.Instruction
-			if tpl := templateInstructionFor(flow.Mode, step.ID); tpl != "" {
-				insTpl = tpl
-			}
-			if ins := renderInstruction(insTpl, flow.ResourceIP, credPortOrDefault(run.resource)); ins != "" {
-				detail["instruction"] = ins
-			}
-			// 沿用已有的运行期元数据（超时重试后重新下发执行包时，attempt 计数与
+			// 沿用已有的运行期元数据（超时重试后重新下发时，attempt 计数与
 			// 超时基准必须延续，不能被重置成"第一次尝试"）
 			if pr, ok := run.stepProgress[step.ID]; ok && pr != nil {
 				detail["progress"] = pr
@@ -285,29 +263,6 @@ func advanceFlow(catDB *storepkg.DB, agentStore *AgentStore, flowID int64) error
 	// 全部步骤终态 → 收口
 	final := computeFlowStatus(flow.Steps, run.stepStatus)
 	return catDB.UpdateFlowStep(flowID, currentStepOf(flow.Steps, run.stepStatus), final)
-}
-
-// renderInstruction 渲染执行包模板：{{.ip}} → 目标资源 IP，{{.port}} → SSH 端口。
-// 端口必须一起渲染——人工路径下 `ssh user@ip` 会默认走 22，正是"连错端口"的根源。
-// 刻意不用 text/template——探测命令里的 awk/sed 语法与模板引擎转义互相干扰，
-// 占位符替换足够且可预测
-func renderInstruction(tpl, ip string, port int) string {
-	if tpl == "" {
-		return ""
-	}
-	out := strings.ReplaceAll(tpl, "{{.ip}}", ip)
-	if port > 0 {
-		return strings.ReplaceAll(out, "{{.port}}", fmt.Sprint(port))
-	}
-	return out
-}
-
-// credPortOrDefault 资源台账登记的 SSH 端口；未登记时按平台惯例回落 22
-func credPortOrDefault(res *storepkg.Resource) int {
-	if res == nil || res.SSHPort <= 0 {
-		return 22
-	}
-	return res.SSHPort
 }
 
 // waitingForKey 取步骤 detail 里的 waiting_for（停等语义字段，空串=不是停等态）
@@ -521,7 +476,7 @@ func (r *flowRun) atomPickObject(catDB *storepkg.DB) (string, string, string) {
 	if st := credState(cred); st["valid"] == false {
 		reason, _ := st["reason"].(string)
 		ds = append(ds, warnDiag("cred_incomplete", reason,
-			"不补凭据时，主机探路 / 安装 SAgent 将回落「人工复制执行包 + 回报结果」模式"))
+			"凭据缺失/不齐备时，主机探路 / 安装 SAgent 将显式失败；补齐资源台账 SSH 凭据后重试"))
 	} else if r.resource.SSHPort <= 0 {
 		ds = append(ds, portSourceDiag(cred))
 		summary += " ⚠ 端口未登记"
@@ -539,18 +494,30 @@ func (r *flowRun) atomPickObject(catDB *storepkg.DB) (string, string, string) {
 	})
 }
 
+// bindAgent 绑定承载机：库与内存一次写穿。
+//
+// 为什么必须同时写内存：advanceFlow 一次调用内按 Steps 顺序连跑，而 pick_agent 排在
+// collect_params 之前（remote.yaml）。若只写库不回填 r.agentID，collect_params 会读到
+// 本轮开头水合的旧值（flow.AgentID，为空则回落 flow.ResourceID），把采集目标绑到
+// 「资源」而不是「采集机」——目标因此不在承载机的期望配置里，被静默丢弃（配置成功但采不到）。
+func (r *flowRun) bindAgent(catDB *storepkg.DB, agentID string) {
+	r.agentID = agentID
+	_ = catDB.UpdateFlowAgent(r.flow.ID, agentID)
+}
+
 // pick_agent 确定承载采集能力的机器。
-//   边缘模式：承载机就是资源自身（本机采集）——维持原语义。
-//   远程/混合（R2）：承载机是"采集机"。已选定（flow.agent_id 确为采集机）→ 直接采用；
-//     否则从池内健康采集机中自动挑负载最低者（如实记录 source=auto_pick，可在④闸门改选）；
-//     池内无健康采集机 → 回落资源自身并给出诊断，不假装知道。
+//
+//	边缘模式：承载机就是资源自身（本机采集）——维持原语义。
+//	远程/混合（R2）：承载机是"采集机"。已选定（flow.agent_id 确为采集机）→ 直接采用；
+//	  否则从池内健康采集机中自动挑负载最低者（如实记录 source=auto_pick，可在④闸门改选）；
+//	  池内无健康采集机 → 回落资源自身并给出诊断，不假装知道。
 func (r *flowRun) atomPickAgent(catDB *storepkg.DB, agentStore *AgentStore) (string, string, string) {
 	if !isCollectorMode(r.flow.Mode) {
 		agentID := r.agentID
 		if agentID == "" {
 			agentID = r.flow.ResourceID
 		}
-		_ = catDB.UpdateFlowAgent(r.flow.ID, agentID)
+		r.bindAgent(catDB, agentID)
 
 		a := agentStore.Get(agentID)
 		summary := "承载机：" + agentID
@@ -579,7 +546,7 @@ func (r *flowRun) pickCollectorAgent(catDB *storepkg.DB, agentStore *AgentStore)
 	// 已选定（人工改选 / 创建时指定）：复核身份——仍是采集机才认，否则当未选定重挑
 	if a, load, healthy := collectorFactOf(catDB, r.agentID); a != nil && isCollectorAgent(a) {
 		pool := agentPool(a)
-		_ = catDB.UpdateFlowAgent(r.flow.ID, a.ID)
+		r.bindAgent(catDB, a.ID)
 		ds := []diag{}
 		if !healthy {
 			ds = append(ds, warnDiag("collector_stale",
@@ -597,7 +564,7 @@ func (r *flowRun) pickCollectorAgent(catDB *storepkg.DB, agentStore *AgentStore)
 	rec, pool, reason := autoPickCollector(catDB, tenant)
 	if rec == "" {
 		// 池内无健康采集机：如实回落资源自身，不假装知道——并说明这样做的代价
-		_ = catDB.UpdateFlowAgent(r.flow.ID, r.flow.ResourceID)
+		r.bindAgent(catDB, r.flow.ResourceID)
 		return stOK, "未登记可用采集机，暂按资源自身承载：" + r.flow.ResourceID,
 			detailJSON(map[string]any{
 				"agent_id": r.flow.ResourceID, "source": "fallback_self", "mode": r.flow.Mode,
@@ -609,7 +576,7 @@ func (r *flowRun) pickCollectorAgent(catDB *storepkg.DB, agentStore *AgentStore)
 	}
 	markRecommended(views, rec, reason)
 	_, load, healthy := collectorFactOf(catDB, rec)
-	_ = catDB.UpdateFlowAgent(r.flow.ID, rec)
+	r.bindAgent(catDB, rec)
 	return stOK, "承载采集机（自动挑机）：" + rec + "（池 " + poolOrDash(pool) + "，承载 " + strconv.Itoa(load) + " 个远端采集目标）",
 		detailJSON(map[string]any{
 			"agent_id": rec, "pool": pool, "load": load, "healthy": healthy,
@@ -700,6 +667,11 @@ func (r *flowRun) atomPickAbility() (string, string, string) {
 
 // collect_params 落参数并建采集目标
 func (r *flowRun) atomCollectParams(catDB *storepkg.DB) (string, string, string) {
+	// 承载机以库为准：pick_agent 可能在同一轮内改绑（bindAgent 已写穿，这里再兜一次底，
+	// 防止将来新增的原子能力改绑承载机后，本步又读到旧的内存值而把目标绑错机器）。
+	if f, err := catDB.GetFlow(r.flow.ID); err == nil && f != nil && strings.TrimSpace(f.AgentID) != "" {
+		r.agentID = f.AgentID
+	}
 	params := r.flow.Params()
 	need := []*Ability{}
 	for _, id := range r.flow.Abilities {
@@ -865,7 +837,7 @@ func (r *flowRun) atomCleanupPlatform(catDB *storepkg.DB, agentStore *AgentStore
 	done = append(done, map[string]any{"item": "agent_config", "deleted": cfgDeleted})
 
 	// ③ vmagent file_sd 抓取登记：不撤则 vmagent 会一直抓一台已经卸干净的机器
-	sdPath, sdErr := unregisterScrapeTarget(resID)
+	sdPath, sdErr := unregisterScrapeTarget(catDB, resID)
 	if sdErr != nil {
 		ds = append(ds, warnDiag("scrape_sd_remove_failed",
 			"删除 vmagent 抓取登记失败："+sdErr.Error(),
@@ -908,7 +880,7 @@ func (r *flowRun) atomCleanupPlatform(catDB *storepkg.DB, agentStore *AgentStore
 			"清空安装 tag 失败："+err.Error(), "资源页可能仍显示旧版本号；重新接入时会覆盖"))
 	}
 
-	// ⑤ 前置提醒：目标机侧若不是平台 ansible 实测成功（人工回报 / 强制通过），
+	// ⑤ 前置提醒：目标机侧若不是平台执行实测成功（人工回报 / 强制通过），
 	// 卸载没真发生时 Agent 会在下一个心跳周期重新注册，平台会冒出一台幽灵 Agent。
 	// 这是"清完台账却又自己长回来"的唯一原因，必须提前说清，别让人以为是平台乱写数据
 	if ev, _ := catDB.LatestEvent(r.flow.ID, "uninstall_agent"); ev != nil {
@@ -916,9 +888,12 @@ func (r *flowRun) atomCleanupPlatform(catDB *storepkg.DB, agentStore *AgentStore
 			Source string `json:"source"`
 		}
 		_ = json.Unmarshal([]byte(ev.Detail), &d)
-		if d.Source != "ansible_uninstall" {
+		// B5 起卸载恒经 L1 Runner：对账桥回报走 autoReportStep（source=auto_report），
+		// 与旧进程内路径（source=ansible_uninstall）同为"平台实测"，都算已验证
+		platformVerified := d.Source == "ansible_uninstall" || d.Source == "auto_report"
+		if !platformVerified {
 			ds = append(ds, warnDiag("uninstall_not_verified",
-				"目标机侧卸载不是由平台 ansible 实测确认的（人工回报或强制通过）",
+				"目标机侧卸载不是由平台实测确认的（人工回报或强制通过）",
 				"若目标机上 SAgent 进程仍在运行，它会在 ≤30s 内重新心跳注册，平台将再次出现该 Agent"))
 		}
 	}

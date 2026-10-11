@@ -5,7 +5,7 @@ package main
 // 红线（PLAN 风险 A 强制约束）：
 //   · 缓存只能承载 L0 校验过的只读镜像，禁止 L1 本地直接生成的产物
 //   · 每个包带 L0 下发的 sha256 签名（<tag>/SAgent.sha256 + 顶层 sha256.list 清单）
-//   · 安装（ansibleInstallJob）就近从缓存取包前强制校验；校验失败一律回源 L0 重建，
+//   · 安装（L1 Runner 执行端）就近从缓存取包前强制校验；校验失败一律回源 L0 重建，
 //     重建后仍不一致则拒绝安装——不允许降级用旧包
 //   · 缓存同步幂等：L0 增量 diff 下发，重复同步不产生重复任务；缓存可从 L0 完全重建（只读可废弃重下）
 //
@@ -293,7 +293,7 @@ func describeByManifest(m map[string]string) []PackageCacheEntry {
 	return out
 }
 
-// resolveInstallBinary 就近取包（供 ansibleInstallJob 取代直接读 L0 版本库）：
+// resolveInstallBinary 就近取包（供 L1 Runner 安装/升级取代直接读 L0 版本库）：
 //  1. 缓存命中且 sha 与 L0 权威一致 → 返回缓存路径（就近取包）；
 //  2. 缓存缺失/失效 → 回源 L0 重建缓存，重建后再校验一次；
 //  3. 仍不一致（或 L0 无源）→ 返回错误，拒绝安装，不降级用旧包。

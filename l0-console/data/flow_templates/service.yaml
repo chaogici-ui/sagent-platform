@@ -32,16 +32,6 @@ steps:
     scope: external
     requires: [pick_object]
     hint: 只读探测：SAgent 进程、run.sh 守护形态、暂停标记、control.sock 插件运行状态。**本环节不改动目标机任何东西**；插件级操作会在此核对目标插件真实存在
-    instruction: |
-      ssh -p {{.port}} <user>@{{.ip}} '
-        AG=~/SAgent
-        pid="-"; [ -f "$AG/run/SAgent.pid" ] && { p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; }
-        guard="no"; for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
-          case "$(tr "\0" " " < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac; done
-        stopped="no"; [ -f "$AG/run/stopped" ] && stopped="yes"
-        ctl="-"; [ -S "$AG/run/control.sock" ] && [ "$pid" != "-" ] && ctl=$(cd "$AG" && timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1)
-        echo "SVC_PRE pid=$pid guard=$guard stopped=$stopped ctl=$ctl"
-        echo "SVC_PRE_END"'
 
   - id: confirm_service
     atom: confirm_service

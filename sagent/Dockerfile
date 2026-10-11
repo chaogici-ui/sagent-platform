@@ -25,6 +25,15 @@ FROM alpine:3.19
 RUN adduser -D -h /home/deploy deploy && \
     mkdir -p /home/deploy/SAgent && \
     chown -R deploy:deploy /home/deploy
+# demo 前置：采集机承载机（proxy）需 sshd——preflight_host 探路与安装走同一条 SSH 路径
+# （SPEC-B4b P5/G1，SSH 落点=承载机 deploy@:22）；python3 供 ansible 事实采集；
+# su-exec 供 run.sh 以 root 拉起 sshd 后降权回 deploy。
+# 口令 deploy/deploy123 与 L0 台账登记的采集机 SSH 凭据对齐。
+RUN apk add --no-cache openssh-server python3 su-exec && \
+    ssh-keygen -A && \
+    mkdir -p /run/sshd && \
+    echo "deploy:deploy123" | chpasswd && \
+    printf 'PasswordAuthentication yes\nPermitRootLogin no\n' >> /etc/ssh/sshd_config
 USER deploy
 WORKDIR /home/deploy/SAgent
 RUN mkdir -p bin plugins/vector/bin plugins/mysql_exporter plugins/custom_scripts conf/plugins/vector data/wal data/checkpoints logs run

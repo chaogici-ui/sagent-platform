@@ -41,6 +41,10 @@ var gatewayControlPaths = map[string]bool{
 	"/api/l1/task/ack":               true, // SAgent 消费心跳下发任务后的回执（control/client.go handleTask）
 }
 
+// gatewayControlPrefixes 前缀白名单：插件超市包仓（R0-1 配套）——SAgent package-cache get
+// （manifest/download，GET）经 Gateway→Controller 出口取包，与控制通道同收敛口径。
+var gatewayControlPrefixes = []string{"/api/plugin-packages/"}
+
 // controllerControlPaths Controller 作为控制面唯一出口可中继的白名单：
 // SAgent 通道（经 Gateway 汇聚而来）+ L1 内部任务通道（Controller/AnsibleRunner 的拉取与回执）。
 var controllerControlPaths = func() map[string]bool {
@@ -51,6 +55,24 @@ var controllerControlPaths = func() map[string]bool {
 	m["/api/l1/task/pull"] = true // L1 Controller/AnsibleRunner 拉任务（架构 D5 IN3）：只走 Controller
 	return m
 }()
+
+// controlPathAllowed 控制通道放行判定：精确白名单 OR 前缀白名单
+func controlPathAllowed(paths map[string]bool, prefixes []string, path string) bool {
+	if paths[path] {
+		return true
+	}
+	return isPrefixPath(prefixes, path)
+}
+
+// isPrefixPath 前缀白名单命中判定
+func isPrefixPath(prefixes []string, path string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
 
 var gatewayHTTPClient = &http.Client{Timeout: 8 * time.Second}
 
@@ -80,11 +102,12 @@ func controllerRelayHandler(w http.ResponseWriter, r *http.Request) {
 // role 仅用于日志前缀，便于在两个进程上分辨是哪一跳。
 func relayControlUpstream(w http.ResponseWriter, r *http.Request, role string, paths map[string]bool, upstreamBase string) {
 	path := r.URL.Path
-	if !paths[path] {
+	if !controlPathAllowed(paths, gatewayControlPrefixes, path) {
 		http.Error(w, "only L1 control channel paths are relayed", http.StatusForbidden)
 		return
 	}
-	if r.Method != http.MethodPost {
+	// POST = 控制通道语义（带 JSON body）；GET 仅限包仓前缀路径（manifest/download，无 body）。
+	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && isPrefixPath(gatewayControlPrefixes, path)) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -100,7 +123,7 @@ func relayControlUpstream(w http.ResponseWriter, r *http.Request, role string, p
 	}
 
 	upstream := strings.TrimSuffix(upstreamBase, "/") + path
-	req, err := http.NewRequest(http.MethodPost, upstream, bytes.NewReader(body))
+	req, err := http.NewRequest(r.Method, upstream, bytes.NewReader(body))
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": role + " build upstream request: " + err.Error()})
 		return

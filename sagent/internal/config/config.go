@@ -65,6 +65,7 @@ type PluginsConfig struct {
 	HostMetrics      HostMetricsConfig   `yaml:"host_metrics"`
 	LogMetrics       LogMetricsConfig    `yaml:"log_metrics"` // 日志转指标（原 log_collector，按产出物正名）
 	MySQLProbe       MySQLProbeConfig    `yaml:"mysql_probe"`
+	RedisProbe       RedisProbeConfig    `yaml:"redis_probe"`
 	CustomScripts    CustomScriptsConfig `yaml:"custom_scripts"`
 	PortChecker      PortCheckerCfg      `yaml:"port_checker"`
 	PrometheusScrape PrometheusScrapeCfg `yaml:"prometheus_scrape"`
@@ -97,7 +98,36 @@ type MySQLProbeConfig struct {
 type MySQLTarget struct {
 	DSN        string `yaml:"dsn"`         // user:pass@tcp(host:port)/
 	ResourceID string `yaml:"resource_id"` // 远程资源 ID
+	// DesiredState 平台期望态（R0-2 standby 预置）：active（默认）= 正常采集；
+	// standby = 配置与版本包就位、连通性已验证，但采集任务不启动（预热接管的预置副本）。
+	// 单归属边界不变：standby 预置的是配置副本，不是进程副本。
+	DesiredState string `yaml:"desired_state"`
 }
+
+// IsStandby 目标是否为 standby 预置态（空值按 active，向后兼容老配置）
+func (t MySQLTarget) IsStandby() bool { return t.DesiredState == "standby" }
+
+// RedisProbeConfig Redis 采集配置
+type RedisProbeConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	ExporterBin string        `yaml:"exporter_bin"` // redis_exporter 二进制路径
+	Targets     []RedisTarget `yaml:"targets"`
+}
+
+// RedisTarget 单个 Redis 目标
+type RedisTarget struct {
+	Address    string `yaml:"address"`  // 被采 Redis 主机（从采集机可达）
+	Port       string `yaml:"port"`     // 端口，默认 6379
+	Password   string `yaml:"password"` // 访问口令，未开启认证留空
+	Mode       string `yaml:"mode"`     // single / cluster（透传给 exporter 的形态提示）
+	Interval   string `yaml:"interval"` // 采集频率（信息字段，实际抓取节奏由 SAgent 侧统一控制）
+	ResourceID string `yaml:"resource_id"`
+	// DesiredState 平台期望态（R0-2 standby 预置）：语义同 MySQLTarget。
+	DesiredState string `yaml:"desired_state"`
+}
+
+// IsStandby 目标是否为 standby 预置态（空值按 active）
+func (t RedisTarget) IsStandby() bool { return t.DesiredState == "standby" }
 
 // CustomScriptsConfig 自定义脚本采集配置
 type CustomScriptsConfig struct {
@@ -204,6 +234,9 @@ func (c *Config) EnabledPluginNames() []string {
 	}
 	if p.MySQLProbe.Enabled {
 		names = append(names, constants.PluginNameMySQLProbe)
+	}
+	if p.RedisProbe.Enabled {
+		names = append(names, constants.PluginNameRedisProbe)
 	}
 	if p.CustomScripts.Enabled {
 		names = append(names, constants.PluginNameCustomScripts)

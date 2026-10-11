@@ -57,11 +57,23 @@ func TestHostRuntimeInvalidSettingsDoNotChangeCurrentCollector(t *testing.T) {
 	}
 }
 
-func TestPlatformConfigurationRejectsUnimplementedTargets(t *testing.T) {
+// R0-1 新语义：不支持插件的托管目标跳过不失败（前向兼容，能力协商 R0-3 另行立项），
+// 其余段（host_metrics）照常应用。
+func TestPlatformConfigurationSkipsUnsupportedTargets(t *testing.T) {
 	app := &App{hostRuntime: newHostRuntime(pipeline.New(resource.Labels{}), config.HostMetricsConfig{Interval: 30 * time.Second})}
 	_, err := app.applyPlatformConfig(context.Background(), json.RawMessage(`{"host_metrics":{"enabled":false,"interval":"30s"},"targets":[{"plugin":"unsupported"}]}`))
+	if err != nil {
+		t.Fatalf("unsupported plugin targets must be skipped, not rejected: %v", err)
+	}
+}
+
+// R0-1：mysql_probe 托管目标缺 dsn/resource_id → 拒绝整份配置（不带半态）。
+// App 未接 mysqlRuntime（单测环境）时该段被跳过，因此用缺字段校验走解析失败路径。
+func TestPlatformConfigurationRejectsInvalidMysqlTargets(t *testing.T) {
+	app := &App{hostRuntime: newHostRuntime(pipeline.New(resource.Labels{}), config.HostMetricsConfig{Interval: 30 * time.Second}), log: nil}
+	_, err := app.applyPlatformConfig(context.Background(), json.RawMessage(`{"host_metrics":{"enabled":false,"interval":"30s"},"targets":[{"plugin":"mysql_probe","name":"db-1"}]}`))
 	if err == nil {
-		t.Fatal("configuration with unimplemented target application was falsely accepted")
+		t.Fatal("mysql_probe target without dsn/resource_id must be rejected")
 	}
 }
 
@@ -73,5 +85,24 @@ func TestPlatformConfigurationAppliesHostSettings(t *testing.T) {
 	}
 	if app.hostRuntime.current.Interval != 15*time.Second || app.hostRuntime.current.Groups["disk"] {
 		t.Fatal("platform configuration was not applied to the runtime controller")
+	}
+}
+
+// R0-2：desired_state 非法值拒绝整份配置（只认 active/standby，防手滑字段静默变形）
+func TestPlatformConfigurationRejectsInvalidDesiredState(t *testing.T) {
+	app := &App{hostRuntime: newHostRuntime(pipeline.New(resource.Labels{}), config.HostMetricsConfig{Interval: 30 * time.Second}), log: nil}
+	_, err := app.applyPlatformConfig(context.Background(), json.RawMessage(
+		`{"host_metrics":{"enabled":false,"interval":"30s"},"targets":[{"plugin":"mysql_probe","name":"db-1","address":"u:p@tcp(h:3306)/","resource_id":"r1","desired_state":"paused"}]}`))
+	if err == nil {
+		t.Fatal("invalid desired_state must be rejected")
+	}
+}
+
+// R0-2：desired_state=standby 条目解析通过（App 未接 mysqlRuntime 时该段跳过，不失败）
+func TestPlatformConfigurationAcceptsStandbyTargetSchema(t *testing.T) {
+	app := &App{hostRuntime: newHostRuntime(pipeline.New(resource.Labels{}), config.HostMetricsConfig{Interval: 30 * time.Second}), log: nil}
+	if _, err := app.applyPlatformConfig(context.Background(), json.RawMessage(
+		`{"host_metrics":{"enabled":false,"interval":"30s"},"targets":[{"plugin":"mysql_probe","name":"db-1","address":"u:p@tcp(h:3306)/","resource_id":"r1","desired_state":"standby"}]}`)); err != nil {
+		t.Fatalf("standby target schema must parse: %v", err)
 	}
 }

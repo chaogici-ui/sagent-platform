@@ -15,7 +15,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +44,17 @@ var liveTunnels sync.Map
 // sshpass -p PASS ssh -N -R <目标机端口>:127.0.0.1:<平台端口> user@host -p port
 // -N 只转发不执行命令；ExitOnForwardFailure 让端口被占时进程立刻退出（keeper 重试可感知）
 func reverseTunnelCmd(cred *sshCred) *exec.Cmd {
-	remote := fmt.Sprintf("%d:127.0.0.1:%d", tunnelRemotePort(), platformPort())
+	return reverseTunnelCmdTo(cred, "127.0.0.1", platformPort())
+}
+
+// reverseTunnelCmdTo 参数化转发目标（B4b-3 隧道下沉）。
+//
+// ssh -R 的 `<目标机端口>:<host>:<port>` 里，host:port 由 **SSH 客户端侧**解析并连接——
+// 客户端是 L0 console 时即 127.0.0.1:8080；客户端换成 L1 Runner（采集机）后，
+// 127.0.0.1 指向采集机自身（8080 无人监听），必须显式指向 L0 console 的可达地址。
+// L0↔L1 直连允许（SPEC-B4b P3），故采集机侧用 l0ConsoleForward() 解析出的地址即可。
+func reverseTunnelCmdTo(cred *sshCred, fwdHost string, fwdPort int) *exec.Cmd {
+	remote := fmt.Sprintf("%d:%s:%d", tunnelRemotePort(), fwdHost, fwdPort)
 	return exec.Command("sshpass", "-p", cred.Pass, "ssh",
 		"-N",
 		"-R", remote,
@@ -53,6 +65,23 @@ func reverseTunnelCmd(cred *sshCred) *exec.Cmd {
 		"-o", "ServerAliveCountMax=3",
 		"-o", "ExitOnForwardFailure=yes",
 		fmt.Sprintf("%s@%s", cred.User, cred.Host))
+}
+
+// l0ConsoleForward 反向隧道在 L1 Runner（采集机）侧的转发目标：从 L0_CONSOLE_URL 解析 host:port。
+// Runner 是 ssh 客户端，-R 的 host:port 由客户端侧连接，故必须指向 L0 console——
+// 沿用 127.0.0.1 会把流量转到采集机自身。解析失败回落到默认容器名 l0-console:8080。
+func l0ConsoleForward() (string, int) {
+	u, err := url.Parse(strings.TrimSpace(envOr("L0_CONSOLE_URL", "http://l0-console:8080")))
+	if err != nil || u.Hostname() == "" {
+		return "l0-console", 8080
+	}
+	port := 8080
+	if p := u.Port(); p != "" {
+		if n, e := strconv.Atoi(p); e == nil && n > 0 {
+			port = n
+		}
+	}
+	return u.Hostname(), port
 }
 
 // isTunnelAccessPoint 接入点是否形如 http://127.0.0.1:<port>（隧道语义）。
@@ -90,17 +119,23 @@ func watchTunnelExit(resourceID string, cmd *exec.Cmd) {
 
 // startReverseTunnel 拉起一条反向隧道（不阻塞）。返回是否新拉起
 func startReverseTunnel(resourceID string, cred *sshCred) (bool, error) {
+	return startReverseTunnelTo(resourceID, cred, "127.0.0.1", platformPort())
+}
+
+// startReverseTunnelTo 指定转发目标拉起反向隧道（B4b-3：L1 Runner 侧转发到 L0 console）。
+// key 用调用方给的标识（L0 keeper 用资源 ID；Runner 侧无资源行用 SSH 主机名）。
+func startReverseTunnelTo(resourceID string, cred *sshCred, fwdHost string, fwdPort int) (bool, error) {
 	if tunnelAlive(resourceID) {
 		return false, nil
 	}
-	cmd := reverseTunnelCmd(cred)
+	cmd := reverseTunnelCmdTo(cred, fwdHost, fwdPort)
 	if err := cmd.Start(); err != nil {
 		return false, err
 	}
 	liveTunnels.Store(resourceID, cmd)
 	go watchTunnelExit(resourceID, cmd)
-	log.Printf("[tunnel] 反向隧道已建立 %s@%s（目标机 127.0.0.1:%d → 平台 %d）",
-		cred.User, cred.Host, tunnelRemotePort(), platformPort())
+	log.Printf("[tunnel] 反向隧道已建立 %s@%s（目标机 127.0.0.1:%d → %s:%d）",
+		cred.User, cred.Host, tunnelRemotePort(), fwdHost, fwdPort)
 	return true, nil
 }
 

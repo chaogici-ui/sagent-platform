@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	storepkg "github.com/sagent/l0-console/store"
@@ -143,3 +146,59 @@ func TestExpandGarbageContent(t *testing.T) {
 		t.Fatalf("garbage content: want 0/empty, got n=%d known=%v", n, known)
 	}
 }
+
+// vmQueryTargetData 对账口径（2026-09-27 断采误报修复）：
+// ResourceID 非空 → resource_id/remote_resource_id/exported_resource_id 三标签 OR + instance 兜底；
+// ResourceID 空 → 仅 instance 匹配（老目标行为不变）。
+func TestVMQueryTargetDataSelectors(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		writeJSON(w, map[string]interface{}{
+			"status": "success",
+			"data":   map[string]interface{}{"result": []interface{}{map[string]interface{}{}}},
+		})
+	}))
+	defer srv.Close()
+	t.Setenv("VM_URL", srv.URL)
+
+	// ① 有 ResourceID：三口径 + instance 兜底全部出现在查询里
+	if !vmQueryTargetData("mysql_up", "mysql-1:3306", "order.prod.mysql.db-01") {
+		t.Fatal("hit by resource identity should return true")
+	}
+	for _, want := range []string{
+		`mysql_up{resource_id="order.prod.mysql.db-01"}`,
+		`mysql_up{remote_resource_id="order.prod.mysql.db-01"}`,
+		`mysql_up{exported_resource_id="order.prod.mysql.db-01"}`,
+		`mysql_up{instance=~".*mysql-1.*"}`,
+	} {
+		if !strings.Contains(gotQuery, want) {
+			t.Fatalf("query missing %s:\n%s", want, gotQuery)
+		}
+	}
+	if !strings.Contains(gotQuery, " or ") {
+		t.Fatalf("selectors must be OR-joined:\n%s", gotQuery)
+	}
+
+	// ② 无 ResourceID：仅 instance 匹配（兼容老目标）
+	if !vmQueryTargetData("mysql_up", "10.20.0.9:3306", "") {
+		t.Fatal("instance-only fallback should return true when VM reports")
+	}
+	if strings.Contains(gotQuery, "resource_id") {
+		t.Fatalf("empty resourceID must not add identity selectors:\n%s", gotQuery)
+	}
+	if !strings.Contains(gotQuery, `instance=~".*10\.20\.0\.9.*"`) {
+		t.Fatalf("host dots must be regex-escaped:\n%s", gotQuery)
+	}
+
+	// ③ VM 无结果 → false（断采判定口径）
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]interface{}{"status": "success", "data": map[string]interface{}{"result": []interface{}{}}})
+	}))
+	defer srv2.Close()
+	t.Setenv("VM_URL", srv2.URL)
+	if vmQueryTargetData("mysql_up", "mysql-1:3306", "order.prod.mysql.db-01") {
+		t.Fatal("empty VM result must mean not-reporting")
+	}
+}
+

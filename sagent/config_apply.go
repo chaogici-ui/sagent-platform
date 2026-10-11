@@ -28,6 +28,34 @@ type hostRuntime struct {
 	done      chan struct{}
 }
 
+// targetEntry 平台 targets 条目（syncAgentConfig 下发口径）
+type targetEntry struct {
+	ID           int64  `json:"id"`
+	Plugin       string `json:"plugin"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	Target       string `json:"target"`
+	Address      string `json:"address"`
+	ResourceID   string `json:"resource_id"`
+	ParamsJSON   string `json:"params_json"`
+	DesiredState string `json:"desired_state"` // R0-2：active（默认）/ standby（预置不启动）
+}
+
+// targetName 平台 targets 条目的显示名（target 优先，name 兼容）
+func targetName(t targetEntry) string {
+	if t.Target != "" {
+		return t.Target
+	}
+	return t.Name
+}
+
+// logWarn nil 安全告警：单测构造的 App 可能没有 logger
+func (app *App) logWarn(format string, args ...any) {
+	if app.log != nil {
+		app.log.Warn(format, args...)
+	}
+}
+
 func newHostRuntime(pl *pipeline.Pipeline, initial config.HostMetricsConfig) *hostRuntime {
 	return &hostRuntime{pipeline: pl, current: cloneHostConfig(initial)}
 }
@@ -174,7 +202,7 @@ func (h *hostRuntime) stopLocked() {
 
 func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage) (func() error, error) {
 	var doc struct {
-		Targets     []json.RawMessage `json:"targets"`
+		Targets     []targetEntry `json:"targets"`
 		HostMetrics *struct {
 			Enabled        *bool           `json:"enabled"`
 			Interval       string          `json:"interval"`
@@ -187,9 +215,6 @@ func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, errors.New("invalid platform configuration schema")
 	}
-	if len(doc.Targets) != 0 {
-		return nil, errors.New("managed target application is not supported yet; existing collectors were not changed")
-	}
 	if doc.HostMetrics == nil || doc.HostMetrics.Enabled == nil {
 		return nil, errors.New("host_metrics.enabled is required")
 	}
@@ -197,8 +222,114 @@ func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage
 	if err != nil {
 		return nil, errors.New("host_metrics.interval must be a duration")
 	}
-	return app.hostRuntime.Apply(ctx, config.HostMetricsConfig{
+
+	// ---- R0-1/R0-2：平台托管采集目标（targets 段）----
+	// 平台 targets 段是采集任务期望态（syncAgentConfig 随归属变更实时刷新）。
+	// 本版运行时接 mysql_probe 与 redis_probe；其余插件类型跳过并告警（不失败，保持前向兼容）。
+	// 单归属边界：属主唯一性由 L0 保证，Agent 忠实 reconcile。
+	// R0-2 standby 预置：desired_state=standby 的条目做校验 + 版本包就位 + 连通性验证，
+	// 但不启动采集任务（预热接管的配置副本；单归属不变，standby 不是进程副本）。
+	var mysqlTargets []config.MySQLTarget
+	var redisTargets []config.RedisTarget
+	for _, t := range doc.Targets {
+		state := t.DesiredState
+		if state == "" {
+			state = "active" // 老配置无该字段按 active，向后兼容
+		}
+		switch t.Plugin {
+		case constants.PluginNameMySQLProbe:
+			dsn := ""
+			if t.ParamsJSON != "" {
+				var pj struct {
+					DSN string `json:"dsn"`
+				}
+				if json.Unmarshal([]byte(t.ParamsJSON), &pj) == nil {
+					dsn = pj.DSN
+				}
+			}
+			if dsn == "" {
+				dsn = t.Address // 兼容：直接把 DSN 填在 address 的登记方式
+			}
+			if dsn == "" || t.ResourceID == "" {
+				return nil, fmt.Errorf("managed mysql_probe target %q: dsn 与 resource_id 均必填", targetName(t))
+			}
+			if state != "active" && state != "standby" {
+				return nil, fmt.Errorf("managed mysql_probe target %q: 非法 desired_state %q（仅 active/standby）", targetName(t), state)
+			}
+			mysqlTargets = append(mysqlTargets, config.MySQLTarget{DSN: dsn, ResourceID: t.ResourceID, DesiredState: state})
+		case constants.PluginNameRedisProbe:
+			var pj struct {
+				Address  string `json:"address"`
+				Port     string `json:"port"`
+				Password string `json:"password"`
+				Mode     string `json:"mode"`
+				Interval string `json:"interval"`
+			}
+			if t.ParamsJSON != "" {
+				_ = json.Unmarshal([]byte(t.ParamsJSON), &pj)
+			}
+			addr := pj.Address
+			if addr == "" {
+				addr = t.Address
+			}
+			port := pj.Port
+			if port == "" {
+				port = "6379"
+			}
+			if addr == "" || t.ResourceID == "" {
+				return nil, fmt.Errorf("managed redis_probe target %q: address 与 resource_id 均必填", targetName(t))
+			}
+			if state != "active" && state != "standby" {
+				return nil, fmt.Errorf("managed redis_probe target %q: 非法 desired_state %q（仅 active/standby）", targetName(t), state)
+			}
+			redisTargets = append(redisTargets, config.RedisTarget{
+				Address: addr, Port: port, Password: pj.Password, Mode: pj.Mode, Interval: pj.Interval,
+				ResourceID: t.ResourceID, DesiredState: state,
+			})
+		default:
+			if t.Plugin != "" {
+				app.logWarn("托管目标 %q 的插件类型 %q 本版不支持，已跳过（不影响其他目标）", targetName(t), t.Plugin)
+			}
+		}
+	}
+
+	// host_metrics 段（原语义不动）→ mysql_probe 托管段；任一失败按逆序回滚已应用段
+	var rollbacks []func() error
+	hmRollback, err := app.hostRuntime.Apply(ctx, config.HostMetricsConfig{
 		Enabled: *doc.HostMetrics.Enabled, Interval: interval,
 		Groups: doc.HostMetrics.Groups, ExcludeMetrics: doc.HostMetrics.ExcludeMetrics,
 	})
+	if err != nil {
+		return nil, err
+	}
+	rollbacks = append(rollbacks, hmRollback)
+	if app.mysqlRuntime != nil {
+		mpRollback, err := app.mysqlRuntime.Apply(ctx, mysqlTargets)
+		if err != nil {
+			for i := len(rollbacks) - 1; i >= 0; i-- {
+				_ = rollbacks[i]()
+			}
+			return nil, err
+		}
+		rollbacks = append(rollbacks, mpRollback)
+	}
+	if app.redisRuntime != nil {
+		rpRollback, err := app.redisRuntime.Apply(ctx, redisTargets)
+		if err != nil {
+			for i := len(rollbacks) - 1; i >= 0; i-- {
+				_ = rollbacks[i]()
+			}
+			return nil, err
+		}
+		rollbacks = append(rollbacks, rpRollback)
+	}
+	return func() error {
+		var join []error
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			if err := rollbacks[i](); err != nil {
+				join = append(join, err)
+			}
+		}
+		return errors.Join(join...)
+	}, nil
 }

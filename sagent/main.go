@@ -35,6 +35,8 @@ type App struct {
 	subPlugins  []*subprocess.Plugin
 	metricsCh   chan builtin.MetricBatch
 	hostRuntime *hostRuntime
+	mysqlRuntime *mysqlProbeRuntime // R0-1：mysql_probe 托管目标运行时（平台 targets 热更）
+	redisRuntime *redisProbeRuntime // redis_probe 托管目标运行时（第三方 redis_exporter 编排）
 	ctl         *control.Client // OBS-1：控制通道，其通信指标经 server./metrics 暴露
 }
 
@@ -135,6 +137,10 @@ func main() {
 		ctl := control.NewClient(l0URLs, app.cfg.Resource.ID,
 			constants.Version, labels, metricsURL, desc, log)
 		ctl.SetConfigApplier(applier.Apply)
+		// D4：自身 /metrics 鉴权 key——countOwnSeries 清点序列时需与 vmagent 同凭据访问
+		ctl.SetMetricsAuthKey(app.cfg.Server.MetricsAuthKey)
+		// R0-2：observed_state 随心跳回报（托管目标进程态 / standby 预置就绪度）
+		ctl.SetObservedStateProvider(app.observedTargetsSnapshot)
 		app.ctl = ctl
 		go ctl.Run(context.Background())
 	}
@@ -146,6 +152,25 @@ func main() {
 	app.waitForMetrics()
 	app.initServer()
 	app.run()
+}
+
+// observedTargetsSnapshot 心跳 stats.observed_targets 数据源（nil 安全：单测构造的 App 无 runtime）
+func (app *App) observedTargetsSnapshot() map[string]map[string]any {
+	out := map[string]map[string]any{}
+	if app.mysqlRuntime != nil {
+		for k, v := range app.mysqlRuntime.ObservedTargets() {
+			out[k] = v
+		}
+	}
+	if app.redisRuntime != nil {
+		for k, v := range app.redisRuntime.ObservedTargets() {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // loopbackURL 把 listen 地址转成本机可达的 URL：0.0.0.0 / [::] / 空前缀一律换成 127.0.0.1。
@@ -212,17 +237,27 @@ func (app *App) initPlugins() {
 	}
 
 	// ---- subprocess: mysql_probe ----
+	// R0-1：统一走托管目标运行时——静态 yaml 只作引导，平台 targets 下发后以平台为期望源
+	// （热更 reconcile：新属主起 exporter/加目标，旧属主减目标、任务清零回收进程）。
+	app.mysqlRuntime = newMySQLProbeRuntime(cfg, app.metricsCh, app.pipeline, app.log)
+	app.pluginMgr.Register(app.mysqlRuntime)
 	if cfg.Plugins.MySQLProbe.Enabled {
-		bin := cfg.Plugins.MySQLProbe.ExporterBin
-		if bin == "" {
-			bin = constants.DefaultMysqlExportBin
-		}
-		probe := builtin.NewMySQLProbe(cfg.Plugins.MySQLProbe)
-		if err := probe.StartWith(bin, app.metricsCh); err != nil {
+		if err := app.mysqlRuntime.StartStatic(); err != nil {
 			app.log.Warn("Failed to start %s: %v", constants.PluginNameMySQLProbe, err)
 		} else {
-			app.pluginMgr.Register(probe)
-			app.log.Info("Plugin %s started (%d targets)", constants.PluginNameMySQLProbe, len(cfg.Plugins.MySQLProbe.Targets))
+			app.log.Info("Plugin %s started (%d targets, static bootstrap)", constants.PluginNameMySQLProbe, len(cfg.Plugins.MySQLProbe.Targets))
+		}
+	}
+
+	// ---- subprocess: redis_probe ----
+	// 与 mysql_probe 同构：第三方 redis_exporter 负责采集，SAgent 只做托管目标编排。
+	app.redisRuntime = newRedisProbeRuntime(cfg, app.metricsCh, app.pipeline, app.log)
+	app.pluginMgr.Register(app.redisRuntime)
+	if cfg.Plugins.RedisProbe.Enabled {
+		if err := app.redisRuntime.StartStatic(); err != nil {
+			app.log.Warn("Failed to start %s: %v", constants.PluginNameRedisProbe, err)
+		} else {
+			app.log.Info("Plugin %s started (%d targets, static bootstrap)", constants.PluginNameRedisProbe, len(cfg.Plugins.RedisProbe.Targets))
 		}
 	}
 

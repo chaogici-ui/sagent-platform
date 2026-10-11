@@ -55,8 +55,8 @@ function renderHealthOverview() {
       + '<span>对账引擎' + (d.recon && d.recon.generated_at ? ' · ' + ovEsc(d.recon.generated_at) : ' · 时间未回传') + '</span>'
       + '<span>' + ovEsc(ovCover) + '</span></div></div>';
 
-    // 证据链概要（共享实现见 buildEvidenceChainHTML，与采集健康页同源，口径唯一）
-    h += buildEvidenceChainHTML(d);
+    // 证据链概要（compact：全绿一行带过，明细只在采集健康页——避免两页顶部整块重复）
+    h += buildEvidenceChainHTML(d, true);
 
     // 平台健康条（消费 /api/health，架构 3.3 可运维·可观测）：L0 控制面/目录/Agent心跳/VM链/对账 的整体健康，
     // 与证据链（数据面"是否在报"）互补——这一条追"平台自身好不好"，逐组件可悬停看细节。
@@ -165,6 +165,8 @@ function renderPlatformHealth() {
 
 // 证据链概要条（IA 设计稿·采集健康页语义核心：六环证据链，每环独立状态）。
 // 共享实现：工作台(overview)与采集健康(slo)同源复用，口径唯一（裁决 3）。
+// compact=true（工作台）：全绿只渲染一行结论（全链明细只在采集健康页，避免两页顶部重复），
+// 有缺口渲染一行红/琥珀摘要 + 跳采集健康归因；compact 省略/false（采集健康）：完整六环可逐环下钻。
 // 数据全部来自真实后端，缺失即标「未知」，绝不硬编码填绿（unknown ≠ failed）。
 //   E1 对象连接  ← Agent 心跳在线占比（last_seen 距当前 ≤ HEARTBEAT_TTL）
 //   E2 配置版本  ← Agent 生效配置与期望配置一致（cfg_effective == cfg_desired）
@@ -173,13 +175,13 @@ function renderPlatformHealth() {
 //   E5 区域传输  ← VM 可达（recon vm_reachable，链路 upstream 通不通）
 //   E6 中央入库  ← 抓取有采样 且 传输通（数据确已落库）
 // 逐环归因：缺口环可点击下钻——Agent 侧→资源页"问题"筛选；数据侧→采集健康对账。
-globalThis.buildEvidenceChainHTML = function (d) {
+globalThis.buildEvidenceChainHTML = function (d, compact) {
   var esc = (typeof ovEsc === 'function') ? ovEsc : function (s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   };
   var agentsArr = (d.agents || []).filter(function (a) { return window.tenantVisible(a); }); // D3：证据链按当前租户隔离
   var now = Math.floor(Date.now() / 1000);
-  var HEARTBEAT_TTL = 120; // 心跳新鲜度阈值(秒)：last_seen 距今超过该值视为 Agent 离线
+  var HEARTBEAT_TTL = (typeof HEARTBEAT_TTL_SEC === 'number') ? HEARTBEAT_TTL_SEC : 90; // 心跳判离线阈值(秒)：唯一口径见 utils.js（与后端 status/recon 判离线一致）
   var RECON_TTL = 240;     // 对账证据有效期(秒)：超过视为对账停摆，证据降级为未知
   var STATS_TTL = 300;     // 采样证据有效期(秒)：与采集健康"近 5 分钟有样本"口径一致
   // 证据时间解析：支持 epoch 秒与 'YYYY-MM-DD HH:MM:SS'（本地时区）两种来源
@@ -247,6 +249,22 @@ globalThis.buildEvidenceChainHTML = function (d) {
     { k: 'central', label: '⑥ 中央入库', ok: d6, detail: d6 ? '稳定采集中' : (e5Ok ? '入库证据已过期' : '待确认采样'), at: Math.max(atStats, 0), until: Math.min(u4 || 0, u5 || 0) }
   ];
   var h = '<div class="ev-chain">';
+  // compact 模式（工作台专用）：全绿一行带过，有缺口一行摘要跳采集健康——
+  // 全链逐环归因只在采集健康页（d1 变量在工作台语境恒为 undefined，不参与判定）
+  if (compact) {
+    var badRings = chain.filter(function (c) { return c.ok === false; });
+    if (!badRings.length) {
+      return '<div class="ev-node ev-ok" style="cursor:pointer" onclick="goPage(\'slo\')"'
+        + ' title="六环证据全部有效（对象连接/配置版本/源采集/抓取/传输/入库）——明细与逐环证据见采集健康页">'
+        + '<span class="ev-ic">✓</span><span class="ev-lb">六环证据链全绿</span>'
+        + '<span class="ev-dt">已应用且已入库，无断采</span><span class="ev-ts">明细 → 采集健康</span></div>';
+    }
+    var gapNames = badRings.map(function (c) { return c.label; }).join(' · ');
+    return '<div class="ev-node ev-bad" style="cursor:pointer" onclick="goPage(\'slo\')"'
+      + ' title="证据链有缺口，点击去采集健康页逐环归因">'
+      + '<span class="ev-ic">✕</span><span class="ev-lb">证据链有缺口</span>'
+      + '<span class="ev-dt">' + esc(gapNames) + '</span><span class="ev-ts">去采集健康逐环归因 →</span></div>';
+  }
   chain.forEach(function (c) {
     var st = c.ok === true ? 'ev-ok' : (c.ok === false ? 'ev-bad' : 'ev-unknown');
     var ic = c.ok === true ? '✓' : (c.ok === false ? '✕' : '·');

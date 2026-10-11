@@ -2,26 +2,21 @@ package main
 
 // ===================================================================
 //  升级 / 启停 SAgent（2026-09-22 用户需求：把升级、启停流程跑通）
-//  与卸载同构：internal 模板 + 行内按钮拉起 + 决策卡停等 + ansible 作业 + 证据留痕。
+//  与卸载同构：internal 模板 + 行内按钮拉起 + 决策卡停等 + L1 投递收口 + 证据留痕。
 //  复用件：pick_version 选版范式、run.sh 守护启停协议（run/stopped 文件）、
-//  control.sock status/stop/start、offboard 通用作业骨架（语法门禁→流式执行→判据收口）。
+//  control.sock status/stop/start、卸载侧判据收口范式（语法门禁→流式执行→判据收口）。
 //  用户拍板：允许降级（留痕）；启停粒度=进程级+插件级；停止后资源标维护态；
 //  升级前备份旧二进制（SAgent.bak-<旧版本>）
 // ===================================================================
 
 import (
-	"context"
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	storepkg "github.com/sagent/l0-console/store"
 )
@@ -230,7 +225,7 @@ func svcParamsOf(flow *storepkg.Flow) svcParams {
 }
 
 // ===================================================================
-//  执行规格与通用作业（骨架与 ansibleOffboardJob 同构）
+//  执行规格与判据（投递端与对账端共用）
 // ===================================================================
 
 type svcSpec struct {
@@ -240,8 +235,6 @@ type svcSpec struct {
 	Audit    string
 	FailCode string
 	FailHint string
-	// Extra 额外占位符（渲染前逐项算出；返回 error 则作业失败并落诊断）
-	Extra func(catDB *storepkg.DB, agentStore *AgentStore, flowID int64, cred *sshCred) (map[string]string, error)
 	// Verdict rc==0 后由它裁定成败并产出事件附加字段
 	Verdict func(pr ansibleRunResult) (map[string]any, []diag)
 	// PostOK 成功收尾副作用（维护态登记等）；返回的 diag 并入成功诊断
@@ -259,7 +252,7 @@ var (
 		Playbook: "upgrade.yml", Title: "升级 SAgent", Source: "ansible_upgrade",
 		Audit: "ansible 升级 SAgent", FailCode: "upgrade_agent",
 		FailHint: "核对目标机安装目录与 run/stopped 标记后点「↻ 重试该步」；旧二进制备份（SAgent.bak-*）仍在，可手工回滚",
-		Extra:    upgradeExtras, Verdict: upgradeVerdict,
+		Verdict:  upgradeVerdict,
 	}
 	svcPreflightServiceSpec = svcSpec{
 		Playbook: "preflight_service.yml", Title: "启停前预检", Source: "ansible_svc_preflight",
@@ -271,7 +264,7 @@ var (
 		Playbook: "agent_service.yml", Title: "启停 SAgent", Source: "ansible_service",
 		Audit: "ansible 启停 SAgent", FailCode: "service_execute",
 		FailHint: "核对目标机进程与 run/stopped 标记后点「↻ 重试该步」；守护若卡在暂停态可上机删除 ~/SAgent/run/stopped 恢复",
-		Extra:    serviceExtras, Verdict: serviceVerdict, PostOK: servicePostOK,
+		Verdict:  serviceVerdict, PostOK: servicePostOK,
 	}
 )
 
@@ -287,55 +280,6 @@ func svcSpecForKind(kind string) *svcSpec {
 		return &svcExecuteSpec
 	}
 	return nil
-}
-
-// upgradeExtras 升级 playbook 的业务占位符：版本取人工选定事件（与安装同一来源），
-// 二进制取平台版本库并核对清单 sha，备份名带当前版本（预检 sha 反查，查不到用时间戳兜底）
-func upgradeExtras(catDB *storepkg.DB, agentStore *AgentStore, flowID int64, cred *sshCred) (map[string]string, error) {
-	tag := pickedVersionTag(catDB, flowID)
-	if tag == "" {
-		return nil, fmt.Errorf("未找到人工选定版本（pick_version 无确认记录）")
-	}
-	ver := versionByTag(tag)
-	if ver == nil {
-		return nil, fmt.Errorf("版本清单中无 %s", tag)
-	}
-	binPath, err := resolveVersionBinary(tag)
-	if err != nil {
-		return nil, err
-	}
-	binData, err := os.ReadFile(binPath)
-	if err != nil {
-		return nil, fmt.Errorf("平台版本库无该二进制（%s）", binPath)
-	}
-	sum := sha256.Sum256(binData)
-	fileSHA := hex.EncodeToString(sum[:])
-	if ver.SHA256 != "" && ver.SHA256 != fileSHA {
-		return nil, fmt.Errorf("二进制 sha256 与版本清单不一致（清单=%s 实际=%s）", ver.SHA256, fileSHA)
-	}
-	// 备份名：预检反查出的当前版本优先，查不到（清单外版本）用时间戳兜底
-	bak := "SAgent.bak-" + time.Now().Format("20060102-150405")
-	if pre := svcLatestPreflightUpgrade(catDB, flowID); pre != nil && pre.CurrentTag != "" {
-		bak = "SAgent.bak-" + pre.CurrentTag
-	}
-	return map[string]string{
-		"@BIN_SRC@":  filepath.Join(mustAbs(binPath)),
-		"@BIN_SHA@":  fileSHA,
-		"@BAK_NAME@": bak,
-	}, nil
-}
-
-// serviceExtras 启停 playbook 的业务占位符：动作与目标来自拉起时选定（白名单已校验）
-func serviceExtras(catDB *storepkg.DB, agentStore *AgentStore, flowID int64, cred *sshCred) (map[string]string, error) {
-	flow, _ := catDB.GetFlow(flowID)
-	if flow == nil {
-		return nil, fmt.Errorf("流水线不存在")
-	}
-	p := svcParamsOf(flow)
-	if !p.valid() {
-		return nil, fmt.Errorf("启停参数非法（action=%q target=%q）", p.Action, p.Target)
-	}
-	return map[string]string{"@SVC_ACTION@": p.Action, "@SVC_TARGET@": p.Target}, nil
 }
 
 // svcLatestPreflightUpgrade 取本流水线最近一次升级预检的解析结论
@@ -440,198 +384,6 @@ func servicePostOK(catDB *storepkg.DB, flowID int64) []diag {
 			"目标机操作已成功，仅平台状态标记未更新；刷新资源列表核实")}
 	}
 	return nil
-}
-
-// ansibleSvcJob 升级/启停通用作业：骨架与 ansibleOffboardJob 一致
-// （语法门禁 → 流式执行 → 判据收口 → 成功副作用），差异只在占位符与判据
-func ansibleSvcJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred, sp *svcSpec) {
-
-	st := newStepRunState(catDB, flowID, step, cred)
-	defer st.startHeartbeat(catDB)()
-	myAttempt := st.attempt
-	hook := st.taskHook(catDB)
-
-	fail := func(summary string, detail map[string]any, ds []diag) {
-		if !jobStillCurrent(catDB, flowID, step.ID, myAttempt) {
-			return
-		}
-		if detail == nil {
-			detail = map[string]any{}
-		}
-		detail["attempt"] = myAttempt
-		detail["attempts"] = st.endAttempt("fail", summary)
-		detail["tasks"] = compactTasks(st.tasksSnapshot())
-		failStep(catDB, agentStore, flowID, step, "ansible "+sp.Title+"失败", summary, detail, cred, ds)
-	}
-
-	flow, _ := catDB.GetFlow(flowID)
-	if flow == nil {
-		fail("流水线不存在", nil, []diag{fatalDiag("flow_not_found", "流水线不存在", "")})
-		return
-	}
-	res, _ := catDB.GetResource(flow.ResourceID)
-	if res == nil {
-		fail("资源对象不存在", nil, []diag{fatalDiag("resource_not_found", "资源对象不存在", "检查资源台账")})
-		return
-	}
-
-	destHome := destHomeFor(cred)
-	var extra map[string]string
-	if sp.Extra != nil {
-		var err error
-		extra, err = sp.Extra(catDB, agentStore, flowID, cred)
-		if err != nil {
-			fail(sp.Title+"参数准备失败："+err.Error(), nil,
-				[]diag{fatalDiag(sp.FailCode+"_params", sp.Title+"参数准备失败："+err.Error(), sp.FailHint)})
-			return
-		}
-	}
-	pbBody := loadSvcPlaybook(sp.Playbook, destHome, extra)
-	if strings.TrimSpace(pbBody) == "" {
-		fail("生成 "+sp.Title+" playbook 失败：外置文件与内置副本都取不到",
-			nil, []diag{fatalDiag("playbook_missing",
-				"取不到 "+sp.Playbook+" 的内容（外置文件缺失且内置副本为空）",
-				"检查 data/playbooks/"+sp.Playbook+" 是否存在；该文件损坏时平台会回落内置副本")})
-		return
-	}
-	work, err := os.MkdirTemp("", "l0-svc-*")
-	if err != nil {
-		fail("创建临时目录失败："+err.Error(), nil,
-			[]diag{fatalDiag("svc_tmp_failed", "创建临时目录失败："+err.Error(), "检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer os.RemoveAll(work)
-	pbPath := filepath.Join(work, sp.Playbook)
-	if err := os.WriteFile(pbPath, []byte(pbBody), 0o644); err != nil {
-		fail("生成 playbook 失败："+err.Error(), nil,
-			[]diag{fatalDiag("playbook_render_failed", "生成 playbook 失败："+err.Error(), "")})
-		return
-	}
-	inv, cleanupInv, err := writeInventory(cred)
-	if err != nil {
-		fail("生成 ansible inventory 失败："+err.Error(), nil,
-			[]diag{fatalDiag("inventory_write_failed", "生成 ansible inventory 失败："+err.Error(),
-				"检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer cleanupInv()
-
-	phases := []map[string]any{}
-
-	// 语法门禁：语法错误在碰目标机前就拦下
-	st.setPhase("syntax")
-	st.flush(catDB, "平台 ansible 启动 · "+sp.Title+" playbook 语法校验中（尚未触碰目标机）")
-	synCmd := exec.Command("ansible-playbook", "-i", inv, pbPath, "--syntax-check")
-	synCmd.Env = append(os.Environ(), "ANSIBLE_HOST_KEY_CHECKING=False")
-	synOut, synErr := synCmd.CombinedOutput()
-	phases = append(phases, map[string]any{
-		"phase": "syntax", "status": map[bool]string{true: "failed", false: "ok"}[synErr != nil],
-		"output": clip(string(synOut), 1500),
-	})
-	if synErr != nil {
-		fail(sp.Title+" playbook 语法校验未过（未触碰目标机）", map[string]any{
-			"syntax_output": clip(string(synOut), 2000), "phases": phases,
-		}, []diag{fatalDiag(sp.FailCode+"_syntax", sp.Title+" playbook 语法校验未过：检查 data/playbooks/"+sp.Playbook,
-			"外置 playbook 语法错误；修正后点「↻ 重试该步」")})
-		return
-	}
-
-	st.setPhase("playbook")
-	st.flush(catDB, "平台 ansible 执行中 · "+sp.Title+" 开始（逐任务回报）")
-	pbBudget := execBudget(st.spec, budgetPlaybook)
-	ctx, cancel := context.WithTimeout(context.Background(), pbBudget)
-	defer cancel()
-	pr := runPlaybookStream(ctx, inv, pbPath, hook)
-
-	evidence := map[string]any{
-		"output": clip(pr.Output, 20000), "output_bytes": len(pr.Output),
-		"truncated": len(pr.Output) > 20000,
-	}
-	if ft := taskFailures(pr.Tasks); len(ft) > 0 {
-		lines := []string{}
-		for _, t := range ft {
-			lines = append(lines, t.Lines...)
-		}
-		evidence["failed_task_lines"] = clip(strings.Join(lines, "\n"), 6000)
-	}
-	phases = append(phases, map[string]any{
-		"phase": "playbook", "rc": pr.RC, "timed_out": pr.TimedOut,
-		"tasks": len(pr.Tasks), "recap": recapLine(pr.Recap, pr.RecapSeq),
-	})
-
-	detail := map[string]any{
-		"dest_home": destHome, "conn": credState(cred), "target": cred.target(),
-		"rc": pr.RC, "timed_out": pr.TimedOut,
-		"tasks": compactTasks(pr.Tasks), "recap": pr.Recap,
-		"recap_line": recapLine(pr.Recap, pr.RecapSeq),
-		"phases":     phases, "attempt": myAttempt,
-		"evidence": evidence,
-	}
-	if pr.TimedOut {
-		detail["attempts"] = st.endAttempt("timeout_run", fmt.Sprintf("playbook 超过 %ds 未返回", budgetSec(pbBudget)))
-		fail(fmt.Sprintf("%s playbook 超过 %ds 未返回（平台已终止）", sp.Title, budgetSec(pbBudget)), detail,
-			withPortSource(cred, []diag{fatalDiag("ansible_phase_timeout",
-				fmt.Sprintf("%s playbook 超过 %ds 未返回", sp.Title, budgetSec(pbBudget)),
-				"目标机负载过高或停进程等待卡住；核对目标机后点「↻ 重试该步」")}))
-		return
-	}
-	if pr.RC != 0 {
-		failText := taskFirstFailureText(pr.Tasks)
-		if strings.TrimSpace(failText) == "" {
-			failText = pr.Output
-		}
-		d := classifySvcFailure(failText, sp)
-		detail["attempts"] = st.endAttempt("fail", d.Message)
-		fail(sp.Title+"失败："+d.Message+"（rc="+fmt.Sprint(pr.RC)+"）", detail,
-			withPortSource(cred, []diag{d}))
-		return
-	}
-
-	st.setPhase("verify")
-	extraOut, ds := sp.Verdict(pr)
-	if f := firstFatal(ds); f != nil {
-		detail["attempts"] = st.endAttempt("fail", f.Message)
-		fail(f.Message, detail, withPortSource(cred, ds))
-		return
-	}
-	if sp.PostOK != nil {
-		ds = append(ds, sp.PostOK(catDB, flowID)...)
-	}
-
-	checkLine, _ := extraOut["verify_line"].(string)
-	if checkLine == "" {
-		checkLine = svcCheckLine(pr)
-	}
-	reason := fmt.Sprintf("ansible %s完成 目标=%s 家目录=%s", sp.Title, cred.target(), destHome)
-	if checkLine != "" {
-		reason += " 核对=" + checkLine
-		detail["verify_line"] = checkLine
-	}
-	if n := countWarn(ds); n > 0 {
-		reason += fmt.Sprintf(" ⚠ %d 项待复核（见步骤告警）", n)
-	}
-	attempts := st.endAttempt("ok", reason)
-
-	outExtra := map[string]any{
-		"source": sp.Source, "detail": detail,
-		"conn": credState(cred), "target": cred.target(),
-		"tasks": compactTasks(pr.Tasks), "recap": pr.Recap,
-		"task_total": len(pr.Tasks), "recap_line": recapLine(pr.Recap, pr.RecapSeq),
-		"phases": phases, "attempt": myAttempt, "attempts": attempts,
-		"verify_line": checkLine,
-		"diagnosis":   diagJSON(ds), "evidence": evidence,
-	}
-	for k, v := range extraOut {
-		outExtra[k] = v
-	}
-	if msg := autoReportStep(catDB, agentStore, flowID, step.ID, reason, outExtra); msg != "" {
-		fail(sp.Title+"回报被拒："+msg, detail,
-			withPortSource(cred, []diag{fatalDiag(sp.FailCode+"_report_rejected", sp.Title+"回报被拒："+msg,
-				"步骤可能已被人工重置；点「↻ 重试该步」重新执行")}))
-		return
-	}
-	addAudit(sp.Audit, flow.ResourceID, "接入中心", reason)
 }
 
 // svcCheckLine 兜底核对行：判据没给时取第一个 SVC_*/UPGRADE_* 标记行
@@ -760,9 +512,9 @@ func (r *flowRun) atomConfirmService(catDB *storepkg.DB) (string, string, string
 	// 停→启随时可回，本就不需要二次点头。本环节保留为**核对**：把预检实测摊开留痕，
 	// 并挡掉不可能成功的操作（插件不存在 / control 通道不可用），核对通过即自动放行到执行
 	return stOK, summary + "（预检核对通过，自动放行）", detailJSON(map[string]any{
-		"action":      p.Action, "target": p.Target, "target_label": p.targetLabel(),
-		"impact":      impact,
-		"pid":         pre.PID, "guard": pre.Guard, "stopped": pre.Stopped,
+		"action": p.Action, "target": p.Target, "target_label": p.targetLabel(),
+		"impact": impact,
+		"pid":    pre.PID, "guard": pre.Guard, "stopped": pre.Stopped,
 		"plugins":     servicePluginStatus(pre.PluginsRaw),
 		"auto_passed": true,
 	})

@@ -1,3 +1,7 @@
+      // ==== 心跳判离线唯一口径（与后端 status/recon 一致：30s 心跳 × 3 拍 = 90s） ====
+      // 工作台/排障/列表共用此常量，禁止各页面再写死 90/120 打架（health 统计口径 120s 为后端内部值，不在前端复刻）
+      var HEARTBEAT_TTL_SEC = 90;
+
       // ==== 站点外部地址（生产化红线：前端禁止写死环境地址，统一从 /api/site-config 获取） ====
       var _siteCfg = null;
       function siteCfg(cb) {
@@ -141,6 +145,8 @@
         document.querySelectorAll("nav a").forEach(function(a){a.classList.toggle("active",a.dataset.page===page)});
         var _seq = ++_pageSeq, _guard = !_noPageGuard[page];
         clearTimeout(_pageWatch);
+        // HA 验证页轮询总闸：离开 ha-vm/ha-cpool 前停掉两池 5s 轮询（实现在 panel.js）
+        if (window.__haStopTimers) window.__haStopTimers();
         if (_guard) {
           var mc0 = document.getElementById("main-content");
           if (mc0) mc0.innerHTML = stSk(3);
@@ -163,6 +169,10 @@
           case "data-gov": renderDataGov(); break;          // 数据治理（platform.js，野指标治理切片）
           case "platform-health": renderPlatformHealthPage(); break; // 平台健康（platform.js，/api/health 组件化自检）
           case "slo": renderSLO(); break;
+          // 高可用验证（2026-09-27 用户拍板：vmagent 切换 / exporter 迁移切换 从采集健康页
+          // 拆出为专项验证菜单，采集健康页回归纯对账语义；渲染器在 panel.js）
+          case "ha-vm": renderHaVmpool(); break;    // vmagent 切换验证（专项）
+          case "ha-cpool": renderHaCpool(); break;  // exporter 迁移/切换验证（专项）
           case "audit": renderAudit(); break;
           case "tasks": renderTasks(); break;      // 读落库审计（/api/tasks → ListAudit），重启不丢
           case "settings": renderSettings(); break;

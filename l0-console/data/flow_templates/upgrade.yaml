@@ -28,18 +28,6 @@ steps:
     scope: external
     requires: [pick_object]
     hint: 只读探测：当前二进制 sha（对照版本清单反查当前版本）、run.sh 守护形态（决定停/启分支）、暂停标记、control.sock 插件状态、磁盘可用空间。**本环节不改动目标机任何东西**
-    instruction: |
-      ssh -p {{.port}} <user>@{{.ip}} '
-        AG=~/SAgent
-        sha="-"; [ -f "$AG/bin/SAgent" ] && sha=$(sha256sum "$AG/bin/SAgent" | awk "{print \$1}")
-        guard="no"; for d in /proc/[0-9]*; do p=${d#/proc/}; [ -r $d/cmdline ] || continue
-          case "$(tr "\0" " " < $d/cmdline 2>/dev/null)" in *run.sh*) cw=$(readlink $d/cwd 2>/dev/null); [ "$cw" = "$AG" ] && guard="yes";; esac; done
-        stopped="no"; [ -f "$AG/run/stopped" ] && stopped="yes"
-        pid="-"; [ -f "$AG/run/SAgent.pid" ] && { p=$(cat "$AG/run/SAgent.pid" 2>/dev/null); kill -0 "$p" 2>/dev/null && pid=$p; }
-        plugins="-"; [ -S "$AG/run/control.sock" ] && plugins=$(cd "$AG" && timeout 5 ./bin/SAgent -ctl "status" 2>/dev/null | head -1)
-        dfm=$(df -Pm "$AG" 2>/dev/null | awk "NR==2{print \$4}")
-        echo "UPGRADE_PRE sha=$sha guard=$guard guard_pid=- stopped=$stopped pid=$pid plugins=$plugins disk_free_mb=${dfm:-0}"
-        echo "UPGRADE_PRE_END"'
 
   - id: pick_version
     atom: pick_version

@@ -1,31 +1,37 @@
-# vmagent scrape 配置
+# vmagent scrape 配置（vmagent 池版）
+# 池成员 A/B 共用同一份 job 骨架（本文件两台 vmagent 挂同一 ro 路径），
+# 目标归属由 l0-console 调度器写各自的 sd 目录（configs/vmagent-sd/pool-{a,b} →
+# 容器内同路径 /etc/vmagent-sd-pool），单归属轮转：同一目标任一时刻只被一个成员抓取。
 scrape_configs:
-      # L0 自身自监控（架构 3.3 可监控：平台也要能被监控）。
-      # l0-console 的 /metrics 出口 sagent_l0_*（进程/依赖/Agent规模/流水线/版本指纹），
-      # 与前端自监控面板、/api/selfmon 同源，纳入 VM 数据链供 Grafana 大盘可视化，形成"监控平台的平台"闭环。
-      - job_name: "l0-console"
+      # 成员自监控：每个 vmagent 抓自己容器内的 8429（本机地址，天然各抓各的）。
+      # 关键作用：零归属目标的空闲成员也有 up 序列（带自己的 replica 标签），
+      # 调度器数据面判活不会把"空闲"误判成"死了"，否则接管时唯一承接端会被误杀。
+      - job_name: "vmagent-self"
         scrape_interval: 15s
         static_configs:
               - targets:
-                      - "l0-console:8080"
+                      - "localhost:8429"
+      # L0 自身自监控（架构 3.3 可监控：平台也要能被监控）。
+      # l0-console 的 /metrics 出口 sagent_l0_*，与前端自监控面板、/api/selfmon 同源。
+      - job_name: "l0-console"
+        scrape_interval: 15s
         metrics_path: /metrics
+        file_sd_configs:
+              - files:
+                      - "/etc/vmagent-sd-pool/l0-console/*.json"
       - job_name: "sagent"
         scrape_interval: 15s
         # D4 收口核心：SAgent /metrics 不再被 vmagent 直连，统一经 l1-vmauth 单端口(8427)收敛。
-        #   - 入口鉴权：vmagent 带 Bearer demo-d4-bearer 打 vmauth，vmauth 裸鉴权不通过即 401；
-        #   - path 白名单：vmauth 按 /sagent-{1,2,proxy}/metrics 白名单路由并注入 SAgent 所需 Bearer；
-        #   - 明细节奏：targets 仍写 sagent-*,19090（逻辑标识），relabel 把 __address__ 置换为 vmauth:8427、
-        #     __metrics_path__ 按 host 映射到对应白名单 path，job_name 保持不变（指标标签/github 大盘兼容）。
-        # vmagent 1.93 不展开配置文件 ${VAR}，这里的密钥与 SAgent SAGENT_METRICS_AUTH_KEY 及
-        # configs/vmauth/auth.yaml 三处需同步（生产轮换密钥时一并更新）。
+        #   - 入口鉴权：vmagent 带 Bearer demo-d4-bearer 打 vmauth，裸鉴权不通过即 401；
+        #   - path 白名单：vmauth 按 /sagent-{N}/metrics 白名单路由并注入 SAgent 所需 Bearer；
+        #   - 明细节奏：sd 里 targets 写 sagent-*,19090（逻辑标识），relabel 把 __address__ 置换为
+        #     vmauth:8427、__metrics_path__ 按 host 映射到对应白名单 path（大盘标签兼容）。
+        # vmagent 1.93 不展开配置文件 ${VAR}，密钥与 SAgent SAGENT_METRICS_AUTH_KEY、
+        # configs/vmauth/auth.yaml 三处同步（生产轮换密钥时一并更新）。
         bearer_token: "demo-d4-bearer"
-        static_configs:
-              - targets:
-                      - "sagent-1:19090"
-                      - "sagent-2:19090"
-                      - "sagent-proxy:19090"
-                      - "sagent-proxy-2:19090"
-                      - "sagent-proxy-3:19090"
+        file_sd_configs:
+              - files:
+                      - "/etc/vmagent-sd-pool/sagent/*.json"
         relabel_configs:
               - source_labels: [__address__]
                 regex: "sagent-1:.*"
@@ -57,9 +63,16 @@ scrape_configs:
                 regex: "sagent-.*:.*"
                 target_label: __address__
                 replacement: "vmauth:8427"
-      # 接入流水线装机后自动登记的靶机（l0-console 写 file_sd 共享卷，15s 热加载）
-      - job_name: "sagent-onboarded"
+      # MySQL 采集靶（vmagent 池演示目标：mysql-exp-1/2 stdlib 探针导出器）
+      - job_name: "mysql"
+        scrape_interval: 15s
+        metrics_path: /metrics
+        file_sd_configs:
+              - files:
+                      - "/etc/vmagent-sd-pool/mysql/*.json"
+      # 接入流水线装机后自动登记的靶机（l0-console 池化登记，job=onboarded）
+      - job_name: "onboarded"
         scrape_interval: 15s
         file_sd_configs:
               - files:
-                      - "/etc/vmagent-sd/*.json"
+                      - "/etc/vmagent-sd-pool/onboarded/*.json"

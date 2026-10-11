@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,11 @@ import (
 )
 
 // MySQLProbe 远程 MySQL 采集插件
+// 生命周期（R0-1 托管目标语义）：
+//   - exporter 子进程与「目标集」解耦：mysqld-exporter 以 /probe?target= 多目标模式运行，
+//     目标态在 SAgent 侧 scrape 循环里——任务增删（ApplyTargets）不动 exporter 进程；
+//   - 任务清零 → 连 exporter 子进程一起回收（旧属主机不残留孤儿进程）；
+//   - 凭证变化（首个目标 DSN 的 user/pass）才需要重启 exporter 重读 my.cnf。
 type MySQLProbe struct {
 	targets     []config.MySQLTarget
 	exporter    *subprocess.Plugin
@@ -23,10 +29,14 @@ type MySQLProbe struct {
 	metricsCh   chan<- MetricBatch // 存储以便 restart
 	interval    time.Duration
 	client      *http.Client
-	stopCh      chan struct{}
+	stopCh      chan struct{} // 全局生命周期（Stop 后不可 StartWith 前不得复用）
+	scrapeStop  chan struct{} // scrape 循环级开关（ApplyTargets 部分停止用）
 	wg          sync.WaitGroup
 	mu          sync.Mutex
 	running     bool
+	// removeSource 目标被移除/清零时清理其在 pipeline 中的残留快照源（防旧属主残留序列双写）。
+	// 由运行时注入（pipeline.RemoveSource）；nil 时跳过清理（仅停止未来抓取）。
+	removeSource func(name string)
 }
 
 // NewMySQLProbe 创建 MySQL 采集器
@@ -61,6 +71,9 @@ func (m *MySQLProbe) Running() bool {
 	defer m.mu.Unlock()
 	return m.running
 }
+
+// SetSourceRemover 注入快照源清理回调（运行时在 StartWith 前调用）
+func (m *MySQLProbe) SetSourceRemover(fn func(name string)) { m.removeSource = fn }
 
 // StartWith 首次启动采集（存入参数供后续 restart 使用）
 func (m *MySQLProbe) StartWith(exporterBin string, metricsCh chan<- MetricBatch) error {
@@ -101,7 +114,16 @@ func (m *MySQLProbe) doStart() error {
 	if len(m.targets) == 0 {
 		return nil
 	}
+	if err := m.ensureExporterLocked(); err != nil {
+		return err
+	}
+	m.startScrapeLoopLocked()
+	return nil
+}
 
+// ensureExporterLocked 确保 mysqld_exporter 子进程在跑（凭证来自首个目标 DSN）。
+// 已在跑且凭证未变 → 原样复用（「同类进程复用」的数据面基础）。
+func (m *MySQLProbe) ensureExporterLocked() error {
 	// 多目标模式：提取第一个目标的凭证写入 my.cnf
 	// /probe?target= 只接受 host:port，凭证从 my.cnf 读取
 	var user, pass string
@@ -122,36 +144,97 @@ func (m *MySQLProbe) doStart() error {
 	if err := m.exporter.Start(); err != nil {
 		return fmt.Errorf("start mysqld_exporter: %w", err)
 	}
-
 	// HTTP 客户端
 	m.client = &http.Client{
 		Timeout: 10 * time.Second,
 	}
+	return nil
+}
 
-	// 定期抓取
+// startScrapeLoopLocked 启动（或重启）目标抓取循环；目标态只在这里，增删目标不必动进程
+func (m *MySQLProbe) startScrapeLoopLocked() {
+	m.scrapeStop = make(chan struct{})
+	stop := m.scrapeStop
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		// 等 exporter 启动
 		time.Sleep(5 * time.Second)
-		m.scrape(m.metricsCh)
+		m.scrape(m.metricsCh, stop)
 
 		ticker := time.NewTicker(m.interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				m.scrape(m.metricsCh)
-			case <-m.stopCh:
+				m.scrape(m.metricsCh, stop)
+			case <-stop:
 				return
 			}
 		}
 	}()
-
-	return nil
 }
 
-// Stop 停止采集（可重入）
+// stopScrapeLoopLocked 只停抓取循环（exporter 进程保持——任务增删零进程抖动）
+func (m *MySQLProbe) stopScrapeLoopLocked() {
+	if m.scrapeStop != nil {
+		close(m.scrapeStop)
+		m.scrapeStop = nil
+	}
+	m.wg.Wait()
+}
+
+// ApplyTargets 平台托管目标热更（R0-1）：目标集 diff 生效。
+//   - 集合未变 → no-op（幂等，重复下发不产生进程抖动）；
+//   - 增/删部分目标 → 只重启 scrape 循环，exporter 进程复用；
+//   - 目标清零 → scrape 循环停 + exporter 子进程回收（任务清零即进程下线）；
+//   - 凭证变化 → exporter 需重读 my.cnf，此时才重启子进程。
+//
+// 返回是否发生实质变化。要求已 StartWith（未初始化时仅更新目标集，下次 Start 生效）。
+func (m *MySQLProbe) ApplyTargets(next []config.MySQLTarget) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sameTargets(m.targets, next) {
+		return false, nil
+	}
+	// 凭证是否变化（首个目标的 user/pass；变更才需重启 exporter 重读 my.cnf）
+	credsChanged := false
+	if len(next) > 0 {
+		ou, op := parseDSN(firstDSN(m.targets))
+		nu, np := parseDSN(next[0].DSN)
+		credsChanged = ou != nu || op != np
+	}
+	// 计算被移除的目标（旧集 - 新集），稍后清理其 pipeline 快照源
+	removed := removedTargets(m.targets, next)
+	m.targets = cloneTargets(next)
+	if !m.running {
+		m.purgeRemovedSources(removed)
+		return true, nil // 未运行：目标集已更新，下次 StartWith/Start 生效
+	}
+	m.stopScrapeLoopLocked()
+	m.purgeRemovedSources(removed)
+	if len(next) == 0 {
+		// 任务清零：连 exporter 进程一起回收
+		if m.exporter != nil {
+			m.exporter.Stop()
+			m.exporter = nil
+		}
+		return true, nil
+	}
+	if credsChanged && m.exporter != nil {
+		m.exporter.Stop()
+		m.exporter = nil
+	}
+	if m.exporter == nil {
+		if err := m.ensureExporterLocked(); err != nil {
+			return true, err
+		}
+	}
+	m.startScrapeLoopLocked()
+	return true, nil
+}
+
+// Stop 停止采集（可重入）：scrape 循环 + exporter 子进程全停（进程组清理语义）
 func (m *MySQLProbe) Stop() error {
 	m.mu.Lock()
 	if !m.running {
@@ -160,17 +243,20 @@ func (m *MySQLProbe) Stop() error {
 	}
 	m.running = false
 	close(m.stopCh)
+	m.stopScrapeLoopLocked()
+	m.purgeRemovedSources(m.targets) // 全停：清掉全部目标的快照源
+	exp := m.exporter
+	m.exporter = nil
 	m.mu.Unlock()
 
-	m.wg.Wait()
-	if m.exporter != nil {
-		m.exporter.Stop()
+	if exp != nil {
+		exp.Stop()
 	}
 	return nil
 }
 
 // scrape 抓取 mysqld_exporter 指标，为每个 target 注入 resource_id
-func (m *MySQLProbe) scrape(metricsCh chan<- MetricBatch) {
+func (m *MySQLProbe) scrape(metricsCh chan<- MetricBatch, stop <-chan struct{}) {
 	for _, target := range m.targets {
 		hostPort := dsnHostPort(target.DSN)
 		source, healthSource := MySQLSnapshotSources(target)
@@ -202,10 +288,10 @@ func (m *MySQLProbe) scrape(metricsCh chan<- MetricBatch) {
 				"resource_id": target.ResourceID, "remote_resource_id": target.ResourceID, "resource_type": "mysql",
 			}}}
 		}
-		if !sendBatch(metricsCh, m.stopCh, snapshotBatch(source, business, m.interval, err)) {
+		if !sendBatch(metricsCh, stop, snapshotBatch(source, business, m.interval, err)) {
 			return
 		}
-		if !sendBatch(metricsCh, m.stopCh, snapshotBatch(healthSource, health, m.interval, nil)) {
+		if !sendBatch(metricsCh, stop, snapshotBatch(healthSource, health, m.interval, nil)) {
 			return
 		}
 	}
@@ -285,4 +371,72 @@ func dsnHostPort(dsn string) string {
 	hostPart = strings.TrimPrefix(hostPart, "tcp(")
 	hostPart = strings.TrimSuffix(hostPart, ")")
 	return hostPart
+}
+
+// removedTargets 计算被移除的目标（旧集有、新集无；按 DSN+ResourceID 判等）
+func removedTargets(oldSet, newSet []config.MySQLTarget) []config.MySQLTarget {
+	out := []config.MySQLTarget{}
+	for _, o := range oldSet {
+		found := false
+		for _, n := range newSet {
+			if o.DSN == n.DSN && o.ResourceID == n.ResourceID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// purgeRemovedSources 清理被移除目标的 pipeline 快照源（业务面 + 健康面两个源）。
+// 不清的后果：旧属主 /metrics 永远挂着交出去的目标残留序列，VM 双写。
+func (m *MySQLProbe) purgeRemovedSources(removed []config.MySQLTarget) {
+	if m.removeSource == nil || len(removed) == 0 {
+		return
+	}
+	for _, t := range removed {
+		biz, health := MySQLSnapshotSources(t)
+		m.removeSource(biz)
+		m.removeSource(health)
+	}
+}
+
+// firstDSN 取目标集中首个 DSN（空集返回空串）
+func firstDSN(targets []config.MySQLTarget) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	return targets[0].DSN
+}
+
+// cloneTargets 深拷贝目标集（Apply/回滚各自持有独立副本，防串改）
+func cloneTargets(targets []config.MySQLTarget) []config.MySQLTarget {
+	out := make([]config.MySQLTarget, len(targets))
+	copy(out, targets)
+	return out
+}
+
+// sameTargets 目标集等价判断（按 DSN+ResourceID 排序后逐项比较，与顺序无关）
+func sameTargets(a, b []config.MySQLTarget) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	key := func(t config.MySQLTarget) string { return t.DSN + "|" + t.ResourceID }
+	ka := make([]string, 0, len(a))
+	kb := make([]string, 0, len(b))
+	for i := range a {
+		ka = append(ka, key(a[i]))
+		kb = append(kb, key(b[i]))
+	}
+	sort.Strings(ka)
+	sort.Strings(kb)
+	for i := range ka {
+		if ka[i] != kb[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -152,10 +152,17 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			Labels  map[string]string `json:"labels"`
 			Plugins []string          `json:"plugins"`
 			CfgHash string            `json:"config_hash"`
+			// Capabilities R0-3 能力位声明（老 Agent 不发，平台按版本兜底判定）
+			Capabilities []string `json:"capabilities"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]interface{}{"error": err.Error()})
 			return
+		}
+		// R0-3：能力位并入台账 stats（能力判定据此放行 targets 下发）
+		stats := map[string]interface{}{}
+		if len(req.Capabilities) > 0 {
+			stats["capabilities"] = req.Capabilities
 		}
 		if req.Type == "" {
 			req.Type = "edge"
@@ -171,6 +178,12 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			ID: req.ID, Name: req.ID, Type: req.Type, Host: req.IP,
 			Plugins: req.Plugins, Version: req.Version, Labels: req.Labels,
 			Source: "heartbeat", LastSeen: time.Now().Unix(), CfgEffective: req.CfgHash,
+			Stats: stats,
+		}
+		// R0-3：注册前取旧能力口径（重装升级场景：老版本 → 新版本翻转需重算配置）
+		prevCapable := false
+		if prevRow, err := catDB.GetAgentRow(req.ID); err == nil && prevRow != nil {
+			prevCapable = agentSupportsManagedTargets(prevRow.Version, prevRow.Stats)
 		}
 		if err := catDB.UpsertAgentRow(row); err != nil {
 			writeJSON(w, map[string]interface{}{"error": err.Error()})
@@ -180,6 +193,12 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 		store.Put(rowToAgent(row))
 		if a := store.Get(req.ID); a != nil {
 			a.CfgDesired = ver
+		}
+		// R0-3：能力翻转（含首次注册的新版本 Agent）→ 立即重算期望配置，
+		// 不等下一拍心跳（注册响应即带最新 config，装机首连就拿到 targets）
+		if newCapable := agentSupportsManagedTargets(req.Version, stats); newCapable != prevCapable {
+			syncAgentConfig(store, catDB, req.ID)
+			ver, content, _ = catDB.GetAgentConfig(req.ID)
 		}
 		addAudit("注册 Agent", req.ID, "心跳接入", "成功")
 		writeJSON(w, map[string]interface{}{"ok": true, "agent_id": req.ID, "config_version": ver, "config": content})
@@ -198,6 +217,8 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			CfgVersion int                    `json:"config_version"`
 			CfgHash    string                 `json:"config_hash"`
 			Stats      map[string]interface{} `json:"stats"`
+			// Capabilities R0-3 能力位声明（老 Agent 不发该字段，平台按版本兜底判定）
+			Capabilities []string `json:"capabilities"`
 			// —— 接入中心回报字段（可选，向后兼容：旧 Agent 不发这些也能正常心跳）——
 			AppliedVersion int   `json:"applied_version"` // 已生效的配置版本（修实测的「期望 cfg-N / 生效 None」）
 			ApplyMs        int64 `json:"apply_ms"`        // 配置应用耗时
@@ -212,6 +233,20 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			writeJSON(w, map[string]interface{}{"error": err.Error()})
 			return
 		}
+		// R0-3：能力位并入 stats 落库（stats_json 是台账侧唯一扩展点，能力判定据此放行 targets）
+		if len(req.Capabilities) > 0 {
+			if req.Stats == nil {
+				req.Stats = map[string]interface{}{}
+			}
+			req.Stats["capabilities"] = req.Capabilities
+		}
+		// R0-3：能力判定翻转（老版本升级上来 / 版本回退）→ 重算期望配置。
+		// 判定稳定时不动配置，避免心跳路径制造版本噪音。
+		prevCapable := false
+		if prevRow, err := catDB.GetAgentRow(req.ID); err == nil && prevRow != nil {
+			prevCapable = agentSupportsManagedTargets(prevRow.Version, prevRow.Stats)
+		}
+		newCapable := agentSupportsManagedTargets(req.Version, req.Stats)
 		src, _ := catDB.GetAgentSource(req.ID)
 		if src == "" {
 			writeJSON(w, map[string]interface{}{"error": "unregistered agent", "need_register": true})
@@ -234,6 +269,10 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 				a.Version = req.Version
 			}
 			a.Status = "healthy"
+		}
+		// R0-3：能力翻转后重算（放到台账更新之后，syncAgentConfig 读到的就是新版本口径）
+		if newCapable != prevCapable {
+			syncAgentConfig(store, catDB, req.ID)
 		}
 		ver, content, _ := catDB.GetAgentConfig(req.ID)
 		// tasks：G2 通道退役后，「下发式执行器」统一走通道 A（心跳拉取任务）。
@@ -263,6 +302,10 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			Plugin  string `json:"plugin"`
 			Note    string `json:"note"`
 			Region  string `json:"region"`
+			// ParamsJSON 插件参数（mysql_probe 的 dsn 等）；透传落库并随 syncAgentConfig 下发
+			ParamsJSON string `json:"params_json"`
+			// ResourceID 远端资源 ID（mysql_probe 等远端插件按它打指标标签，必填）
+			ResourceID string `json:"resource_id"`
 		}
 		switch r.Method {
 		case http.MethodGet:
@@ -315,7 +358,7 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 			if scope != "" {
 				rowTenant = scope
 			}
-			id, err := catDB.InsertTarget(&storepkg.TargetRow{Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note, TenantID: rowTenant, Region: q.Region})
+			id, err := catDB.InsertTarget(&storepkg.TargetRow{Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note, ParamsJSON: q.ParamsJSON, ResourceID: q.ResourceID, TenantID: rowTenant, Region: q.Region})
 			if err != nil {
 				writeJSON(w, map[string]interface{}{"error": err.Error()})
 				return
@@ -348,7 +391,7 @@ func registerAgentRoutes(mux *http.ServeMux, store *AgentStore, catDB *storepkg.
 					}
 				}
 			}
-			if err := catDB.UpdateTarget(&storepkg.TargetRow{ID: q.ID, Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note, TenantID: itemTenant, Region: q.Region}); err != nil {
+			if err := catDB.UpdateTarget(&storepkg.TargetRow{ID: q.ID, Name: q.Name, Type: q.Type, Address: q.Address, AgentID: q.AgentID, Plugin: q.Plugin, Note: q.Note, ParamsJSON: q.ParamsJSON, ResourceID: q.ResourceID, TenantID: itemTenant, Region: q.Region}); err != nil {
 				writeJSON(w, map[string]interface{}{"error": err.Error()})
 				return
 			}
@@ -749,6 +792,11 @@ func executePluginAction(agentID, plugin, action string) map[string]interface{} 
 // syncAgentConfig 目标变更后重算分派 Agent 的期望配置（结构化 doc：targets 段 + host_metrics 段）。
 // host_metrics 段属于配置轨道（界面编辑产生），重算时原样保留；targets 段随采集目标变更刷新。
 // 内容有变化则版本 +1（心跳热生效）。
+//
+// R0-3 能力协商：Agent 无 managed_targets 能力（老版本且无能力位声明）时 targets 段
+// 置空——配置回落静态轨道，绝不下发新字段打挂老 Agent（fail-closed）。
+// R0-4 standby 预置：有能力采集机额外获得池内非属主 mysql_probe 目标的 standby 副本
+// （派生口径与漂移候选同一把尺子，单机受 SA_STANDBY_PRESET_MAX 上限约束）。
 func syncAgentConfig(store *AgentStore, catDB *storepkg.DB, agentID string) {
 	if agentID == "" {
 		return
@@ -757,13 +805,27 @@ func syncAgentConfig(store *AgentStore, catDB *storepkg.DB, agentID string) {
 	if err != nil {
 		return
 	}
+	capable := agentManagedTargetsCapable(store, catDB, agentID)
 	list := []map[string]interface{}{}
-	for _, t := range targets {
-		if t.AgentID == agentID {
-			list = append(list, map[string]interface{}{
-				"id": t.ID, "plugin": t.Plugin, "target": t.Name, "type": t.Type,
-				"address": t.Address, "resource_id": t.ResourceID, "params_json": t.ParamsJSON,
-			})
+	if capable {
+		for _, t := range targets {
+			if t.AgentID == agentID {
+				list = append(list, map[string]interface{}{
+					"id": t.ID, "plugin": t.Plugin, "target": t.Name, "type": t.Type,
+					"address": t.Address, "resource_id": t.ResourceID, "params_json": t.ParamsJSON,
+					"desired_state": "active",
+				})
+			}
+		}
+		// R0-4：standby 预置（仅 mysql_probe；其余插件类型 Agent 端不支持，不预置）
+		if agents, err := catDB.ListAgentRows(); err == nil {
+			for _, t := range deriveStandbyPresets(agents, targets, agentID, cfgStandbyPresetMax) {
+				list = append(list, map[string]interface{}{
+					"id": t.ID, "plugin": t.Plugin, "target": t.Name, "type": t.Type,
+					"address": t.Address, "resource_id": t.ResourceID, "params_json": t.ParamsJSON,
+					"desired_state": "standby",
+				})
+			}
 		}
 	}
 	doc := map[string]interface{}{"targets": list}

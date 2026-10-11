@@ -31,13 +31,7 @@ steps:
     scope: external
     requires: [collect_params]
     gate: blocker
-    hint: 一次探完两类事——① 主机事实：OS/架构/内核/磁盘/端口/是否已有 SAgent（决定装哪个版本）；② 能力可行性：按所选能力的参数声明核对目标可达性（账号/权限类由 Agent 侧在配置下发后验证）。平台持有 SSH 凭据时由 ansible 代执行并自动回填台账；无凭据时下发执行包由人工执行回报
-    # 兜底执行包（平台 ansible 不可用/无凭据时下发）：{{.ip}} / {{.port}} 由平台按资源台账渲染。
-    # 端口必须显式带上：`ssh user@ip` 默认走 22，正是"连错端口却看着像成功"的根源
-    instruction: |
-      ssh -p {{.port}} <user>@{{.ip}} "uname -s; uname -m; uname -r; free -m | sed -n 2p; df -BG / | tail -1; ss -ltn 2>/dev/null | head -1"
-      # 能力可行性：按所选能力填写的参数逐条核对，结论随探路结果一并回报
-      #   目标地址/端口可达性、依赖是否就位、采集账号能否登录（口令类只回报"通过/失败"，不回报口令原文）
+    hint: 一次探完两类事——① 主机事实：OS/架构/内核/磁盘/端口/是否已有 SAgent（决定装哪个版本）；② 能力可行性：按所选能力的参数声明核对目标可达性（账号/权限类由 Agent 侧在配置下发后验证）。平台持有 SSH 凭据时经 L1 Runner 执行并自动回填台账
 
   - id: pick_version
     atom: pick_version

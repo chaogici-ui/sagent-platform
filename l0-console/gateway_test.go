@@ -104,7 +104,7 @@ func TestGatewayWhitelistRejectsNonControl(t *testing.T) {
 	}
 }
 
-// TestGatewayMethodNotAllowed 验证仅允许 POST（控制通道均为 POST）。
+// TestGatewayMethodNotAllowed 验证精确控制路径仅允许 POST；GET 仅放行包仓前缀路径。
 func TestGatewayMethodNotAllowed(t *testing.T) {
 	hit := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +123,21 @@ func TestGatewayMethodNotAllowed(t *testing.T) {
 	}
 	if hit {
 		t.Error("GET was forwarded upstream; gateway must reject non-POST control paths")
+	}
+
+	// 包仓前缀路径：GET 放行（R0-1 插件超市取包）
+	pkgHit := false
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pkgHit = true
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream2.Close()
+	cfgGatewayUpstream = upstream2.URL
+	req2 := httptest.NewRequest(http.MethodGet, "/api/plugin-packages/mysql-exporter/manifest", nil)
+	rec2 := httptest.NewRecorder()
+	gatewayRelayHandler(rec2, req2)
+	if rec2.Code != http.StatusOK || !pkgHit {
+		t.Errorf("GET plugin manifest: status = %d hit = %t, want relayed", rec2.Code, pkgHit)
 	}
 }
 

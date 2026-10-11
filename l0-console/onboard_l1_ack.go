@@ -111,6 +111,64 @@ func driveStepFromL1Task(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg
 		diags = withPortSource(cred, diags)
 	}
 
+	// B4b-1/2/3：探路两类回执必须在卸载侧分支**之前**收口——l1ExecSupportedKind 已含
+	// probe/probe_remote，落到下面会被误捕进卸载侧裁定（offboardFinish/uninstallFinish）。
+	//
+	// probe 的 SSH 落点 = 承载机（flowSSHCred，SPEC-B4b §零.三 G1）：上面的 conn/target
+	// 是按被采对象行（flow.ResourceID）填的，remote 模式下那是被采 Redis 而非采集机——
+	// 落笔前必须换回承载机口径。对账端解析不出承载机凭据（G2）时显式失败，绝不吞回执。
+	if t.Kind == "probe" {
+		if cred, derr := flowSSHCred(catDB, f); derr == nil {
+			extra["conn"] = credState(cred)
+			extra["target"] = cred.target()
+			l1ProbeReconcile(catDB, agentStore, t, step, cred, extra)
+		} else {
+			ev, _ := catDB.LatestEvent(t.FlowID, t.StepID)
+			failStep(catDB, agentStore, t.FlowID, step, "L1 探路对账失败", derr.summary,
+				map[string]any{
+					"executor": "ansible", "exec_channel": execChannelL1, "l1_task_id": t.ID,
+					"attempt":  t.Attempt,
+					"attempts": l1AttemptsForwardRes(ev, t.Attempt, "fail", derr.summary),
+				}, nil, []diag{derr.diag})
+		}
+		_ = catDB.MarkL1TaskReconciled(t.ID)
+		return
+	}
+	if t.Kind == "probe_remote" {
+		// 公共段按 SSH 口径填的 conn/target 对 remote 探路是误导：address 是被采服务地址
+		// 而非主机，资源行凭据也与 SSH 落点无关（SPEC-B4b §零.三 G1：remote 不 SSH 到被采对象）。
+		// 恢复执行端探测落点（address:port）；conn 的删除由对账函数统一整形。
+		addr, _ := extra["address"].(string)
+		rport, _ := extra["port"].(string)
+		extra["target"] = strings.TrimSpace(addr) + ":" + strings.TrimSpace(rport)
+		l1ProbeRemoteReconcile(catDB, agentStore, t, step, extra)
+		_ = catDB.MarkL1TaskReconciled(t.ID)
+		return
+	}
+
+	// 升级/启停四步（B4b-4）：同样不能走通用分支与卸载侧分支——成败判据是 playbook
+	// 自证核对行 + sp.Verdict（UPGRADE_OK / SVC_STOPPED / 版本清单反查 / 维护态登记），
+	// done 必须交给 l1SvcReconcile 走共享裁定。SSH 落点 = 承载机（flowSSHCred，G1）：
+	// 上面公共段的 conn/target 按被采对象行填的，升级/启停落笔前必须换回承载机口径
+	// （与投递端 tryAnsibleExecutor 同一函数解析，两条路径口径一致）。
+	if svcSpecForKind(t.Kind) != nil {
+		if cred, derr := flowSSHCred(catDB, f); derr == nil {
+			extra["conn"] = credState(cred)
+			extra["target"] = cred.target()
+			l1SvcReconcile(catDB, agentStore, t, step, cred, extra)
+		} else {
+			ev, _ := catDB.LatestEvent(t.FlowID, t.StepID)
+			failStep(catDB, agentStore, t.FlowID, step, "L1 对账失败", derr.summary,
+				map[string]any{
+					"executor": "ansible", "exec_channel": execChannelL1, "l1_task_id": t.ID,
+					"attempt":  t.Attempt,
+					"attempts": l1AttemptsForwardRes(ev, t.Attempt, "fail", derr.summary),
+				}, nil, []diag{derr.diag})
+		}
+		_ = catDB.MarkL1TaskReconciled(t.ID)
+		return
+	}
+
 	// 卸载侧（uninstall / scan_collectors / uninstall_plugins / cleanup_autostart）：
 	// 不能走下面的通用分支——卸载的成功判据是**目标机自证核对行**
 	// （dir_exists= / PLUGINS_CLEAN / AUTOSTART_DIRTY …），
@@ -138,9 +196,9 @@ func driveStepFromL1Task(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg
 	_ = catDB.MarkL1TaskReconciled(t.ID)
 }
 
-// l1InstallExtraShape 把 L1 回执的安装结果整成与进程内 ansibleInstallJob 同形的证据。
-// 同形是硬要求：界面/证据渲染只认一套字段，两条执行路径给出不同形状 = "切了开关界面就变了"。
-// 进程内形状 = 顶层平铺（phases/tasks/recap/recap_line/evidence）+ 嵌套 detail（tag/sha/config/rc）。
+// l1InstallExtraShape 把 L1 回执的安装结果整成与 L0 收口约定的形状一致的证据。
+// 同形是硬要求：界面/证据渲染只认一套字段，执行端回执给出同一形状 = 界面不随执行端漂移。
+// 形状 = 顶层平铺（phases/tasks/recap/recap_line/evidence）+ 嵌套 detail（tag/sha/config/rc）。
 func l1InstallExtraShape(t *storepkg.L1TaskRow, extra map[string]any) {
 	nested := map[string]any{"attempt": t.Attempt}
 	for _, k := range []string{
@@ -168,7 +226,7 @@ func registerInstallScrapeTarget(catDB *storepkg.DB, f *storepkg.Flow, extra map
 			"采集目标登记缺少目标机地址（资源台账无 host），未登记 vmagent",
 			"核对资源台账的 SSH 主机字段后，点「↻ 重试该步」重新登记"))
 	}
-	sdPath, err := registerScrapeTarget(f.ResourceID, cred.Host)
+	sdPath, err := registerScrapeTarget(catDB, f.ResourceID, cred.Host)
 	if err != nil {
 		return append(ds, warnDiag("scrape_sd_failed",
 			"采集目标登记 vmagent file_sd 失败："+err.Error(),
@@ -185,6 +243,206 @@ func registerInstallScrapeTarget(catDB *storepkg.DB, f *storepkg.Flow, extra map
 		nested["phases"] = extra["phases"]
 	}
 	return ds
+}
+
+// l1ProbeReconcile 主机探路回执（kind=probe，B4b-1/B4b-3）的 L0 收口。
+//
+// 执行端只回阶段事实（l1ProbeResultExtra 顶层平铺），L0 侧 l1ProbeOutcomeFromExtra 重建后
+// 交给 probeFinish 裁定（blockerFail 门禁 + 台账回写 + 回报）——唯一判据实现在 probeFinish，
+// 切了开关（inprocess ↔ runner）结论与证据形状逐字一致（SPEC-B4b §六）。
+//
+// B4b-3：接入点兜底已下沉执行端（候选实测 + 反向隧道，转发目标 = L0 console）。
+// 回执 auto_resolve.resolved==true 表示采集机侧已实测出可达接入点，L0 在裁定前先落台账
+// （AgentConsoleURL）——谁持账本谁落笔，执行端不写库。
+func l1ProbeReconcile(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg.L1TaskRow,
+	step storepkg.FlowStepSnapshot, cred *sshCred, extra map[string]any) {
+
+	po, tasks := l1ProbeOutcomeFromExtra(extra)
+	compact := compactTasks(tasks)
+
+	// 尝试历史承接：与 l1OffboardReconcile 同口径（超时重试把历史写在 running 事件里，
+	// 这里原样接过来再追加本次结局，重试后的卡片不留空白历史）
+	endAttempt := func(result, note string) []attemptRec {
+		ev, _ := catDB.LatestEvent(t.FlowID, t.StepID)
+		return l1AttemptsForwardRes(ev, t.Attempt, result, note)
+	}
+
+	fail := func(summary string, detail map[string]any, ds []diag) {
+		if detail == nil {
+			detail = map[string]any{}
+		}
+		detail["attempt"] = t.Attempt
+		if _, ok := detail["attempts"]; !ok {
+			detail["attempts"] = endAttempt("fail", summary)
+		}
+		if _, ok := detail["tasks"]; !ok {
+			detail["tasks"] = compact
+		}
+		failStep(catDB, agentStore, t.FlowID, step, "L1 执行失败", summary, detail, cred, ds)
+	}
+
+	// 执行端阶段硬中断（ping/端口/setup/env 任一阶段 abort）→ 落失败，
+	// 归因用执行端已给出的分级诊断（classify 的结果不重跑——重跑会把归因改写掉）
+	if t.Status != "done" {
+		note := l1NoteOr(t, "未提供失败原因")
+		failStep(catDB, agentStore, t.FlowID, step, "L1 执行失败",
+			"L1 执行端失败："+note,
+			map[string]any{
+				"phase": extra["phase"], "evidence": extra["evidence"],
+				"budget_sec": l1BudgetFromExtra(extra), "tasks": compact,
+				"conn": credState(cred), "target": cred.target(), "attempt": t.Attempt,
+			}, cred, l1ResultDiags(t))
+		return
+	}
+
+	// B4b-3：采集机侧实测出的可达接入点 → L0 落台账（AgentConsoleURL）。
+	// 落账失败不阻断（实测事实已进 po.ConsoleURL / probe map 的 console_url），
+	// 但必须留 warn——台账缺这个字段，下次探路还会从错误的接入点起步
+	if po.AutoResolve != nil {
+		if resolved, _ := po.AutoResolve["resolved"].(bool); resolved {
+			if url, _ := po.AutoResolve["resolved_url"].(string); url != "" {
+				res := mustResource(catDB, flowResourceID(catDB, t.FlowID))
+				if res == nil {
+					po.EnvDiags = append(po.EnvDiags, warnDiag("access_point_adopt_failed",
+						"采集机侧实测接入点 "+url+" 可达，但资源行不存在，未能写入台账", ""))
+				} else if res.AgentConsoleURL != url {
+					res.AgentConsoleURL = url
+					if err := catDB.UpsertResource(res); err != nil {
+						po.EnvDiags = append(po.EnvDiags, warnDiag("access_point_adopt_failed",
+							"采集机侧实测接入点 "+url+" 可达，但写台账失败："+err.Error(), ""))
+					}
+				}
+			}
+		}
+	}
+
+	// blockerFail 门禁 + 台账回写 + 回报（唯一判据实现，与执行端同一份 probeFinish）
+	probeFinish(catDB, agentStore, t.FlowID, step, cred, probeInputOf(po), t.Attempt,
+		tasks, endAttempt, nil, fail)
+}
+
+// l1ProbeRemoteReconcile 远程可达性探路回执（kind=probe_remote，B4b-2）的 L0 裁定。
+//
+// 执行端从采集机侧对被采对象做真实核验（Redis：AUTH+PING 期待 +PONG；其余类型 TCP 兜底），
+// 恒回 done + 原始事实——成败由 L0 按事实落笔（SPEC §2.3，判据只在 L0 有一份）：
+//
+//	通过：TCP 可达，且协议级核验通过（Redis 必须拿到 +PONG，提供口令时 AUTH 也必须 +OK）
+//	未过：按事实归因（不可达 / 要求认证 / 口令未过 / 协议未过），failStep 带可执行诊断与原始 reply
+func l1ProbeRemoteReconcile(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg.L1TaskRow,
+	step storepkg.FlowStepSnapshot, extra map[string]any) {
+
+	endAttempt := func(result, note string) []attemptRec {
+		ev, _ := catDB.LatestEvent(t.FlowID, t.StepID)
+		return l1AttemptsForwardRes(ev, t.Attempt, result, note)
+	}
+
+	// 执行端拒绝（载荷解析失败 / 缺预算 / 环境缺依赖）→ 直接落失败
+	if t.Status != "done" {
+		note := l1NoteOr(t, "未提供失败原因")
+		failStep(catDB, agentStore, t.FlowID, step, "L1 执行失败",
+			"L1 执行端失败："+note,
+			map[string]any{
+				"budget_sec": l1BudgetFromExtra(extra),
+				"attempt":    t.Attempt, "attempts": endAttempt("fail", note),
+			}, nil, l1ResultDiags(t))
+		return
+	}
+
+	tcpOK, _ := extra["tcp_ok"].(bool)
+	protoOK, _ := extra["protocol_ok"].(bool)
+	authOK, _ := extra["auth_ok"].(bool)
+	addr, _ := extra["address"].(string)
+	port, _ := extra["port"].(string)
+	reply, _ := extra["reply"].(string)
+	tool, _ := extra["tool"].(string)
+	target, _ := extra["target"].(string)
+	if target == "" {
+		target = addr + ":" + port
+	}
+	// 本步无 SSH 落点（探的是被采对象，不是主机）：conn 字段（SSH 凭据状态）没有意义，
+	// 删除以免误导；target 换成探测落点（address:port），不是被采对象资源行的 IP
+	delete(extra, "conn")
+	extra["target"] = target
+	extra["diagnosis"] = []diag{}
+
+	if tcpOK && protoOK && authOK {
+		// B4b-2：可达性核验事实回写被采对象资源行——与主机探路 probeFinish 同口径
+		// （probed_at 刷新 + probe_json 留最近核验档案），资源页"最近探路"才有 remote 侧事实。
+		// merge 写入不覆盖既有主机档案（hybrid 场景两份档案共存）；OS/Arch/内核无实测事实，
+		// 原样保留台账现值。回写失败不阻断回报（核验事实已进步骤 detail），但必须留 warn。
+		if rid := flowResourceID(catDB, t.FlowID); rid != "" {
+			if res, _ := catDB.GetResource(rid); res != nil {
+				probe := map[string]any{}
+				if strings.TrimSpace(res.ProbeJSON) != "" {
+					_ = json.Unmarshal([]byte(res.ProbeJSON), &probe)
+				}
+				probe["probed_by"] = "remote_probe"
+				probe["probed_at"] = time.Now().Format("2006-01-02 15:04:05")
+				probe["probe_channel"] = "l1_runner"
+				probe["remote_target"] = target
+				probe["tcp_ok"] = tcpOK
+				probe["protocol_ok"] = protoOK
+				probe["auth_ok"] = authOK
+				probe["reply"] = reply
+				probe["tool"] = tool
+				if pj, merr := json.Marshal(probe); merr == nil {
+					if err := catDB.UpdateResourceProbe(rid, string(pj), res.OS, res.Arch, res.Kernel); err != nil {
+						extra["diagnosis"] = []diag{warnDiag("remote_probe_ledger_failed",
+							"可达性核验通过，但回写资源台账失败："+err.Error(),
+							"核对台账库连接与写入；本步骤证据不受影响")}
+					}
+				}
+			}
+		}
+		// 通过：回报 preflight_remote（extra 顶层已带全部原始事实 + attempts 承接）
+		reason := fmt.Sprintf("被采对象 %s 可达性核验通过（工具 %s）", target, firstNonEmpty(tool, "未知"))
+		if msg := autoReportStep(catDB, agentStore, t.FlowID, t.StepID,
+			firstNonEmpty(l1NoteOr(t, ""), reason), extra); msg != "" {
+			failStep(catDB, agentStore, t.FlowID, step, "远程可达性探路回报被拒",
+				"探路回报被拒："+msg,
+				map[string]any{
+					"target": target, "attempt": t.Attempt,
+					"attempts": endAttempt("fail", msg),
+				}, nil, []diag{fatalDiag("probe_report_rejected", "探路回报被拒："+msg,
+					"步骤可能已被人工重置；点「↻ 重试该步」重新执行")})
+			return
+		}
+		addAudit("远程可达性探路完成", step.ID, "接入中心", reason)
+		return
+	}
+
+	// 按事实归因：不可达 / 要求认证 / 口令未过 / 协议未过——每档都给可执行的下一步
+	code, summary, hint := "", "", ""
+	r := strings.TrimSpace(reply)
+	switch {
+	case !tcpOK:
+		code, summary = "remote_target_unreachable",
+			fmt.Sprintf("被采对象 %s 不可达：%s", target, firstNonEmpty(r, "连接失败"))
+		hint = "核对被采对象地址/端口与防火墙策略，以及「采集机 ↔ 被采对象」的网络直通性" +
+			"（探路与采集同侧，都必须从采集机发起）"
+	case !protoOK && strings.Contains(r, "NOAUTH"):
+		code, summary = "remote_auth_required",
+			fmt.Sprintf("被采对象 %s 要求认证（%s）——采集参数未提供口令", target, r)
+		hint = "在「采集参数」环节补齐口令后点「↻ 重试该步」"
+	case !protoOK && strings.Contains(r, "WRONGPASS"):
+		code, summary = "remote_auth_failed",
+			fmt.Sprintf("被采对象 %s 口令核验未通过（%s）", target, r)
+		hint = "核对采集参数中的口令后点「↻ 重试该步」"
+	case !protoOK:
+		code, summary = "remote_protocol_failed",
+			fmt.Sprintf("被采对象 %s 协议核验未通过（%s）", target, firstNonEmpty(r, "服务无响应"))
+		hint = "端口通但协议握手失败：确认该地址端口上跑的确实是预期服务（如 Redis），而非代理或其它服务"
+	default:
+		code, summary = "remote_probe_failed",
+			fmt.Sprintf("被采对象 %s 核验未通过（reply=%s）", target, r)
+		hint = "按原始 reply 排查后点「↻ 重试该步」"
+	}
+	failStep(catDB, agentStore, t.FlowID, step, "远程可达性探路未通过", summary,
+		map[string]any{
+			"target": target, "tcp_ok": tcpOK, "protocol_ok": protoOK, "auth_ok": authOK,
+			"reply": reply, "tool": tool, "budget_sec": l1BudgetFromExtra(extra),
+			"attempt": t.Attempt, "attempts": endAttempt("fail", summary),
+		}, nil, []diag{fatalDiag(code, summary, hint)})
 }
 
 // l1OffboardReconcile 卸载侧回执的 L0 收口：重建 ansibleRunResult 后走**共享裁定**。
@@ -267,6 +525,152 @@ func l1OffboardReconcile(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg
 	}
 	offboardFinish(catDB, agentStore, t.FlowID, step, cred, *sp, pr, phases, destHome,
 		t.Attempt, pbBudget, endAttempt, setPhase, fail, seed)
+}
+
+// l1SvcReconcile 升级/启停四步回执（B4b-4）的 L0 收口。
+//
+// 与 l1OffboardReconcile 同构：failed → 直接落失败（归因已由执行端按同一批 classify 给出）；
+// done → rc=0 只说明 playbook 跑完，**不等于升级/启停成功**——成败由 sp.Verdict 裁定
+// （UPGRADE_OK 自证核对行 / SVC_* 结论行 / 版本清单反查当前版本），service_execute 再走
+// PostOK 维护态登记。判据与 L0 投递端同一份（svcSpecForKind），
+// 切了执行端结论与证据形状不变（SPEC §2.3）。
+func l1SvcReconcile(catDB *storepkg.DB, agentStore *AgentStore, t *storepkg.L1TaskRow,
+	step storepkg.FlowStepSnapshot, cred *sshCred, extra map[string]any) {
+
+	sp := svcSpecForKind(t.Kind)
+	pr := l1RunResultFromExtra(extra)
+	phases := l1PhasesFromExtra(extra)
+	destHome, _ := extra["dest_home"].(string)
+	if destHome == "" {
+		destHome = destHomeFor(cred)
+	}
+	// 预算只用于超时文案：必须与执行端拿到的是同一个数，故从回执里取而不是重算
+	pbBudget := time.Duration(l1BudgetFromExtra(extra)) * time.Second
+
+	endAttempt := func(result, note string) []attemptRec {
+		ev, _ := catDB.LatestEvent(t.FlowID, t.StepID)
+		return l1AttemptsForwardRes(ev, t.Attempt, result, note)
+	}
+	// 桥侧没有进程内 stepRunState 的阶段机；阶段已随 phases 回执，故 setPhase 只作占位
+	setPhase := func(string) {}
+
+	fail := func(summary string, detail map[string]any, ds []diag) {
+		if detail == nil {
+			detail = map[string]any{}
+		}
+		detail["attempt"] = t.Attempt
+		if _, ok := detail["attempts"]; !ok {
+			detail["attempts"] = endAttempt("fail", summary)
+		}
+		if _, ok := detail["tasks"]; !ok {
+			detail["tasks"] = compactTasks(pr.Tasks)
+		}
+		failStep(catDB, agentStore, t.FlowID, step, "L1 执行失败", summary, detail, cred, ds)
+	}
+
+	// 执行端拒绝（载荷解析失败 / 缺预算 / 缺 tag / 取包被拒 / 语法未过 / rc≠0 / 超时）：
+	// 归因已由执行端给出（classifySvcFailure 同源），直接落失败，不重跑裁定
+	if t.Status != "done" {
+		note := l1NoteOr(t, "未提供失败原因")
+		failStep(catDB, agentStore, t.FlowID, step, "L1 执行失败",
+			"L1 执行端失败："+note, l1FailureDetail(extra, pr, destHome), cred, l1ResultDiags(t))
+		return
+	}
+
+	// ===== done：与 L0 收口约定的 svc verify 段逐字同口径 =====
+	detail := map[string]any{
+		"dest_home": destHome, "conn": credState(cred), "target": cred.target(),
+		"rc": pr.RC, "timed_out": pr.TimedOut,
+		"tasks": compactTasks(pr.Tasks), "recap": pr.Recap,
+		"recap_line": recapLine(pr.Recap, pr.RecapSeq),
+		"phases":     phases, "attempt": t.Attempt,
+		"evidence": execEvidence(pr),
+	}
+	if pr.TimedOut {
+		detail["attempts"] = endAttempt("timeout_run", fmt.Sprintf("playbook 超过 %ds 未返回", budgetSec(pbBudget)))
+		fail(fmt.Sprintf("%s playbook 超过 %ds 未返回（平台已终止）", sp.Title, budgetSec(pbBudget)), detail,
+			withPortSource(cred, []diag{fatalDiag("ansible_phase_timeout",
+				fmt.Sprintf("%s playbook 超过 %ds 未返回", sp.Title, budgetSec(pbBudget)),
+				"目标机负载过高或停进程等待卡住；核对目标机后点「↻ 重试该步」")}))
+		return
+	}
+	if pr.RC != 0 {
+		failText := taskFirstFailureText(pr.Tasks)
+		if strings.TrimSpace(failText) == "" {
+			failText = pr.Output
+		}
+		d := classifySvcFailure(failText, sp)
+		detail["attempts"] = endAttempt("fail", d.Message)
+		fail(sp.Title+"失败："+d.Message+"（rc="+fmt.Sprint(pr.RC)+"）", detail,
+			withPortSource(cred, []diag{d}))
+		return
+	}
+
+	setPhase("verify")
+	extraOut, ds := sp.Verdict(pr)
+	if f := firstFatal(ds); f != nil {
+		detail["attempts"] = endAttempt("fail", f.Message)
+		fail(f.Message, detail, withPortSource(cred, ds))
+		return
+	}
+	if sp.PostOK != nil {
+		// service_execute 的维护态登记（stop→stopped / start|restart→running）：
+		// 心跳消失是维护态的预期表现，不算失联。登记失败只加 warn，不改判成功
+		ds = append(ds, sp.PostOK(catDB, t.FlowID)...)
+	}
+
+	checkLine, _ := extraOut["verify_line"].(string)
+	if checkLine == "" {
+		checkLine = svcCheckLine(pr)
+	}
+	reason := fmt.Sprintf("ansible %s完成 目标=%s 家目录=%s", sp.Title, cred.target(), destHome)
+	if checkLine != "" {
+		reason += " 核对=" + checkLine
+		detail["verify_line"] = checkLine
+	}
+	if n := countWarn(ds); n > 0 {
+		reason += fmt.Sprintf(" ⚠ %d 项待复核（见步骤告警）", n)
+	}
+	detail["attempts"] = endAttempt("ok", reason)
+
+	// verdict 产物并回证据（预检结论 pre / 核对行 verify_line）：confirm_upgrade 靠
+	// preflight_upgrade 事件里的 pre 字段摊开升级影响——缺了它人工确认卡就开天窗
+	for k, v := range extraOut {
+		extra[k] = v
+	}
+	extra["detail"] = detail
+	extra["task_total"] = len(pr.Tasks)
+	extra["verify_line"] = checkLine
+	extra["diagnosis"] = diagJSON(ds)
+
+	// B4b-4：升级取包留痕（同 install 的 runner-resolve 口径）——L1 执行进程无 DB，
+	// 事件由对账桥在 L0 侧落库（tag/sha256/sha_verified 来自 runner 结构化回执）
+	if t.Kind == "upgrade_agent" {
+		recPkg := storepkg.PackageDownloadRow{
+			Caller:     "runner:" + t.ID,
+			ResourceID: flowResourceID(catDB, t.FlowID),
+			Source:     "runner-resolve",
+			Note:       "L1 runner 升级就近取包，事件由对账桥代记",
+		}
+		if v, ok := extra["tag"].(string); ok {
+			recPkg.Tag = v
+		}
+		if v, ok := extra["sha256"].(string); ok {
+			recPkg.SHA256 = v
+		}
+		if v, ok := extra["sha_verified"].(bool); ok {
+			recPkg.Verified = v
+		}
+		_ = catDB.RecordPackageDownload(recPkg)
+	}
+
+	if msg := autoReportStep(catDB, agentStore, t.FlowID, t.StepID, reason, extra); msg != "" {
+		failStep(catDB, agentStore, t.FlowID, step, sp.Title+"回报被拒", sp.Title+"回报被拒："+msg, detail,
+			cred, []diag{fatalDiag(sp.FailCode+"_report_rejected", sp.Title+"回报被拒："+msg,
+				"步骤可能已被人工重置；点「↻ 重试该步」重新执行")})
+		return
+	}
+	addAudit(sp.Audit, flowResourceID(catDB, t.FlowID), "接入中心", reason)
 }
 
 // l1FailureDetail 失败回执的证据整形：与进程内失败事件的 detail 同形

@@ -937,6 +937,13 @@ function submitOnboardNew() {
   var kr = document.querySelector('input[name="ob-kind"]:checked');
   if (kr) kind = kr.value;
 
+  // 凭据必须在 renderOverlay 之前读走：预演页会整体替换 overlay 的 DOM，
+  // 之后 ob-ssh-* 三个输入框已不存在，再读只会拿到空串——
+  // 表现是"我填了账号密码，平台却按未填凭据回落人工模式"，且全程无任何提示。
+  var sshPort = parseInt(obVal('ob-ssh-port'), 10) || 22;
+  var sshUser = obVal('ob-ssh-user');
+  var sshPass = obVal('ob-ssh-pass');
+
   // —— 预演回调：提交前先展示「接入影响摘要」，用户核对后确认才真正起流水线 ——
   // 对齐前端效果设计第3章「三步向导 → 预演影响 → 确认提交」：不在摘要阶段就发指令。
   var abilNames = [];
@@ -981,8 +988,8 @@ function submitOnboardNew() {
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">目标类型</td><td style="padding:6px 8px">' + obEscape(kind === 'docker' ? 'Docker 容器' : '真实主机') + '</td></tr>';
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">采集模式</td><td style="padding:6px 8px">' + obEscape(modeName) + '</td></tr>';
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">采集能力</td><td style="padding:6px 8px">' + (abilNames.length ? abilNames.join(' · ') : '<span style="color:var(--muted)">（地基能力）</span>') + '</td></tr>';
-    var sshp = parseInt(obVal('ob-ssh-port'), 10) || 22;
-    h += '<tr><td style="padding:6px 8px;color:var(--muted)">SSH 连接</td><td style="padding:6px 8px">' + obEscape(obVal('ob-ssh-user') || '(未填)') + ' @ 端口 ' + sshp + (obVal('ob-ssh-pass') ? '（已填密码）' : '（未填密码 → 人工执行回馈模式）') + '</td></tr>';
+    var sshp = sshPort;
+    h += '<tr><td style="padding:6px 8px;color:var(--muted)">SSH 连接</td><td style="padding:6px 8px">' + obEscape(sshUser || '(未填)') + ' @ 端口 ' + sshp + (sshPass ? '（已填密码）' : '（未填密码 → 人工执行回馈模式）') + '</td></tr>';
     // 四要素：影响目标 / 理论频次 / 网络要求 / 回退方式（设计稿 6.2 屏幕① 原文四问）
     h += '<tr><td style="padding:6px 8px;color:var(--muted)">影响目标</td><td style="padding:6px 8px">'
       + picked.length + ' 台主机 · 新增采集目标 <b>' + obWantTargets + '</b> 个</td></tr>';
@@ -1015,7 +1022,8 @@ function submitOnboardNew() {
     return h;
   }, true);
   // 记住本次选择，供 doSubmitOnboardNew 二次采集
-  window.__obPending = { picked: picked, mode: mode, abilities: abilities, params: collected.params, kind: kind };
+  window.__obPending = { picked: picked, mode: mode, abilities: abilities, params: collected.params, kind: kind,
+    ssh_port: sshPort, ssh_user: sshUser, ssh_pass: sshPass };
 }
 
 function doSubmitOnboardNew() {
@@ -1026,9 +1034,7 @@ function doSubmitOnboardNew() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       resources: p.picked, mode: p.mode, abilities: p.abilities, params: p.params,
-      ssh_port: parseInt(obVal('ob-ssh-port'), 10) || 0,
-      ssh_user: obVal('ob-ssh-user'),
-      ssh_password: obVal('ob-ssh-pass'),
+      ssh_port: p.ssh_port, ssh_user: p.ssh_user, ssh_password: p.ssh_pass,
       target_kind: p.kind
     })
   }).then(function (r) { return r.json(); }).then(function (d) {

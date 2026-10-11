@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redis 远程采集接入 · 闭环验证报告</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --border:#e4e7ec; --text:#1f2937; --muted:#6b7280;
+    --ok:#0f7b4f; --okbg:#e8f6ef; --fail:#b42318; --failbg:#fdecea; --warn:#92400e; --warnbg:#fef3c7;
+    --info:#1d4ed8; --infobg:#e8eefc; --code:#f3f4f6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 22px 80px}
+  h1{font-size:26px;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:26px}
+  h2{font-size:19px;margin:38px 0 14px;padding-left:10px;border-left:4px solid #1f2937}
+  h3{font-size:15px;margin:22px 0 8px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin:12px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;background:var(--card);
+    border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:10px 0}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+  th{background:#f0f2f5;font-weight:600;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code{background:var(--code);padding:1px 5px;border-radius:4px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+  pre{background:#0f172a;color:#e5e7eb;padding:12px 14px;border-radius:8px;overflow:auto;font-size:12.5px;line-height:1.55}
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .t-ok{background:var(--okbg);color:var(--ok)}
+  .t-fail{background:var(--failbg);color:var(--fail)}
+  .t-warn{background:var(--warnbg);color:var(--warn)}
+  .t-info{background:var(--infobg);color:var(--info)}
+  .muted{color:var(--muted)}
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:6px 14px;font-size:13.5px}
+  .kv b{color:var(--muted);font-weight:600}
+  ol,ul{padding-left:22px;margin:8px 0}
+  li{margin:4px 0}
+  .banner{background:#fff4f2;border:1px solid #f6c9c2;border-left:5px solid var(--fail);border-radius:8px;padding:14px 18px;margin:16px 0}
+  .banner.good{background:#f0f9f4;border-color:#bfe3cd;border-left-color:var(--ok)}
+  .banner b{color:var(--fail)}
+  .banner.good b{color:var(--ok)}
+  .num{display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1f2937;color:#fff;
+    font-size:12px;align-items:center;justify-content:center;margin-right:6px;flex:0 0 auto}
+  .fnd{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;margin:12px 0}
+  .fnd h3{margin-top:0;display:flex;align-items:center;gap:6px}
+  .fnd .ev{font-size:13px;color:var(--muted);margin-top:8px}
+  .fnd .ev b{color:var(--text)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Redis 远程采集接入 · 闭环验证报告</h1>
+<div class="sub">
+  验证环境：本地 Docker 演示环境（L0 控制台 :8080 / VictoriaMetrics :8428）　·　
+  操作方式：浏览器自主操作 UI + 后端取证　·　流水线编号：<code>flow 7</code>（remote 模板）　·　
+  报告版本：v3（B3 + B2 修复后复验）
+</div>
+
+<div class="banner good">
+  <b>结论：数据面断点 B3 已修复，Redis 指标成功入链，闭环已闭上。</b><br>
+  v1 报告的核心断点（平台把 <code>redis_probe</code> 当一等能力下发、SAgent 数据面未实现、静默丢弃）
+  已修复：SAgent 新增 <code>redis_probe</code> 运行时，从 L0 插件超市拉取 <code>redis-exporter</code>
+  并按 sha256 校验后托管拉起。复验证据：配置版本 <code>cfg-554</code> 含 Redis 目标 → 采集机
+  <code>redis_probe 托管目标已生效（active 1 个）</code> → VictoriaMetrics 中
+  <code>redis_up{remote_resource_id="ip-10-20-0-15"}=1</code>，Redis 序列共 <b>329</b> 条。
+</div>
+
+<div class="banner good">
+  <b>B2（目标绑定）已修复并复验通过。</b><br>
+  新增 <code>flowRun.bindAgent()</code> 让「写库 + 回填内存 <code>r.agentID</code>」一次写穿，
+  <code>collect_params</code> 再以库为准兜底——新建流水线<b>首轮</b>即把采集目标绑到采集机，
+  无需再"人工删行重跑"。回归测试 <code>TestAdvanceFlowBindsTargetToCollectorInSingleRun</code> 通过，
+  运行态 <code>flow 8</code> 复验：目标 <code>id=6</code> 落库 <code>agent_id=order.prod.mysql.proxy-03</code>（采集机）。
+</div>
+
+<div class="banner">
+  <b>但平台侧的 B1 与流程语义（L1–L4）、体验（U1–U4）仍未收口。</b><br>
+  数据面通了、目标绑对了，不代表接入流程通了：<code>flow 7</code> 的状态至今仍是 <code>blocked</code>，
+  探路仍在 L0 侧执行（B1）——流程本身仍走不到终点。
+  换言之——<b>本次指标能采到，靠的是配置正确落地，而不是流程本身跑通</b>。
+</div>
+
+<h2>一、闭环全链路走查</h2>
+
+<table>
+<thead><tr><th>#</th><th>环节</th><th>结果</th><th>取证</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>UI 新建接入（接入中心 → ➕ 新建接入）</td><td><span class="tag t-ok">ok</span></td>
+    <td>创建 <code>flow 7</code>，模板 remote，13 步；资源 <code>ip-10-20-0-15</code>，能力 <code>redis_probe</code>+<code>host_metrics</code></td></tr>
+<tr><td>2</td><td>pick_object 资源对象就绪</td><td><span class="tag t-ok">ok</span></td>
+    <td>台账凭据 <code>deploy@10.20.0.15:22</code>，<code>cred_state.valid=true</code></td></tr>
+<tr><td>3</td><td>pick_proxy 自动挑承载采集机</td><td><span class="tag t-ok">ok</span></td>
+    <td>选中 <code>order.prod.mysql.proxy-02</code>（池 cn-east，承载 0 个目标）</td></tr>
+<tr><td>4</td><td>collect_params 建采集目标</td><td><span class="tag t-ok">ok</span></td>
+    <td>targets 行 <code>ip-10-20-0-15-redis</code>，参数 address/port=6379/mode=single</td></tr>
+<tr><td>5</td><td>preflight_host 采集机探路</td><td><span class="tag t-fail">fail</span></td>
+    <td>10s 后 <code>联通性测试失败：SSH 连接超时</code>，fatal <code>ssh_timeout</code></td></tr>
+<tr><td>6</td><td>preflight_remote 远程可达性探路</td><td><span class="tag t-fail">fail</span></td>
+    <td>走人工回报路径，无人工回报 → <code>无响应 上限 3600s，已自动重试 0 次</code></td></tr>
+<tr><td>7</td><td>人工强制通过两道门禁（留痕）</td><td><span class="tag t-warn">forced</span></td>
+    <td>审计留痕 2 条，理由写入 <code>onboard_event.detail.forced=true</code></td></tr>
+<tr><td>8</td><td>sync_config 生成并下发配置</td><td><span class="tag t-ok">ok</span></td>
+    <td>平台报 <code>期望配置已生成（cfg-554）</code>，配置体含 <code>plugin: redis_probe</code> 目标</td></tr>
+<tr><td>9</td><td>采集机拉取并应用配置</td><td><span class="tag t-ok">ok</span></td>
+    <td>心跳回写 <code>cfg_effective=cfg-554</code>；<code>agent_config</code>（proxy-02）内容含 Redis 目标：
+    <code>address=10.20.0.15 / port=6379 / mode=single / desired_state=active</code></td></tr>
+<tr><td>10</td><td>SAgent 数据面应用目标</td><td><span class="tag t-ok">ok</span></td>
+    <td><code>redis_probe 托管目标已生效（active 1 个 / standby 预置 0 个）</code>，redis_exporter 进程拉起</td></tr>
+<tr><td>11</td><td>verify_probe / observe_collect</td><td><span class="tag t-fail">死锁</span></td>
+    <td>两步仍停在 <code>running</code>，Agent 回报被后端持续拒绝（见 L2）；<b>不影响数据面采集</b></td></tr>
+<tr><td>12</td><td>VictoriaMetrics 指标入链</td><td><span class="tag t-ok">ok</span></td>
+    <td><code>redis_up{remote_resource_id="ip-10-20-0-15"}=1</code>；<code>count({__name__=~"redis_.*"})</code> = <b>329</b></td></tr>
+</tbody>
+</table>
+
+<div class="card">
+<h3 style="margin-top:0">对照组：同一套链路的 mysql_probe 是通的</h3>
+<div class="kv">
+  <b>采集目标</b><span><code>order.prod.mysql.db-01 / db-02</code>（owner=proxy-01，含 preferred_owner 与 candidates 池）</span>
+  <b>指标入链</b><span><code>mysql_exporter_collector_success</code>、<code>mysql_global_status_*</code> 等序列在 VM 中存在</span>
+  <b>采集机抓取</b><span><code>up{job="sagent",instance="sagent-proxy-2:19090"}=1</code></span>
+</div>
+<p class="muted" style="margin:10px 0 0">
+说明「配置下发 → 采集机应用 → 指标入链」这条管子本身是通的；Redis 采不到不是链路问题，是 Redis 这一条<b>根本没接到管子上</b>。
+</p>
+</div>
+
+<h2>二、发现的问题</h2>
+
+<h3>阻断级（不修就无法闭环）</h3>
+
+<div class="fnd">
+<h3><span class="num">B1</span>探路步骤在 L0 进程内执行，而 L0 到被管网段没有路由</h3>
+<p><code>preflight_host</code> 与 <code>preflight_remote</code> 都在 L0 进程内执行（前者走本机 ansible，后者走「执行包 + 人工回报」）。
+但 L0 只挂在 <code>l0-net</code>，采集机与目标在 <code>l1-net</code>，两侧无路由——</p>
+<pre>$ docker exec l0-console ansible -i inv.ini l0node -m ping
+l0node | UNREACHABLE! => {"msg": "Failed to connect to the host via ssh:
+  ssh: connect to host 10.20.0.15 port 22: Operation timed out"}
+
+# 采集机同样不可达
+l0node | UNREACHABLE! => {"msg": "... connect to host 10.20.0.3 port 22: Operation timed out"}</pre>
+<p class="ev"><b>后果：</b>远程采集在这个环境下 100% 卡在探路，且 <code>preflight_remote</code> 会先傻等 3600s。
+探路按设计就该在"真正执行采集的那一侧"跑（remote.yaml 注释里也这么写），即需要把探路搬到 L1 侧执行端——当前未实现。</p>
+</div>
+
+<div class="fnd">
+<h3><span class="num">B2</span>采集目标被绑到"资源"而不是"采集机"，采集机永远拿不到这条目标　<span class="tag t-ok">已修复</span></h3>
+<p>新建流水线的<b>第一轮推进</b>里，<code>pick_proxy</code> 选定采集机后只写了 <code>flow.agent_id</code>，没有同步回填内存里的 <code>run.agentID</code>；
+而紧随其后的 <code>collect_params</code> 正是用 <code>run.agentID</code> 建目标，于是拿到的还是水合时的旧值 <code>flow.ResourceID</code>。</p>
+<pre>onboard_atoms.go:105-111   run.agentID = flow.AgentID；为空则回落 flow.ResourceID  ← 整轮只水合这一次
+onboard_atoms.go:582 / 612 pickCollectorAgent: catDB.UpdateFlowAgent(...)  ← 只改库，没改 run.agentID
+onboard_atoms.go:736       AgentID: r.agentID                             ← collect_params 用的是内存值</pre>
+<p class="ev"><b>实测：</b>首次 <code>collect_params</code> 落库的 <code>agent_id = ip-10-20-0-15</code>（资源 ID），
+不是 <code>order.prod.mysql.proxy-02</code>（采集机）。而 <code>syncAgentConfig</code> 是按 <code>agent_id</code> 取目标，
+所以采集机那一版配置里<b>根本不含</b>这条 Redis 目标（当时配置停在 cfg-214，与接入前完全一致）。
+人工删掉该行、重跑 <code>collect_params</code> 后 <code>agent_id</code> 才变成 <code>order.prod.mysql.proxy-02</code>，配置随之推进到 cfg-554 —— 反向印证了这是"同一轮内读到旧值"。</p>
+
+<p><b>修复（2026-10-07）：库与内存一次写穿。</b>新增 <code>flowRun.bindAgent()</code>，把「写库」和「回填 <code>r.agentID</code>」收敛成一个动作，
+<code>pickCollectorAgent</code> 的四处绑定（边缘模式 / 已选定 / 池内无健康采集机回落 / 自动挑机）全部改走它；
+<code>collect_params</code> 开头再以库为准兜一次底（<code>GetFlow</code> 读到非空 <code>agent_id</code> 就覆盖内存值），
+即便将来新增的原子能力在同一轮内改绑承载机，也不会再读到旧值。</p>
+<pre>onboard_atoms.go  func (r *flowRun) bindAgent(catDB, agentID) { r.agentID = agentID; catDB.UpdateFlowAgent(...) }
+onboard_atoms.go  atomCollectParams 开头：if f := GetFlow(...); f.AgentID != "" { r.agentID = f.AgentID }  ← 兜底</pre>
+
+<p class="ev"><b>回归测试：</b><code>TestAdvanceFlowBindsTargetToCollectorInSingleRun</code> —— 构造 <code>flow.AgentID</code> 为空的场景，
+单次 <code>advanceFlow</code> 连跑 <code>pick_proxy</code> → <code>collect_params</code>，断言目标 <code>AgentID</code> 落在采集机、且 <code>flow.agent_id</code> 同步。</p>
+<p class="ev"><b>运行态复验（新流程首轮，不经人工干预）：</b>新建 <code>flow 8</code>（remote / redis_probe，资源 <code>ip-10-40-0-88</code>，起始 <code>flow.agent_id</code> 为空），
+<code>pick_proxy</code> 自动挑中负载最低的 <code>order.prod.mysql.proxy-03</code>，紧随其后的 <code>collect_params</code> 建出的目标
+<code>id=6 ip-10-40-0-88-redis</code> 落库 <code>agent_id = order.prod.mysql.proxy-03</code>（采集机），
+<b>不再是资源 ID</b> —— 首轮即正确，无需再"删行重跑"。</p>
+<pre>$ psql -c "SELECT id,name,agent_id,resource_id,flow_id FROM targets"
+ id |        name         |         agent_id          |   resource_id   | flow_id
+  6 | ip-10-40-0-88-redis | order.prod.mysql.proxy-03 | ip-10-40-0-88  |       8</pre>
+</div>
+
+<div class="fnd">
+<h3><span class="num">B3</span>数据面没有 redis_probe 实现，配置被静默丢弃　<span class="tag t-ok">已修复</span></h3>
+<p>原实现里 SAgent 的平台配置应用只认 <code>mysql_probe</code>，其余插件一律「跳过并告警」：</p>
+<pre>sagent/config_apply.go（修复前）
+  if t.Plugin != constants.PluginNameMySQLProbe {
+      app.logWarn("托管目标 %q 的插件类型 %q 本版不支持，已跳过（不影响其他目标）", ...)
+      continue
+  }</pre>
+<p>修复前实测采集机日志（<code>l1-sagent-proxy-2</code>）：</p>
+<pre>[WARN] 托管目标 "ip-10-20-0-15-redis" 的插件类型 "redis_probe" 本版不支持，已跳过（不影响其他目标）
+[INFO] mysql_probe 托管目标已生效（active 0 个 / standby 预置 2 个）   ← redis 连统计里都不出现</pre>
+<p class="ev"><b>为什么这是最危险的一条：</b>平台侧 <code>sync_config</code> 报 <b>ok</b>，向导把 Redis 列为可选能力，
+插件目录里 Redis 的 params.yaml / dashboards / alerts 一应俱全 —— 每一层都"看起来支持"，
+只有数据面把它丢了。<b>配置成功 ≠ 采到数据</b>，而界面没有任何一处把这个差异暴露给用户。
+本条已修复，修复内容与复验证据见<b>第三节</b>。</p>
+</div>
+
+<h3>逻辑级（状态机与流程语义）</h3>
+
+<div class="fnd">
+<h3><span class="num">L1</span>门禁失败后，不受依赖约束的步骤照常执行，业务对象被误标成平台设备</h3>
+<p><code>preflight_host</code> 已 fail，但 <code>register_platform_device</code> 仍落 <b>ok</b>、<code>self_metrics</code> 落 <b>running</b>、
+<code>install_agent</code> 落 <b>skipped</b>。原因是这三步的 <code>requires</code> 链不经过探路门禁，
+所以"前置探路失败"对它们不构成阻断。</p>
+<p>更实质的问题是 <code>register_platform_device</code> 无条件改写 <code>r.resource</code> 的角色：</p>
+<pre>onboard_atoms.go:771   catDB.UpdateResourceRole(r.resource.ID, "platform_device")</pre>
+<p>而远程模式下 <code>r.resource</code> 是<b>被采对象</b>（业务资源），不是采集机。实测资源 <code>ip-10-20-0-15</code>
+的 <code>role</code> 已从 <code>business</code> 变成 <code>platform_device</code> —— 一个业务对象被登记成了采集平台自己的设备。</p>
+</div>
+
+<div class="fnd">
+<h3><span class="num">L2</span>一步 blocked 让整条流水线对 Agent"关门"，running 步骤永久死锁</h3>
+<p><code>pick_version</code> 因为等不到探路实测的 OS/架构而落 <code>blocked</code>，
+<code>computeFlowStatus</code> 于是把整条流水线判成 <code>status=blocked</code>；
+而 Agent 自动回报的入口只认 <b>status=running</b> 的流水线：</p>
+<pre>onboard_api.go:780-795
+  flows, _ := catDB.ListRunningFlows()
+  ... if f == nil { "该 agent 无待回报的 running 流水线" }</pre>
+<p>实测采集机日志每 10 秒刷三条被拒记录，无限循环：</p>
+<pre>[INFO] [l0] 自动回报暂不被接受（self_metrics）：该 agent 无待回报的 running 流水线
+[INFO] [l0] 自动回报暂不被接受（preflight_ability）：该 agent 无待回报的 running 流水线
+[INFO] [l0] 自动回报暂不被接受（config_applied）：该 agent 无待回报的 running 流水线</pre>
+<p class="ev"><b>后果：</b><code>self_metrics</code> / <code>verify_probe</code> / <code>observe_collect</code> 三个步骤停在 running，
+既等不到回报、又不会超时判死（它们不在平台托管路径上，规格回落 default），形成静默死锁。</p>
+</div>
+
+<div class="fnd">
+<h3><span class="num">L3</span>超时策略表里存在"死配置"：写了但永远不会生效</h3>
+<p><code>onboard_config.json</code> 给 <code>preflight_ability</code> 配了 <code>run_sec=300 / idle_sec=120 / retry=1</code>，
+但超时规格的选取逻辑是：平台托管或 Agent 域步骤才按 步骤ID/atom 取规格，其余一律回落 default。</p>
+<pre>onboard_timeout.go:475-483
+  if platformManaged(detail) || step.Scope == "agent" { return timeoutSpecForStep(cfg, step.ID, step.Atom) }
+  return timeoutSpecFor(cfg, "")     // ← default 3600s / retry 0</pre>
+<p>而 <code>preflight_ability</code> 既非平台托管、scope 也不是 agent，于是实测报出：
+<code>步骤超时（无响应 上限 3600s），已自动重试 0 次仍未完成</code> —— 配的 300s/重试1次<b>一次都没用上</b>。</p>
+</div>
+
+<div class="fnd">
+<h3><span class="num">L4</span><code>sync_config</code> 报 ok，但配置里可能没有本次接入的任何东西</h3>
+<p>第一次强制通过两道门禁后，<code>sync_config</code> 返回 <code>期望配置已生成（cfg-214）</code> ——
+版本号与接入前<b>完全相同</b>，因为当时 Redis 目标被绑在错误的 agent 上，渲染出的配置体与旧版逐字一致。
+步骤状态是 ok，但"这次接入"没有在配置里留下任何痕迹。步骤成功 ≠ 内容正确。</p>
+</div>
+
+<h3>易用性与配置级</h3>
+
+<div class="fnd">
+<h3><span class="num">U1</span>向导不提示"该采集能力数据面尚未实现"</h3>
+<p>采集模式、采集能力、采集参数三处都把 Redis 当作一等信息展示，插件目录里 Redis 的
+params.yaml / dashboards / alerts 全都齐全，用户按界面提示一路走完，
+最后只能在<b>采集机日志</b>里发现 <code>本版不支持，已跳过</code>。平台侧无任何前置提示。</p>
+</div>
+
+<div class="fnd">
+<h3><span class="num">U2</span>探路失败的排查提示指向错误方向</h3>
+<p>界面给的是 <code>目标机不可达或防火墙丢包；端口不对也可能表现为挂起超时</code>。
+但在远程采集场景下，更可能的真相是"L0 本来就没有到该网段的路由（探路应由采集机侧发起）"。
+运维会照提示去查目标机防火墙，方向从一开始就错了。</p>
+</div>
+
+<div class="fnd">
+<h3><span class="num">U3</span>「强制继续（需留痕）」的例外通道在无头/自动化环境不可用</h3>
+<p><code>obForce</code> 用 <code>window.prompt</code> 收理由，Playwright 等自动化环境默认 dismiss 弹窗，
+导致这条"救急通道"在最需要它的场景（批量脚本、CI、无头浏览器）里点不动。本次只能绕到后端 API 完成留痕。</p>
+<pre>static/js/onboard.js:3439-3448
+  function obForce(id, step) { var reason = prompt('强制继续需留痕。请填写理由（将写入审计日志）：'); ... }</pre>
+</div>
+
+<div class="fnd">
+<h3><span class="num">U4</span>采集目标落库口径不一致：<code>tenant_id</code> 为空</h3>
+<p>接入流水线创建的 Redis 目标 <code>tenant_id</code> 为空，而历史 mysql 目标为 <code>'default'</code>。
+多租户隔离（D3）全链路依赖该字段，空值会走 IFNULL 兜底，但落库口径不一致本身是隐患。
+同一条目标的 <code>region</code> / <code>candidates_json</code> / <code>preferred_owner</code> 也全为空，
+与采集机池化（漂移/回切）所需的字段不齐。</p>
+</div>
+
+<h2>三、B3 修复：SAgent 数据面接入 redis-exporter</h2>
+
+<div class="banner good">
+<b>修复方向（按用户裁定）：SAgent 不主动监控任何组件，中间件指标一律由第三方 exporter 负责采集。</b>
+SAgent 只做三件事——把 exporter 二进制取到本地并校验、把 exporter 进程拉起来、把 exporter 暴露的
+<code>/metrics</code> 按目标编排并抓入链路。Redis 指标因此由 <code>redis-exporter</code> 负责，SAgent 不解析 Redis 协议。
+</div>
+
+<h3>3.1 改动清单</h3>
+<table>
+<thead><tr><th>文件</th><th>类型</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>sagent/internal/constants/constants.go</code></td><td><span class="tag t-info">改</span></td>
+    <td>新增 <code>PluginNameRedisProbe="redis_probe"</code>、<code>DefaultRedisExportBin="plugins/redis_exporter/redis_exporter"</code></td></tr>
+<tr><td><code>sagent/internal/config/config.go</code></td><td><span class="tag t-info">改</span></td>
+    <td>新增 <code>RedisProbeConfig</code> / <code>RedisTarget</code>，并纳入 <code>EnabledPluginNames()</code></td></tr>
+<tr><td><code>sagent/internal/plugin/builtin/redis_probe.go</code></td><td><span class="tag t-ok">新增</span></td>
+    <td>探针插件：拉起 <code>redis_exporter</code> 子进程（<code>--web.listen-address=127.0.0.1:19105</code>），多目标抓取循环</td></tr>
+<tr><td><code>sagent/redis_managed.go</code></td><td><span class="tag t-ok">新增</span></td>
+    <td>托管运行时：<code>Apply()</code> reconcile、standby 预置就绪、<code>ensureBinary()</code> 三步取包</td></tr>
+<tr><td><code>sagent/mysql_managed.go</code></td><td><span class="tag t-info">改</span></td>
+    <td>把取包逻辑抽成公共函数 <code>fetchPluginManifest</code> / <code>downloadPluginPackage</code>，Redis 复用；
+        新增 <code>redis_probe → redis-exporter</code> 包名映射</td></tr>
+<tr><td><code>sagent/config_apply.go</code></td><td><span class="tag t-info">改</span></td>
+    <td><code>targets</code> 段新增 <code>case PluginNameRedisProbe</code> 解析与校验（address/resource_id 必填、desired_state 仅 active/standby），并接入 Apply</td></tr>
+<tr><td><code>sagent/main.go</code></td><td><span class="tag t-info">改</span></td>
+    <td>新增 <code>redisRuntime</code> 字段与初始化；<code>observedTargetsSnapshot()</code> 聚合 Redis 目标状态上报心跳</td></tr>
+<tr><td><code>l0-console/data/plugin-packages/redis-exporter/1.66.0/redis_exporter</code></td><td><span class="tag t-ok">新增</span></td>
+    <td>L0 插件超市中的 redis-exporter 二进制（linux/arm64，8.7 MB）</td></tr>
+</tbody>
+</table>
+
+<h3>3.2 就近取包：SAgent 如何拿到 exporter</h3>
+<p><code>ensureBinary()</code> 按三步解析——命中即用 → 不一致回源 L0 重建 → 重建后仍校验不过才拒绝。
+缓存 sha 与权威不一致时<b>不会</b>直接拒绝，而是回源 L0 重新下载重建（这才是"就近取包"的本意：
+省掉大文件下载，而不是拿缓存当终审）；只有回源下载后 sha256 校验仍不过才拒绝拉起，不降级用未校验二进制：</p>
+<pre>① 静态路径  plugins/redis_exporter/redis_exporter  → 命中即用
+② 取权威清单 GET /api/plugin-packages/redis-exporter/manifest （L0 权威 sha256，小文件）
+   本地缓存  data/packages/plugins/redis-exporter/&lt;ver&gt;/  → sha 与权威一致即用（省下载）
+③ 回源 L0   GET /api/plugin-packages/redis-exporter/download （下载 → sha256 校验 → 落缓存）
+           校验不过一律拒绝，不降级用未校验二进制</pre>
+
+<h3>3.3 复验证据（逐段可复核）</h3>
+
+<h3>① L0 插件超市提供包与权威签名</h3>
+<pre>$ curl -s http://localhost:8080/api/plugin-packages/redis-exporter/manifest
+{"ok":true,"name":"redis-exporter","version":"1.66.0","filename":"redis_exporter",
+ "sha256":"46695fe5c5a8f6a9293d3ac339ffa83165a6ff408c9d885d9f08480c71e94c54","size":8716440}</pre>
+
+<h3>② L0 下发的配置体含 Redis 目标（<code>agent_config</code> v554）</h3>
+<pre>$ psql -c "SELECT version,updated_at FROM agent_config WHERE agent_id='order.prod.mysql.proxy-02'"
+ order.prod.mysql.proxy-02 | 554 | 2026-10-07 09:06:37
+
+# content.targets 中的 redis_probe 条目：
+{"address":"10.20.0.15","desired_state":"active","id":5,
+ "params_json":"{\"address\":\"10.20.0.15\",\"interval\":\"30s\",\"mode\":\"single\",\"port\":\"6379\"}",
+ "plugin":"redis_probe","resource_id":"ip-10-20-0-15","target":"ip-10-20-0-15-redis"}</pre>
+
+<h3>③ 采集机 SAgent 取包 → 校验 → 拉起 → 目标生效</h3>
+<pre>$ docker logs l1-sagent-proxy-2 | grep -iE "redis|package-cache"
+[INFO] 插件包 redis-exporter v1.66.0 已入本地 package-cache（sha256 校验通过）
+plugin redis_exporter: starting data/packages/plugins/redis-exporter/1.66.0/redis_exporter \
+        [--web.listen-address=127.0.0.1:19105]
+[INFO] redis_probe started（bin=.../redis-exporter/1.66.0/redis_exporter, 1 targets）
+[INFO] redis_probe 托管目标已生效（active 1 个 / standby 预置 0 个）
+level=info msg="Redis Metrics Exporter v1.66.0 ... GOOS: linux GOARCH: arm64"</pre>
+
+<h3>④ 指标入链（VictoriaMetrics 查询）</h3>
+<pre>$ curl -s "http://localhost:8428/api/v1/query?query=count({__name__=~\"redis_.*\"})"
+→ 329
+
+$ curl -s "http://localhost:8428/api/v1/query?query=redis_up"
+redis_up{
+  remote_resource_id="ip-10-20-0-15", exported_resource_id="ip-10-20-0-15",
+  resource_id="sagent-proxy-2", resource_type="collector_proxy",
+  instance="sagent-proxy-2:19090", job="sagent", source="vmagent_pool"
+} = 1
+
+redis_connected_clients            = 1
+redis_memory_used_bytes            = 1243872
+redis_commands_processed_total     = 55</pre>
+<p class="muted" style="margin:6px 0 0">
+标签口径正确：<code>resource_id</code> 是承载采集机、<code>remote_resource_id</code> / <code>exported_resource_id</code>
+是被采 Redis 实例 —— 远程采集的"谁采的 / 采的谁"在指标上可区分。</p>
+
+<h3>3.4 修复前后对照</h3>
+<table>
+<thead><tr><th>观测点</th><th>修复前（v1）</th><th>修复后（v2）</th></tr></thead>
+<tbody>
+<tr><td>SAgent 对 redis 目标的处理</td><td><span class="tag t-fail">跳过并告警</span></td><td><span class="tag t-ok">active 1 个</span></td></tr>
+<tr><td>redis_exporter 进程</td><td>未拉起</td><td>v1.66.0 运行中（:19105）</td></tr>
+<tr><td>VictoriaMetrics redis 序列</td><td>0</td><td>329</td></tr>
+<tr><td>redis_up</td><td>无</td><td>1</td></tr>
+</tbody>
+</table>
+
+<h2>四、此前已确认修复生效的两项</h2>
+<div class="banner good">
+<b>1. 容器时区不一致（超时误判）已修复。</b>PG 与 l0-console 现均为 CST；
+接入步骤不再被"已等待 8h"当场判死 —— flow 7 的 <code>preflight_host</code> 在 <b>10 秒</b>内给出真实诊断
+<code>SSH 连接超时</code>（flow 3–6 当时报的是"无响应 上限 150s，已等待 8h0m"）。
+</div>
+<div class="banner good">
+<b>2. SSH 凭据在预演页丢失的问题已修复。</b>预演页渲染前先把 <code>ob-ssh-*</code> 的值读进变量再整体替换 DOM，
+提交时用变量回传；后端也补齐了"台账凭据为空时用向导值补全"的路径。
+实测 flow 7 <code>pick_object</code> 的 <code>cred_state.valid=true</code>，<code>deploy@10.20.0.15:22</code> 正常生效。
+</div>
+
+<h2>五、剩余问题与修复建议（按优先级）</h2>
+<ol>
+<li><b>B2 修 <code>run.agentID</code> 同步（最高优先）</b>：<code>pickCollectorAgent</code> 选定采集机后同时写 <code>r.agentID = rec</code>，
+并让 <code>collect_params</code> 兜底校验 <code>agent_id</code>。
+<b>状态：已修复并复验通过</b>（新增 <code>flowRun.bindAgent()</code> 库+内存一次写穿，<code>collect_params</code> 以库为准兜底；
+回归测试 <code>TestAdvanceFlowBindsTargetToCollectorInSingleRun</code> + 运行态 <code>flow 8</code> 首轮目标即绑采集机，
+详见第二节 B2 与第五节修复记录）。</li>
+<li><b>B1 探路下沉到 L1 执行端</b>：<code>preflight_host</code> / <code>preflight_remote</code> 应在"真正执行采集的那一侧"跑。
+在落地前，远程采集应在界面上明确标注"当前环境探路需 L1 侧执行"，而不是让用户等满 3600s。
+这也是 SPEC 里 B4b-2 的范围。</li>
+<li><b>L1 收紧依赖语义</b>：<code>register_platform_device</code> 应绑定到"承载采集机"而非被采资源；
+探路门禁失败时应阻断整条链，不应继续登记设备与下发自监控。</li>
+<li><b>L2 解耦 flow.status 与 Agent 回报</b>：回报准入应按"该步骤是否 running"判定，
+而不是整条流水线的 status；同时给非托管路径的 running 步骤补上超时兜底。
+<b>现状：数据面已通，但 <code>flow 7</code> 仍停在 <code>blocked</code>，接入流程在界面口径上"没走完"。</b></li>
+<li><b>L3/L4 一致性收口</b>：清理超时表里的死配置（或让 <code>specForEvent</code> 也按 atom 取值）；
+<code>sync_config</code> 应在配置内容未变化时明确提示"本次接入未产生配置变更"，而不是报一个看似成功的 ok。</li>
+<li><b>U1 能力实现状态可视化</b>：B3 已让 Redis 真正可采，但向导仍应展示"该能力数据面已实现"的状态，
+避免下一个未实现的插件重演"可选、可下发、可报成功、但采不到"。</li>
+<li><b>U2–U4 体验与口径</b>：探路失败提示补充"网络分区/路由"分支；
+<code>obForce</code> 改为页内表单（不依赖 <code>prompt</code>）；目标落库补齐 <code>tenant_id</code> / <code>region</code> /
+<code>preferred_owner</code> / <code>candidates_json</code> 字段（本次 redis 目标 <code>tenant_id</code> 仍为空）。</li>
+</ol>
+
+<h2>六、结论</h2>
+<div class="card">
+<table style="margin:0">
+<thead><tr><th>层</th><th>状态</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>数据面（B3）</td><td><span class="tag t-ok">已闭合</span></td>
+    <td>配置下发 → 取包校验 → exporter 拉起 → 指标入链，端到端打通，329 条 Redis 序列可查</td></tr>
+<tr><td>目标绑定（B2）</td><td><span class="tag t-ok">已闭合</span></td>
+    <td>库+内存一次写穿，首轮即把目标绑到采集机；回归测试 + 运行态 flow 8 复验通过</td></tr>
+<tr><td>探路执行侧（B1）</td><td><span class="tag t-fail">未闭合</span></td>
+    <td>探路仍在 L0 侧执行，需下沉到 L1 执行端；流程因此仍走不到终点</td></tr>
+<tr><td>流程语义（L1–L4）</td><td><span class="tag t-warn">未收口</span></td>
+    <td>依赖语义、回报准入、超时表、成功口径四处不一致</td></tr>
+<tr><td>体验与口径（U1–U4）</td><td><span class="tag t-warn">未收口</span></td>
+    <td>能力实现状态不透明、排查提示指向错误、例外通道依赖 prompt、落库字段不齐</td></tr>
+</tbody>
+</table>
+<p style="margin:14px 0 0">
+<b>一句话：</b>B3（数据面）与 B2（目标绑定）已闭合，Redis 指标可采、目标首轮即绑对采集机；
+剩下最硬的一条是 <b>B1</b>——探路仍在 L0 侧执行，<code>flow 7</code> 至今 <code>blocked</code> 就是证据。
+把 B1 修掉（探路下沉 L1 执行端），远程采集才算真正"走一遍就能通"。
+</p>
+</div>
+
+</div>
+</body>
+</html>

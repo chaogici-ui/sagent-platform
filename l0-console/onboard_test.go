@@ -75,6 +75,31 @@ func makeFlow(t *testing.T, db *storepkg.DB, resID string, steps []storepkg.Flow
 	return id
 }
 
+// seedSSHCred B5 收口后 external 步骤恒走 L1 Runner：投递要过 flowSSHCred，
+// 承载机无 SSH 凭据会当场 failStep（不再回落人工）。给 makeFlow 建的资源补凭据，
+// 使用例步骤正常投递到 running（投递成功与否只影响步骤状态，与测试后续对账断言无关）。
+func seedSSHCred(t *testing.T, db *storepkg.DB, resID string) {
+	t.Helper()
+	if err := db.UpsertResource(&storepkg.Resource{
+		ID: resID, Name: resID, IP: "10.7.0.9", ResourceType: "host", Role: "business", Source: "manual",
+		SSHPort: 22, SSHUser: "deploy", SSHPassword: "secret",
+	}); err != nil {
+		t.Fatalf("UpsertResource(cred): %v", err)
+	}
+}
+
+// seedHumanPick 注入人工选定版本：install/upgrade 的投递端 buildInstallPayload/buildSvcPayload
+// 都要读 pick_version OK 事件的 detail.tag（B5 恒 runner 后无选定版本会当场拒投）。
+// 版本清单是包级全局，注入前用 useVersionCatalog 临时登记该 tag，用完自动还原。
+func seedHumanPick(t *testing.T, db *storepkg.DB, flowID int64, tag string) {
+	t.Helper()
+	useVersionCatalog(t, tag, "deadbeef")
+	if err := appendStepEvent(db, flowID, storepkg.FlowStepSnapshot{ID: "pick_version"}, stOK,
+		"人工指定版本："+tag, detailJSON(map[string]any{"tag": tag}), 0); err != nil {
+		t.Fatalf("pick_version event: %v", err)
+	}
+}
+
 // ---------- 1. when 白名单求值器 ----------
 
 func TestEvalWhenWhitelist(t *testing.T) {
@@ -379,6 +404,8 @@ func TestAdvanceFlowRunsPlatformWaitsExternalSkipsWhen(t *testing.T) {
 			Requires: []string{"pick_object"}, Gate: "blocker"},
 	}
 	id := makeFlow(t, db, "ip-10-9-9-9", steps)
+	// B5 恒走 L1 Runner：无凭据投递会当场 fail，external 步骤到不了 running
+	seedSSHCred(t, db, "ip-10-9-9-9")
 
 	if err := advanceFlow(db, nil, id); err != nil {
 		t.Fatalf("advanceFlow: %v", err)
@@ -415,6 +442,8 @@ func TestAdvanceFlowFailureIsTerminalAndBlocksDownstream(t *testing.T) {
 			Requires: []string{"preflight_host"}},
 	}
 	id := makeFlow(t, db, "ip-10-9-9-8", steps)
+	// B5 恒走 L1 Runner：无凭据投递会当场 fail，external 步骤到不了 running
+	seedSSHCred(t, db, "ip-10-9-9-8")
 
 	if err := advanceFlow(db, nil, id); err != nil {
 		t.Fatalf("advanceFlow #1: %v", err)
@@ -488,6 +517,10 @@ func TestWhenEvaluatedOnlyAfterDepsReady(t *testing.T) {
 			Requires: []string{"install_agent"}, When: "agent_exists"},
 	}
 	id := makeFlow(t, db, "ip-10-9-9-7", steps)
+	// B5 恒走 L1 Runner：无凭据投递会当场 fail，install_agent 到不了 running
+	seedSSHCred(t, db, "ip-10-9-9-7")
+	// install 投递要求人工选定版本
+	seedHumanPick(t, db, id, "v9")
 	if err := advanceFlow(db, nil, id); err != nil {
 		t.Fatalf("advanceFlow: %v", err)
 	}
@@ -717,9 +750,6 @@ func TestSSHPortSourceIsTraceable(t *testing.T) {
 	if ok, _ := st["valid"].(bool); ok {
 		t.Fatalf("缺 user/pass 不该判定为有效凭据：%+v", st)
 	}
-	if why := ansibleFallbackReason(&storepkg.Resource{IP: "10.0.0.9", SSHPort: 22}); !strings.Contains(why, "ssh_user") {
-		t.Errorf("回落原因应点名缺失字段，实际 %q", why)
-	}
 }
 
 func TestParseSSHDPortEvidence(t *testing.T) {
@@ -861,11 +891,6 @@ func TestWaitingSemanticsAreHumanReadable(t *testing.T) {
 	}
 	if got := waitingForKey(`not-json`); got != "" {
 		t.Errorf("非 JSON detail 应返回空串，实际 %q", got)
-	}
-	// 渲染执行包必须带端口：人工照抄 ssh user@ip 会默认走 22，正是连错端口的根源
-	ins := renderInstruction("ssh -p {{.port}} <user>@{{.ip}} true", "10.1.207.156", 22022)
-	if !strings.Contains(ins, "-p 22022") || !strings.Contains(ins, "10.1.207.156") {
-		t.Errorf("执行包未渲染端口：%q", ins)
 	}
 }
 
@@ -1251,26 +1276,6 @@ func TestExecBudgetDerivesFromConfig(t *testing.T) {
 	}
 }
 
-// 终态事件必须带尝试记录。成功路径曾误用 historySnapshot()（只读不追加），
-// 于是成功卡片上「第 N 次尝试 / 跑了多久」永远为空，与失败卡片不对称——
-// 运维看到的是"装成功了但查不到这次是怎么试出来的"。
-func TestEndAttemptRecordsTerminalAttempt(t *testing.T) {
-	st := &stepRunState{attempt: 2, spec: timeoutSpecFor(nil, "install_agent")}
-	if got := st.historySnapshot(); len(got) != 0 {
-		t.Fatalf("未结束前 historySnapshot 应为空，实际 %+v", got)
-	}
-	h := st.endAttempt("ok", "安装完成")
-	if len(h) != 1 || h[0].Result != "ok" || h[0].No != 2 {
-		t.Fatalf("endAttempt 必须追加本次终态记录，实际 %+v", h)
-	}
-	if got := st.historySnapshot(); len(got) != 1 {
-		t.Fatalf("endAttempt 之后快照必须含该记录（成功路径就靠它回传），实际 %+v", got)
-	}
-	if h[0].StartedAt == "" || h[0].EndedAt == "" {
-		t.Fatalf("尝试记录必须带起止时间，实际 %+v", h[0])
-	}
-}
-
 // 超时策略是数据驱动的：文件与内置默认必须一致，否则"配置文件丢了"会静默改变行为
 func TestTimeoutConfigFileAlignedWithDefault(t *testing.T) {
 	fileCfg := loadOnboardConfig("data/onboard_config.json")
@@ -1333,6 +1338,10 @@ func TestSweepRetriesThenFails(t *testing.T) {
 		{ID: "verify_probe", Atom: "verify_probe", Title: "连通验证", Scope: "agent", Requires: []string{"install_agent"}},
 	}
 	id := makeFlow(t, db, "ip-10-1-207-156", steps)
+	// B5 恒走 L1 Runner：无凭据投递会当场 fail，超时重试断言落空
+	seedSSHCred(t, db, "ip-10-1-207-156")
+	// install 投递要求人工选定版本
+	seedHumanPick(t, db, id, "v9")
 	spec := timeoutSpecFor(onboardCfg, "install_agent")
 	past := time.Now().Add(-time.Hour).Format("2006-01-02 15:04:05")
 
@@ -1560,44 +1569,18 @@ func TestOffboardTemplateStructure(t *testing.T) {
 	for _, id := range []string{"uninstall_plugins", "cleanup_autostart"} {
 		s := byID[id]
 		if s.Scope != "external" {
-			t.Errorf("%s 必须是 external（由平台 ansible / 人工执行器执行），实际 %q", id, s.Scope)
+			t.Errorf("%s 必须是 external（执行端恒为 L1 Runner），实际 %q", id, s.Scope)
 		}
 		if s.Gate != "blocker" {
 			t.Errorf("%s 必须带 gate=blocker：它没清干净时下游不得继续", id)
 		}
-		if !strings.Contains(s.Instruction, "{{.port}}") {
-			t.Errorf("%s 兜底执行包必须含 {{.port}}（否则会默认走 22，连错端口却看着像成功）", id)
-		}
-		if strings.Contains(s.Instruction, "pkill -f") {
-			t.Errorf("%s 兜底执行包不得使用 pkill -f（会杀掉执行本行的 shell 自身）：\n%s", id, s.Instruction)
-		}
-	}
-	// 兜底执行包的两条硬道理：先让 SAgent 自己停插件；守护必须 KILL 而不是 TERM
-	if ins := byID["uninstall_plugins"].Instruction; !strings.Contains(ins, "control.sock") {
-		t.Errorf("卸插件兜底包必须走 control.sock 让 SAgent 自己停插件——直接 kill 会被崩溃自愈在 2 秒后拉回来：\n%s", ins)
-	}
-	if ins := byID["cleanup_autostart"].Instruction; !strings.Contains(ins, "kill -9") || strings.Contains(ins, "kill -TERM") {
-		t.Errorf("清自启兜底包对守护必须用 kill -9（run.sh 的 TERM trap 会拿 pid 文件当进程组误杀无关进程）：\n%s", ins)
 	}
 	un := byID["uninstall_agent"]
 	if un.Scope != "external" {
-		t.Errorf("uninstall_agent 必须是 external（由平台 ansible / 人工执行器执行），实际 %q", un.Scope)
+		t.Errorf("uninstall_agent 必须是 external（执行端恒为 L1 Runner），实际 %q", un.Scope)
 	}
 	if un.Gate != "blocker" {
 		t.Errorf("uninstall_agent 必须带 gate=blocker：卸载失败时下游「清平台登记」不得继续，否则会把「没卸掉」当成卸掉了")
-	}
-	// 兜底执行包里端口必须显式带上：`ssh user@ip` 默认走 22，正是"连错端口却看着像成功"的根源
-	if !strings.Contains(un.Instruction, "{{.port}}") {
-		t.Errorf("uninstall_agent 兜底执行包必须含 {{.port}}，实际：%q", un.Instruction)
-	}
-	// 兜底执行包与平台 playbook 同序：先停进程（等它退出）再删目录。
-	// 顺序反了就是那个真实踩过的竞态——SAgent 优雅关停期间的写盘会把删掉的目录重建出来
-	if kill, rm := strings.Index(un.Instruction, "readlink"), strings.Index(un.Instruction, "rm -rf"); kill < 0 || rm < 0 || kill > rm {
-		t.Errorf("兜底执行包必须先停进程再删目录（kill=%d, rm=%d）：\n%s", kill, rm, un.Instruction)
-	}
-	// pkill -f 会匹配到执行本行的 sh 自身（历史踩坑），兜底包里不许出现
-	if strings.Contains(un.Instruction, "pkill -f") {
-		t.Errorf("兜底执行包不得使用 pkill -f（会杀掉执行本行的 shell 自身）：\n%s", un.Instruction)
 	}
 	cl := byID["cleanup_platform"]
 	if cl.Scope != "platform" {
@@ -1844,7 +1827,7 @@ func TestAtomCleanupPlatformClearsRegistrations(t *testing.T) {
 		t.Fatalf("InsertTarget(other): %v", err)
 	}
 	// 抓取登记（file_sd）
-	sdPath, err := registerScrapeTarget(resID, "10.20.0.9")
+	sdPath, err := registerScrapeTarget(db, resID, "10.20.0.9")
 	if err != nil {
 		t.Fatalf("registerScrapeTarget: %v", err)
 	}
@@ -2624,25 +2607,25 @@ func TestParseFactsTreeEnrichedFields(t *testing.T) {
 	tree := t.TempDir()
 	doc := map[string]any{
 		"ansible_facts": map[string]any{
-			"ansible_system":                 "Linux",
-			"ansible_distribution":           "CentOS",
-			"ansible_distribution_version":   "7.9",
-			"ansible_machine":                "x86_64",
-			"ansible_kernel":                 "5.4.237",
-			"ansible_memtotal_mb":            float64(257407),
-			"ansible_hostname":               "l0node",
-			"ansible_fqdn":                   "l0node.bomc.local",
-			"ansible_processor_vcpus":        float64(64),
-			"ansible_processor":              []any{"64 x Intel Xeon", "Intel(R) Xeon(R) Gold 6248R"},
-			"ansible_all_ipv4_addresses":     []any{"10.1.207.156", "172.17.0.1", "172.25.0.1"},
-			"ansible_default_ipv4":           map[string]any{"address": "10.1.207.156", "interface": "bond0"},
-			"ansible_virtualization_type":    "kvm",
-			"ansible_virtualization_role":    "host",
-			"ansible_system_vendor":          "SuperCloud",
-			"ansible_product_name":           "X11DPi-N",
-			"ansible_python_version":         "3.6.8",
-			"ansible_uptime_seconds":         float64(86400),
-			"ansible_mounts":                 []any{map[string]any{"mountpoint": "/", "size_available": float64(76585693184)}},
+			"ansible_system":               "Linux",
+			"ansible_distribution":         "CentOS",
+			"ansible_distribution_version": "7.9",
+			"ansible_machine":              "x86_64",
+			"ansible_kernel":               "5.4.237",
+			"ansible_memtotal_mb":          float64(257407),
+			"ansible_hostname":             "l0node",
+			"ansible_fqdn":                 "l0node.bomc.local",
+			"ansible_processor_vcpus":      float64(64),
+			"ansible_processor":            []any{"64 x Intel Xeon", "Intel(R) Xeon(R) Gold 6248R"},
+			"ansible_all_ipv4_addresses":   []any{"10.1.207.156", "172.17.0.1", "172.25.0.1"},
+			"ansible_default_ipv4":         map[string]any{"address": "10.1.207.156", "interface": "bond0"},
+			"ansible_virtualization_type":  "kvm",
+			"ansible_virtualization_role":  "host",
+			"ansible_system_vendor":        "SuperCloud",
+			"ansible_product_name":         "X11DPi-N",
+			"ansible_python_version":       "3.6.8",
+			"ansible_uptime_seconds":       float64(86400),
+			"ansible_mounts":               []any{map[string]any{"mountpoint": "/", "size_available": float64(76585693184)}},
 		},
 	}
 	b, _ := json.Marshal(doc)

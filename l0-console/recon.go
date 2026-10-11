@@ -81,10 +81,32 @@ func fetchVMNames() ([]string, error) {
 	return d.Data, nil
 }
 
-// vmQueryInstance 查询某指标在目标主机（instance 含 host）近 10min 是否有数据
-func vmQueryInstance(key, host string) bool {
-	host = strings.ReplaceAll(host, ".", "\\.")
-	query := fmt.Sprintf(`count_over_time(%s{instance=~".*%s.*"}[10m])`, key, host)
+// vmQueryTargetData 查询某指标近 10min 是否有「该目标」的数据。
+// 命中口径（OR 关系，任一有样本即算在报）：
+//   ① resource_id / remote_resource_id / exported_resource_id = 目录登记的 ResourceID
+//      （直采注入 resource_id；vmagent 池 relabel 后真身落在 exported_resource_id，instance 已变承载机）；
+//   ② instance 含目标主机（无 ResourceID 的老目标兜底，保留既有行为）。
+// 修复 2026-09-27 对账口径错位：旧逻辑只按 instance 匹配 t.Address 主机名，
+// 池化 relabel 后必然误报"断采"。
+func vmQueryTargetData(key, host, resourceID string) bool {
+	selectors := []string{}
+	if resourceID != "" {
+		rid := strings.ReplaceAll(resourceID, `"`, "")
+		for _, lbl := range []string{"resource_id", "remote_resource_id", "exported_resource_id"} {
+			selectors = append(selectors, fmt.Sprintf(`count_over_time(%s{%s=%q}[10m])`, key, lbl, rid))
+		}
+	}
+	if host != "" {
+		if i := strings.LastIndex(host, ":"); i > 0 && !strings.Contains(host, "]") {
+			host = host[:i] // 兜底剥端口（调用方 runRecon 已剥，这里防直调带端口）
+		}
+		host = strings.ReplaceAll(host, ".", "\\.")
+		selectors = append(selectors, fmt.Sprintf(`count_over_time(%s{instance=~".*%s.*"}[10m])`, key, host))
+	}
+	if len(selectors) == 0 {
+		return false
+	}
+	query := strings.Join(selectors, " or ")
 	u := fmt.Sprintf("%s/api/v1/query?query=%s", vmBaseURL(), url.QueryEscape(query))
 	resp, err := http.Get(u)
 	if err != nil {
@@ -166,7 +188,7 @@ func runRecon() map[string]interface{} {
 		}
 		reporting := false
 		for _, k := range valid {
-			if vmQueryInstance(k, host) {
+			if vmQueryTargetData(k, host, t.ResourceID) {
 				reporting = true
 				break
 			}

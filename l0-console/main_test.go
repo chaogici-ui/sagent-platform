@@ -60,6 +60,14 @@ func TestParseAgentConfigDocEmptyAndGarbage(t *testing.T) {
 
 func TestSyncAgentConfigPreservesTargetIdentityAndParameters(t *testing.T) {
 	db := testOnboardDB(t)
+	// R0-3 能力协商（fail-closed）：Agent 未声明 managed_targets 能力时 targets 不下发。
+	// 用例意图是"同步保留目标身份与参数"，fixture 必须先落一台带能力位的 Agent 台账行
+	if err := db.UpsertAgentRow(&storepkg.AgentRow{
+		ID: "collector-a", Name: "collector-a", Type: "edge", Version: "0.6.0",
+		Stats: map[string]interface{}{"capabilities": []interface{}{"managed_targets"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	params := `{"interval":"15s","timeout":"3s","collectors":["global_status"]}`
 	id, err := db.InsertTarget(&storepkg.TargetRow{
 		Name: "database-target", Type: "mysql", Address: "database.internal:3306",

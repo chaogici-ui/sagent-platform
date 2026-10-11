@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SAgent 采集平台</title>
-    <link rel="stylesheet" href="css/style.css?v=21" />
+    <link rel="stylesheet" href="css/style.css?v=23" />
   </head>
   <body>
     <!-- Sidebar -->
@@ -27,6 +27,11 @@
       <div class="nav-section">数据观测</div>
       <a data-page="metrics-browse" onclick="goPage('metrics-browse')">📈 指标大屏</a>
       <a data-page="data-gov" onclick="goPage('data-gov')">🧹 数据治理</a>
+      <div class="nav-section">高可用验证</div>
+      <!-- 2026-09-27 用户拍板：vmagent 切换 / exporter 迁移切换 从采集健康页拆出为专项验证
+           功能独立成菜单（页面 id：ha-vm / ha-cpool，渲染器在 panel.js），采集健康页回归纯对账语义 -->
+      <a data-page="ha-vm" onclick="goPage('ha-vm')">⇄ vmagent 切换验证</a>
+      <a data-page="ha-cpool" onclick="goPage('ha-cpool')">⇂ exporter 迁移/切换</a>
       <div class="nav-section">平台</div>
       <!-- 平台组顺序对齐设计稿 2.1 ⑤（⑩平台设置 → ⑪审计日志 → ⑫平台健康）：
            追问顺序=平台怎么配 → 谁在何时做了什么 → 平台自己活得好不好。 -->
@@ -110,14 +115,14 @@
       </div>
     </div>
 
-    <script src="js/utils.js?v=32"></script>
-    <script src="js/api.js?v=16"></script>
+    <script src="js/utils.js?v=34"></script>
+    <script src="js/api.js?v=17"></script>
     <script src="js/fleet.js?v=16"></script>
-    <script src="js/panel.js?v=38"></script>
-    <script src="js/onboard.js?v=53"></script>
+    <script src="js/panel.js?v=47"></script>
+    <script src="js/onboard.js?v=54"></script>
     <script src="js/version.js?v=5"></script>
     <script src="js/resources.js?v=24"></script>
-    <script src="js/overview.js?v=10"></script>
+    <script src="js/overview.js?v=12"></script>
     <script src="js/platform.js?v=8"></script>
     <script src="js/app.js?v=17"></script>
     <script>

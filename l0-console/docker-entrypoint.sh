@@ -28,6 +28,11 @@ if [ -d "$SEED/binaries" ]; then
     rm -rf "$WORK/binaries"
     cp -r "$SEED/binaries" "$WORK/binaries"
 fi
+# 插件超市包仓同理：随镜像版本走（镜像赢）
+if [ -d "$SEED/plugin-packages" ]; then
+    rm -rf "$WORK/plugin-packages"
+    cp -r "$SEED/plugin-packages" "$WORK/plugin-packages"
+fi
 # 安装 playbook 同理：随镜像版本演进（改安装动作 = 改 data/playbooks/*.yml，不是改代码）
 if [ -d "$SEED/playbooks" ]; then
     rm -rf "$WORK/playbooks"

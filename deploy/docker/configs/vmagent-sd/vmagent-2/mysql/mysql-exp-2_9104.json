@@ -1,0 +1,1 @@
+[{"labels":{"resource_id":"mysql-2","source":"vmagent_pool"},"targets":["mysql-exp-2:9104"]}]

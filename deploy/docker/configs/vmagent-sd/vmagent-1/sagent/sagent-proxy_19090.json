@@ -1,0 +1,1 @@
+[{"labels":{"resource_id":"sagent-proxy","source":"vmagent_pool"},"targets":["sagent-proxy:19090"]}]

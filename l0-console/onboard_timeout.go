@@ -39,26 +39,28 @@ const (
 )
 
 // ===================================================================
-//  执行层预算：config 是超时唯一真源
 //
-//  清扫器（sweepOnboardTimeouts）是"超时权威"，配置里的 RunSec/IdleSec 就是它
-//  的判据。但执行层还有一层 context.WithTimeout 兜底——它一度写死成常量，
-//  于是出现「界面倒计时按 900s 走、实际 300s 就被判死」的谎报：运维盯着
-//  「剩余 12m」却看到步骤猝死，第一反应是平台在撒谎。
+//	执行层预算：config 是超时唯一真源
 //
-//  规则（回归有断言）：
-//   ① 任何单个子命令的预算都由 RunSec 按比例推导，改配置即改全局
-//   ② 步骤级兜底不得早于清扫器上限——execBudget 带 execGrace 宽限，
-//      保证"谁先判"永远是清扫器（它才带重试语义）
+//	清扫器（sweepOnboardTimeouts）是"超时权威"，配置里的 RunSec/IdleSec 就是它
+//	的判据。但执行层还有一层 context.WithTimeout 兜底——它一度写死成常量，
+//	于是出现「界面倒计时按 900s 走、实际 300s 就被判死」的谎报：运维盯着
+//	「剩余 12m」却看到步骤猝死，第一反应是平台在撒谎。
+//
+//	规则（回归有断言）：
+//	 ① 任何单个子命令的预算都由 RunSec 按比例推导，改配置即改全局
+//	 ② 步骤级兜底不得早于清扫器上限——execBudget 带 execGrace 宽限，
+//	    保证"谁先判"永远是清扫器（它才带重试语义）
+//
 // ===================================================================
 const (
 	// 各阶段占 RunSec 的比例（探路各段合计约 0.68，留足余量给调度抖动）
-	budgetPing     = 0.10 // 联通性测试
+	budgetPing     = 0.10  // 联通性测试
 	budgetPortCmd  = 0.075 // 端口核对（3 条命令，各占一份）
-	budgetSetup    = 0.20 // facts 采集
-	budgetDisk     = 0.05 // 磁盘兜底采集
-	budgetCheck    = 0.04 // 能力可行性检查：每条检查项一份预算（探不通也要等连接超时）
-	budgetPlaybook = 1.00 // 安装 playbook 就是本步骤主体，吃满 RunSec
+	budgetSetup    = 0.20  // facts 采集
+	budgetDisk     = 0.05  // 磁盘兜底采集
+	budgetCheck    = 0.04  // 能力可行性检查：每条检查项一份预算（探不通也要等连接超时）
+	budgetPlaybook = 1.00  // 安装 playbook 就是本步骤主体，吃满 RunSec
 
 	// execGrace 执行层 ctx 相对清扫器的宽限。清扫器先到 → 由它决定重试与否；
 	// 执行层 ctx 只是进程内兜底（清扫器线程被卡住时的最后一道保险）
@@ -191,239 +193,6 @@ func platformManaged(detail string) bool {
 	return d.Executor == "ansible" && d.Runner == "platform"
 }
 
-// ===================================================================
-//  一次步骤尝试的共享状态：作业更新它，心跳与进度事件读它落库
-// ===================================================================
-
-type stepRunState struct {
-	mu      sync.Mutex
-	flowID  int64
-	step    storepkg.FlowStepSnapshot
-	cred    *sshCred
-	attempt int
-	history []attemptRec
-	spec    StepTimeout
-	started time.Time
-	lastAct time.Time
-	phase   string
-	current string
-	tasks   []ansibleTask
-	diags   []diag
-	lastLog time.Time
-}
-
-// newStepRunState 开启一次尝试：attempt 从事件里续（超时重试会先写 attempt+1 的 running 事件）
-func newStepRunState(catDB *storepkg.DB, flowID int64, step storepkg.FlowStepSnapshot, cred *sshCred) *stepRunState {
-	attempt, history := 1, []attemptRec{}
-	if ev, _ := catDB.LatestEvent(flowID, step.ID); ev != nil {
-		if pr := progressOf(ev.Detail); pr != nil && pr.Attempt > 0 {
-			attempt = pr.Attempt
-		}
-		history = attemptsOf(ev.Detail)
-	}
-	spec := timeoutSpecFor(onboardCfg, step.Atom)
-	now := time.Now()
-	return &stepRunState{
-		flowID: flowID, step: step, cred: cred,
-		attempt: attempt, history: history, spec: spec,
-		started: now, lastAct: now,
-	}
-}
-
-// phase 标记当前阶段（探路有 ping / 端口核对 / setup / df 四段，界面按阶段分组看）
-func (s *stepRunState) setPhase(phase string) {
-	s.mu.Lock()
-	s.phase = phase
-	s.current = ""
-	s.touchLocked()
-	s.mu.Unlock()
-}
-
-func (s *stepRunState) touchLocked() { s.lastAct = time.Now() }
-
-// addDiag 累积诊断（同一份诊断在进度与终态事件里都要带上）
-func (s *stepRunState) addDiag(ds ...diag) {
-	s.mu.Lock()
-	s.diags = append(s.diags, ds...)
-	s.mu.Unlock()
-}
-
-func (s *stepRunState) setDiags(ds []diag) {
-	s.mu.Lock()
-	s.diags = ds
-	s.mu.Unlock()
-}
-
-// taskHook 给流式执行器的任务回调：把每个任务（含原文、状态、失败原因）并入状态并落一次进度。
-// 这就是「安装过程中的所有信息回到界面」的落点——不是跑完给一坨文本，而是逐任务可见
-func (s *stepRunState) taskHook(catDB *storepkg.DB) func(ansibleTask, int) {
-	return func(t ansibleTask, done int) {
-		s.mu.Lock()
-		t.Phase = s.phase
-		s.tasks = append(s.tasks, t)
-		s.current = t.Name
-		s.touchLocked()
-		s.mu.Unlock()
-		s.flush(catDB, s.progressSummary(done, t))
-	}
-}
-
-// progressSummary 进度摘要：任务序号 + 当前 TASK 名 + 状态
-func (s *stepRunState) progressSummary(done int, t ansibleTask) string {
-	stage := s.phaseLabel()
-	if t.Name != "" {
-		return fmt.Sprintf("平台 ansible 执行中 · %s · %d 个任务完成 · TASK [%s] %s",
-			stage, done, t.Name, taskStatusLabel(t.Status))
-	}
-	return fmt.Sprintf("平台 ansible 执行中 · %s · %d 个任务完成", stage, done)
-}
-
-func (s *stepRunState) phaseLabel() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch s.phase {
-	case "ping":
-		return "① 联通性测试"
-	case "port_check":
-		return "② 端口核对"
-	case "setup":
-		return "③ 事实采集"
-	case "df":
-		return "④ 磁盘兜底采集"
-	case "syntax":
-		return "playbook 语法校验"
-	case "playbook":
-		return "安装 playbook"
-	case "register":
-		return "采集目标登记"
-	}
-	return "执行中"
-}
-
-// snapshot 取进度快照（锁内构造，避免并发改）
-func (s *stepRunState) snapshot() (stepProgress, []ansibleTask) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	pr := stepProgress{
-		Attempt: s.attempt, MaxAttempts: s.spec.Retry + 1,
-		StartedAt:      s.started.Format("2006-01-02 15:04:05"),
-		LastActivityAt: s.lastAct.Format("2006-01-02 15:04:05"),
-		Phase:          s.phase, CurrentTask: s.current,
-		TasksDone: len(s.tasks), TasksTotal: len(s.tasks),
-		Timeout: s.spec,
-	}
-	names := make([]string, 0, len(s.tasks))
-	for _, t := range s.tasks {
-		names = append(names, t.Name)
-	}
-	pr.DoneTasks = names
-	return pr, append([]ansibleTask{}, s.tasks...)
-}
-
-// flush 落一条 running 进度事件（界面实时可见）。
-// 任务快照用精简版（不带逐任务原文行），否则心跳会把事件表撑大
-func (s *stepRunState) flush(catDB *storepkg.DB, summary string) {
-	pr, tasks := s.snapshot()
-	s.mu.Lock()
-	hist := append([]attemptRec{}, s.history...)
-	ds := append([]diag{}, s.diags...)
-	s.mu.Unlock()
-
-	detail := map[string]any{
-		"executor": "ansible", "runner": "platform",
-		"conn": credState(s.cred), "target": s.cred.target(),
-		"progress": pr, "tasks": compactTasks(tasks), "attempts": hist,
-		"note": "平台持有资源 SSH 凭据，ansible 自动执行；完成后自动回报，无需人工操作",
-	}
-	if len(ds) > 0 {
-		detail["diagnosis"] = diagJSON(ds)
-	}
-	_ = appendStepEvent(catDB, s.flowID, s.step, stRunning, summary, detailJSON(detail), 0)
-}
-
-// heartbeat 心跳：作业活着就持续打点（长命令静默不等于卡死），
-// idle 判定因此只对"真的没人在干活"生效
-func (s *stepRunState) heartbeat(catDB *storepkg.DB) {
-	s.mu.Lock()
-	s.touchLocked()
-	pr, _ := s.snapshotLocked()
-	elapsed := int64(time.Since(s.started).Seconds())
-	s.mu.Unlock()
-
-	stage := "执行中"
-	if pr.CurrentTask != "" {
-		stage = "TASK [" + pr.CurrentTask + "]"
-	}
-	summary := fmt.Sprintf("平台 ansible 执行中 · %d 个任务完成 · %s · 已运行 %ds（心跳）",
-		len(pr.DoneTasks), stage, elapsed)
-	// 已运行秒数写进文案：心跳文案必须每次不同，否则会被幂等去重（同 summary 不重复写），
-	// 超时判定就读不到新鲜的 last_activity
-	s.flush(catDB, summary)
-}
-
-// snapshotLocked 调用方已持锁时使用
-func (s *stepRunState) snapshotLocked() (stepProgress, []ansibleTask) {
-	pr := stepProgress{
-		Attempt: s.attempt, MaxAttempts: s.spec.Retry + 1,
-		StartedAt:      s.started.Format("2006-01-02 15:04:05"),
-		LastActivityAt: s.lastAct.Format("2006-01-02 15:04:05"),
-		Phase:          s.phase, CurrentTask: s.current,
-		TasksDone: len(s.tasks), TasksTotal: len(s.tasks),
-		Timeout: s.spec,
-	}
-	names := make([]string, 0, len(s.tasks))
-	for _, t := range s.tasks {
-		names = append(names, t.Name)
-	}
-	pr.DoneTasks = names
-	return pr, append([]ansibleTask{}, s.tasks...)
-}
-
-// startHeartbeat 起心跳 goroutine，返回停止函数
-func (s *stepRunState) startHeartbeat(catDB *storepkg.DB) func() {
-	done := make(chan struct{})
-	go func() {
-		t := time.NewTicker(stepHeartbeatInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				s.heartbeat(catDB)
-			}
-		}
-	}()
-	return func() { close(done) }
-}
-
-// endAttempt 记录本次尝试的结局（终态时调用），返回完整历史
-func (s *stepRunState) endAttempt(result, note string) []attemptRec {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	s.history = append(s.history, attemptRec{
-		No: s.attempt, StartedAt: s.started.Format("2006-01-02 15:04:05"),
-		EndedAt: now.Format("2006-01-02 15:04:05"), Result: result,
-		WaitedSec: int64(now.Sub(s.started).Seconds()), Note: note,
-	})
-	return append([]attemptRec{}, s.history...)
-}
-
-// tasksSnapshot 当前已收集的任务（含逐任务原文），终态事件用它把全过程带回去
-func (s *stepRunState) tasksSnapshot() []ansibleTask {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]ansibleTask{}, s.tasks...)
-}
-
-// history 当前历史（不追加）
-func (s *stepRunState) historySnapshot() []attemptRec {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]attemptRec{}, s.history...)
-}
-
 // compactTasks 精简任务列表（去掉逐任务原文行，用于进度事件）
 func compactTasks(tasks []ansibleTask) []ansibleTask {
 	out := make([]ansibleTask, 0, len(tasks))
@@ -439,23 +208,6 @@ func compactTasks(tasks []ansibleTask) []ansibleTask {
 		out = append(out, c)
 	}
 	return out
-}
-
-// taskStatusLabel 任务状态人话化（界面/摘要共用）
-func taskStatusLabel(s string) string {
-	switch s {
-	case "ok":
-		return "成功"
-	case "changed":
-		return "已变更"
-	case "failed":
-		return "失败"
-	case "unreachable":
-		return "不可达"
-	case "skipping":
-		return "跳过"
-	}
-	return "未知"
 }
 
 // ===================================================================

@@ -21,7 +21,7 @@ func openTestCatalog(t *testing.T) *storepkg.DB {
 		t.Fatalf("open test catalog: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, init := range []func() error{db.InitFleet, db.InitOnboard, db.InitL1Tasks, db.InitRelocations} {
+	for _, init := range []func() error{db.InitFleet, db.InitOnboard, db.InitL1Tasks, db.InitRelocations, db.InitVmagentPool} {
 		if err := init(); err != nil {
 			t.Fatalf("init test catalog: %v", err)
 		}

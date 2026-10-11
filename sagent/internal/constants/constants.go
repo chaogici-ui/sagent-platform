@@ -3,7 +3,12 @@ package constants
 import "time"
 
 // ====== 版本 ======
-const Version = "0.4.0"
+const Version = "0.6.0"
+
+// CapabilityManagedTargets 能力协商（R0-3）：Agent 在注册/心跳里声明的能力位。
+// L0 据此决定是否下发 targets 段——没有该能力位（且版本低于 0.6.0）的老 Agent
+// 收到的配置不含 targets，回落静态配置，防止 DisallowUnknownFields 打挂老 Agent。
+const CapabilityManagedTargets = "managed_targets"
 
 // ====== 网络端口 ======
 const (
@@ -27,6 +32,7 @@ const (
 	DefaultConfDir        = "conf"
 	DefaultVectorBin      = "plugins/vector/bin/vector"
 	DefaultMysqlExportBin = "plugins/mysql_exporter/mysqld_exporter"
+	DefaultRedisExportBin = "plugins/redis_exporter/redis_exporter"
 	DefaultVectorConfDir  = "conf/plugins/vector"
 )
 
@@ -72,6 +78,7 @@ const (
 	PluginNameHostMetrics   = "host_metrics"
 	PluginNameLogMetrics    = "log_metrics"    // 日志转指标（当前实现；真日志采集 log_collector 规划中，届时另立插件）
 	PluginNameMySQLProbe    = "mysql_probe"
+	PluginNameRedisProbe    = "redis_probe"
 	PluginNameCustomScripts = "custom_scripts"
 	PluginNamePortChecker   = "port_checker"
 	PluginNameScrape        = "prometheus_scrape"

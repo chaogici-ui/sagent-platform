@@ -34,13 +34,19 @@ type Client struct {
 	ip         string
 	labels     map[string]string
 	metricsURL string // 自身 /metrics 基址，用于清点本机序列（采集入库证据）
-	desc       SelfDesc
+	// metricsAuthKey 自身 /metrics 的 Bearer key（D4 鉴权开启时 countOwnSeries 需携带，
+	// 与 vmagent 抓取同一凭据）；空 = 未开启鉴权
+	metricsAuthKey string
+	desc           SelfDesc
 
 	sent        map[string]bool
 	appliedVer  int
 	receivedVer int
 	configError string
 	applyConfig func(context.Context, int, string) error
+	// observedFn R0-2 observed_state 提供者：心跳 stats 携带各托管目标实际状态
+	// （active 进程态 / standby 预置就绪度），nil 时跳过该字段
+	observedFn func() map[string]map[string]any
 	httpClient  *http.Client
 	log         *logger.Logger
 
@@ -132,6 +138,22 @@ func (c *Client) heartbeatEvery() time.Duration {
 	return constants.DefaultHeartbeatInterval
 }
 
+// SetObservedStateProvider 注入 observed_state 提供者（R0-2，main 装配时调用）
+func (c *Client) SetObservedStateProvider(fn func() map[string]map[string]any) {
+	c.observedFn = fn
+}
+
+// SetMetricsAuthKey 注入自身 /metrics 的 Bearer key（D4 鉴权，main 装配时调用）
+func (c *Client) SetMetricsAuthKey(key string) {
+	c.metricsAuthKey = strings.TrimSpace(key)
+}
+
+// capabilities 本 Agent 能力位声明（R0-3 能力协商）：L0 据此决定是否下发 targets 段。
+// 老版本 Agent 不带该字段，平台按版本号兜底判定。
+func (c *Client) capabilities() []string {
+	return []string{constants.CapabilityManagedTargets}
+}
+
 // Run 阻塞运行：注册（带重试）→ 心跳循环。ctx 取消即退出。
 func (c *Client) Run(ctx context.Context) {
 	if err := c.register(ctx); err != nil {
@@ -161,20 +183,13 @@ func (c *Client) Run(ctx context.Context) {
 // flushReports 每个心跳后尝试推送接入证据（批 C 精简版）。
 // 未被平台接受的 kind 下个心跳重试——拒绝原因通常是依赖步骤尚未 running
 // 或 cfg_effective 尚未回写，重试即可收敛。
+// B4b 起不再上报 preflight_ability：探路下沉 L1 后，主机事实由采集机侧 ansible 实测。
 func (c *Client) flushReports(ctx context.Context) {
 	if !c.sent["self_metrics"] {
 		if c.tryReport(ctx, "self_metrics", map[string]any{
 			"process": "up", "health": "healthy", "note": "Agent 本机自检",
 		}) {
 			c.sent["self_metrics"] = true
-		}
-	}
-	if !c.sent["preflight_ability"] {
-		if c.tryReport(ctx, "preflight_ability", map[string]any{
-			"port_listen": true, "config_readable": true, "deps_ok": true,
-			"note": "Agent 本机基线检查（端口/配置可读/依赖）",
-		}) {
-			c.sent["preflight_ability"] = true
 		}
 	}
 	if c.appliedVer > 0 && !c.sent["config_applied"] {
@@ -215,12 +230,20 @@ func (c *Client) tryReport(ctx context.Context, kind string, data map[string]any
 	return resp.Ok
 }
 
-// countOwnSeries 清点自身 /metrics 中带本机 resource_id 标签的序列数（采集在吐的证据）
+// countOwnSeries 清点自身 /metrics 中带本机 resource_id 标签的序列数（采集在吐的证据）。
+// D4 鉴权开启时携带 Bearer（与 vmagent 抓取同一凭据），否则 401 会把序列数误判为 0。
 func (c *Client) countOwnSeries() int {
 	if c.metricsURL == "" {
 		return 0
 	}
-	resp, err := c.httpClient.Get(c.metricsURL + "/metrics")
+	req, err := http.NewRequest(http.MethodGet, c.metricsURL+"/metrics", nil)
+	if err != nil {
+		return 0
+	}
+	if c.metricsAuthKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.metricsAuthKey)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -246,12 +269,13 @@ func (c *Client) register(ctx context.Context) error {
 	backoff := 5 * time.Second
 	for {
 		body, _ := json.Marshal(map[string]any{
-			"id":      c.agentID,
-			"type":    c.selfType(),
-			"version": c.version,
-			"ip":      c.ip,
-			"labels":  c.labels,
-			"plugins": c.desc.Plugins,
+			"id":           c.agentID,
+			"type":         c.selfType(),
+			"version":      c.version,
+			"ip":           c.ip,
+			"labels":       c.labels,
+			"plugins":      c.desc.Plugins,
+			"capabilities": c.capabilities(), // R0-3：能力协商声明
 		})
 		var resp struct {
 			Ok         bool   `json:"ok"`
@@ -292,16 +316,24 @@ func (c *Client) beat() bool {
 	if c.configError != "" {
 		status = "degraded"
 	}
+	stats := map[string]any{
+		"reporter": "l0-control", "received_version": c.receivedVer,
+		"config_error": c.configError,
+	}
+	// R0-2：observed_state 随心跳回报（托管目标 active 进程态 / standby 预置就绪度）
+	if c.observedFn != nil {
+		if obs := c.observedFn(); obs != nil {
+			stats["observed_targets"] = obs
+		}
+	}
 	body, _ := json.Marshal(map[string]any{
 		"id":              c.agentID,
 		"status":          status,
 		"version":         c.version,
 		"config_version":  c.appliedVer,
 		"applied_version": c.appliedVer,
-		"stats": map[string]any{
-			"reporter": "l0-control", "received_version": c.receivedVer,
-			"config_error": c.configError,
-		},
+		"capabilities":    c.capabilities(), // R0-3：能力协商声明
+		"stats":           stats,
 	})
 	var resp struct {
 		Ok            bool            `json:"ok"`

@@ -105,78 +105,299 @@ function renderTasks() {
         }).catch(function(){});
       }
 
-      // 采集健康 = 对账工作台（2026-09-22 定稿）：一屏回答"有没有问题、问题在哪、接下来点什么"。
-      // 顶部一句人话结论；三张问题卡锚到三个清单，清单行带处理动作。
-      // 存活率/采集成功率百分比卡与 IDC 分布删掉（总览页已有 Agent 状态，本页只留对账语义）；
-      // 批量操作条移至资源页（batchOp 留在 panel.js，fleet 页共用）。
-      function renderSLO() {
-        // 四值语义（P1，对齐 IA 设计稿）：healthy/running=在线 · stopped=明确维护态（人工停用，已知状态）
-        // offline/created=状态未知（心跳过期/从未心跳，未证实失败）。
-        // unknown ≠ failed：未知不进异常计数、不进待处理结论，只单独露出——避免把"可能只是网络断了"当成故障报警。
-        var vis = agents.filter(function (a) { return window.tenantVisible(a); }); // 多租户(D3)界面隔离
-        var anomaly = vis.filter(function(a){return a.status==='stopped'}); // 明确维护态（需人工恢复）
-        // 状态未知 = offline/created，外加「status=healthy 但心跳已过期/从未心跳」——与证据环①完全同口径
-        //（HEARTBEAT_TTL=120s，见 overview.js buildEvidenceChainHTML）。此前只看 status 字段，
-        // 出现过同屏"环① 6/9 在线(≤120s)"与"✅ 全部 9 个 Agent 在线"打架（A2，2026-09-27 修复）。
-        var _nowSec = Math.floor(Date.now() / 1000);
-        var _hbTtl = 120;
-        var unknownA = vis.filter(function(a){
-          if (a.status==='offline'||a.status==='created') return true;
-          if (a.status==='stopped') return false;
-          return !a.last_seen || (_nowSec - a.last_seen) > _hbTtl;
+      // vmagent 采集池卡片加载器（⇄）：成员健康=VM 数据面 replica 新鲜度实测；
+      // 目标归属读池归属表（单归属+preferred）；切换事件时间线展示接管/回切全过程。
+      // 字段为 Go 结构体默认导出名（store 层未打 json tag），与 /api/relocations 渲染口径一致。
+      function loadVmpool() {
+        var el = document.getElementById('vmpool-body');
+        if (!el) { if (window.__vmpTimer) clearInterval(window.__vmpTimer); return; }
+        Promise.all([
+          fetch(API + '/vmagent-pool').then(function (r) { return r.json(); }).catch(function () { return null; }),
+          fetch(API + '/vmagent-pool/events').then(function (r) { return r.json(); }).catch(function () { return null; })
+        ]).then(function (out) {
+          var el2 = document.getElementById('vmpool-body');
+          if (!el2) return;
+          var data = out[0], evs = (out[1] && out[1].events) || [];
+          if (!data) { el2.innerHTML = '⚠ vmagent 池 API 不可达（l0-console 未升级或调度器未启动）'; el2.style.color = 'var(--muted)'; return; }
+          var members = data.members || [], targets = data.targets || [];
+          var h = '';
+          h += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;align-items:center">';
+          if (!members.length) h += '<span style="color:var(--muted);font-size:12px">暂无成员上报（调度器首轮未跑或 VM 无 up 序列）</span>';
+          members.forEach(function (m) {
+            var bg, st;
+            if (m.sim_down) { bg = 'background:#b91c1c;color:#fff'; st = ' ◐ 演练宕机'; }
+            else if (m.healthy) { bg = 'background:#e0f2f1;color:#0b6e66'; st = ' ● 健康'; }
+            else { bg = 'background:#fde8e8;color:#b91c1c'; st = ' ● 失效'; }
+            h += '<span class="badge" style="' + bg + ';font-size:12px;padding:4px 10px">' + escHtml(m.member) + st
+              + ' · 数据龄 ' + (m.fresh_sec < 0 ? '无数据' : Math.round(m.fresh_sec) + 's') + ' · 承载 ' + m.load + ' 目标</span>';
+            // 演练开关：语义=计划内停机（PG 标记，非真实容器操作），接管/回切全自动走调度器
+            h += '<button class="btn btn-s btn-sm" onclick="vmpDrillToggle(\'' + escHtml(m.member) + '\',' + (m.sim_down ? 'false' : 'true') + ')">'
+              + (m.sim_down ? '▶ 恢复上线' : '⏻ 模拟宕机') + '</button>';
+          });
+          h += '</div>';
+          if (targets.length) {
+            h += '<table style="text-align:left"><thead><tr><th>采集目标</th><th>job</th><th>当前归属</th><th>偏好归属</th><th>归属生效</th></tr></thead><tbody>';
+            targets.forEach(function (t) {
+              var since = t.OwnerSince ? new Date(t.OwnerSince * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '-';
+              var cur;
+              if (t.PreferredOwner && t.CurrentOwner !== t.PreferredOwner) {
+                cur = '<span class="badge" style="background:#fff3cd;color:#8a6d3b" title="暂由健康成员接管，preferred 恢复健康且稳定后自动回切">' + escHtml(t.CurrentOwner || '未分派') + '（接管中）</span>';
+              } else {
+                cur = '<span class="badge" style="background:' + (t.CurrentOwner ? '#e0f2f1;color:#0b6e66' : '#f0f0f0;color:#666') + '">' + escHtml(t.CurrentOwner || '未分派') + '</span>';
+              }
+              h += '<tr><td>' + escHtml(t.DisplayName || t.TargetKey) + '</td><td style="font-size:11px;color:var(--muted)">' + escHtml(t.JobName) + '</td><td>' + cur + '</td><td style="font-size:11px">' + escHtml(t.PreferredOwner || '-') + '</td><td style="font-size:11px;color:var(--muted)">' + since + '</td></tr>';
+            });
+            h += '</tbody></table>';
+          } else {
+            h += '<div style="font-size:12px;color:var(--muted)">暂无池管目标 —— 经接入流程装机或 POST /api/vmagent-pool/targets 注册</div>';
+          }
+          h += '<div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--muted)">切换时间线（最新 8 条）</div>';
+          if (evs.length) {
+            var kindMap = {
+              takeover: ['故障接管', 'background:#fde8e8;color:#b91c1c'],
+              failback: ['自动回切', 'background:#e0f2f1;color:#0b6e66'],
+              register: ['登记', 'background:#e8f0fe;color:#1a56a0'],
+              assign: ['手工改派', 'background:#fff3cd;color:#8a6d3b'],
+              remove: ['摘除', 'background:#f0f0f0;color:#666'],
+              drill_down: ['演练宕机', 'background:#b91c1c;color:#fff'],
+              drill_recover: ['演练恢复', 'background:#fff3cd;color:#8a6d3b']
+            };
+            h += '<table style="text-align:left;margin-top:4px"><tbody>';
+            evs.slice(0, 8).forEach(function (e) {
+              var km = kindMap[e.Kind] || [e.Kind, 'background:#f0f0f0;color:#666'];
+              var ts = e.CreatedAt ? new Date(e.CreatedAt * 1000).toLocaleString('zh-CN', { hour12: false }) : '-';
+              h += '<tr><td style="white-space:nowrap;font-size:11px;color:var(--muted)">' + ts + '</td>'
+                + '<td><span class="badge" style="' + km[1] + '">' + km[0] + '</span></td>'
+                + '<td style="font-size:12px">' + escHtml(e.TargetKey) + '</td>'
+                + '<td style="font-size:12px">' + escHtml(e.FromOwner || '—') + ' → ' + escHtml(e.ToOwner || '—') + '</td>'
+                + '<td style="font-size:11px;color:var(--muted)">' + escHtml(e.Reason || e.Note || '') + '</td></tr>';
+            });
+            h += '</tbody></table>';
+          } else {
+            h += '<div style="font-size:11px;color:var(--muted)">暂无切换事件（单归属稳定运行中）</div>';
+          }
+          el2.style.textAlign = 'left';
+          el2.innerHTML = h;
         });
-        var html = '';
-        // 页头：主问题（IA 规范——每页只回答一个问题，页头副标题即主问题）
-        html += '<div class="card"><div class="card-bd" style="padding-bottom:10px"><span style="font-size:16px;font-weight:700">◫ 采集健康</span>'
-          + '<span style="font-size:12px;color:var(--muted);margin-left:10px">采得全不全、断在哪一环？</span></div></div>';
-        // ① 结论条（对账结果回来后填一句人话）+ 覆盖率条形（分母=可核对目标）+ 证据链概要（共享 buildEvidenceChainHTML，与工作台同源）
-        html += '<div class="card"><div class="card-bd" style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">';
-        html += '<div id="recon-verdict" style="font-size:14px;font-weight:600">⏳ 对账引擎计算中...</div>';
-        html += '<div id="recon-meta" style="font-size:11px;color:var(--muted);margin-left:auto"></div>';
-        html += '<div id="recon-cover" style="flex:1 1 100%;margin-top:2px"></div>';
-        html += '<div id="recon-evid" style="flex:1 1 100%;margin-top:4px"></div>';
-        html += '</div></div>';
-        // ② 三张问题卡（点击定位到清单）
-        html += '<div class="slo-grid" style="margin-top:16px">';
-        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-stale\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-stale">⏳</div><div class="slo-label">数据断采 &gt; 10min</div></div>';
-        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-wild\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-wild">⏳</div><div class="slo-label">野指标（VM 有 / 应报口径无）</div></div>';
-        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-anomaly\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" style="color:'+(anomaly.length>0?'var(--warning,#b45309)':'var(--success)')+'">'+anomaly.length+'</div><div class="slo-label">维护态 Agent'+(unknownA.length>0?' <span style="color:var(--muted);font-weight:400">· 另 '+unknownA.length+' 状态未知</span>':'')+'</div></div>';
-        html += '</div>';
-        // ③-1 断采清单
-        html += '<div class="card" style="margin-top:16px" id="recon-stale"><div class="card-hd">📡 断采目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">目录声明应采 × VM 实际在报（近 10min 无数据）· 状态按承载 Agent 心跳区分失败/未知</span></div>';
-        html += '<div class="card-bd" id="recon-stale-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
-        // 修复草案（只读预览）：模板产出，不是 evidence；复核与转变更只发生在变更中心（裁决 2）
-        html += '<div class="card" style="margin-top:16px" id="recon-draft"><div class="card-hd">🩹 修复草案 <span style="font-weight:400;font-size:11px;color:var(--muted)">只读预览 · 模板建议不是 evidence · 复核与转变更只在变更中心</span></div>';
-        html += '<div class="card-bd" id="recon-draft-body" style="text-align:center;color:var(--muted);padding:14px">等对账结果...</div></div>';
-        // 对账：野指标
-        html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span><a href="javascript:void(0)" onclick="goPage(\'data-gov\')" style="font-size:11px;color:var(--primary);margin-left:10px">→ 数据治理细看</a></div>';
-        html += '<div class="card-bd" id="recon-wild-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
-        // ③-3 Agent 状态：维护态与未知态分开列（unknown ≠ failed）
-        html += '<div class="card" style="margin-top:16px" id="recon-anomaly"><div class="card-hd">🖥 Agent 状态 <span style="font-weight:400;font-size:11px;color:var(--muted)">维护态 '+anomaly.length+' · 状态未知 '+unknownA.length+'（心跳过期/从未心跳 ≠ 失败，可能只是网络中断）</span></div>';
-        if(vis.length===0){
-          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">暂无 Agent —— 先到 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">接入中心</a> 完成对象接入</div>';
-        }else if(anomaly.length===0 && unknownA.length===0){
-          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">✅ 全部 '+vis.length+' 个 Agent 在线，无维护态、无状态未知</div>';
-        }else{
-          if(anomaly.length>0){
-            html += '<div class="card-bd" style="padding:0"><div style="padding:8px 16px 4px;font-size:11px;color:var(--warning,#b45309);font-weight:600">维护态（已停用，明确状态）</div><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
-            anomaly.forEach(function(a){html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge b-s">已停用</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><button class="btn btn-s btn-sm" onclick="quickStart(\''+a.id+'\')">启动</button></td></tr>'});
-            html += '</tbody></table></div>';
+      }
+
+      // 演练开关（全局：onclick 直调）。POST members/drill 落 PG 演练标记，
+      // 调度器下一轮（≤10s）接管；恢复后稳定窗+冷却过自动回切。零 docker 依赖。
+      function vmpDrillToggle(member, down) {
+        var tip = down
+          ? '确认模拟 ' + member + ' 宕机？其承载目标将在 ≤10s 内开始漂移到健康成员'
+          : '确认 ' + member + ' 恢复上线？稳定窗+冷却期过后目标自动回切归位';
+        if (!confirm(tip)) return;
+        fetch(API + '/vmagent-pool/members/drill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ member: member, down: down })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d.error) { showLog('演练操作失败: ' + d.error, 'err'); }
+          else {
+            showLog(down ? (member + ' 已标记演练宕机，切换效果见下方时间线（≤10s 开始）')
+                         : (member + ' 已恢复上线，等待自动回切'), 'ok');
+            loadVmpool();
           }
-          if(unknownA.length>0){
-            html += '<div class="card-bd" style="padding:0'+(anomaly.length>0?';border-top:1px solid var(--line,#eee)':'')+'"><div style="padding:8px 16px 4px;font-size:11px;color:var(--muted);font-weight:600">状态未知（未证实失败，不计入异常）</div><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
-            unknownA.forEach(function(a){var lbl=a.status==='created'?'从未心跳':'心跳过期';html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge" style="background:#f0f0f0;color:#666">未知 · '+lbl+'</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><a href="javascript:void(0)" onclick="openDetailById(\''+a.id+'\')" style="color:var(--primary)">查看详情</a></td></tr>'});
-            html += '</tbody></table></div>';
+        }).catch(function () { showLog('演练请求发送失败', 'err'); });
+      }
+
+      // ============ exporter 采集机池（⇂ 卡片）：SPEC 2026-09-27 人工触发漂移 ============
+      // 数据源 /api/collectors/poolview：成员=heartbeat 采集机（含演练标记），任务=可迁移 targets，
+      // 时间线=relocations（trigger_source: manual/drill/auto/failback_*）。动作全部人工点击。
+      function loadCpool() {
+        var el = document.getElementById('cpool-body');
+        if (!el) { if (window.__cpTimer) clearInterval(window.__cpTimer); return; }
+        fetch(API + '/collectors/poolview').then(function (r) { return r.json(); }).catch(function () { return null; }).then(function (data) {
+          var el2 = document.getElementById('cpool-body');
+          if (!el2) return;
+          if (!data) { el2.innerHTML = '⚠ 采集机池 API 不可达（l0-console 未升级）'; return; }
+          var members = data.members || [], targets = data.targets || [], rels = data.relocations || [];
+          var h = '';
+          h += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;align-items:center">';
+          if (!members.length) h += '<span style="color:var(--muted);font-size:12px">暂无 heartbeat 采集机（采集机装机后自动入池）</span>';
+          members.forEach(function (m) {
+            var bg, st;
+            if (m.sim_down) { bg = 'background:#b91c1c;color:#fff'; st = ' ◐ 演练下线'; }
+            else if (m.healthy) { bg = 'background:#e0f2f1;color:#0b6e66'; st = ' ● 健康'; }
+            else { bg = 'background:#fde8e8;color:#b91c1c'; st = ' ● 异常(心跳停)'; }
+            h += '<span class="badge" style="' + bg + ';font-size:12px;padding:4px 10px">' + escHtml(m.id) + st
+              + ' · 池 ' + escHtml(m.pool || '-') + ' · 承载 ' + m.load + ' 任务</span>';
+            h += '<button class="btn btn-s btn-sm" onclick="cpoolDrill(\'' + escHtml(m.id) + '\',' + (m.sim_down ? 'false' : 'true') + ')">'
+              + (m.sim_down ? '▶ 恢复上线' : '⏻ 模拟下线') + '</button>';
+          });
+          h += '</div>';
+          if (targets.length) {
+            h += '<table style="text-align:left"><thead><tr><th>采集任务</th><th>当前归属</th><th>进程状态</th><th>首选</th><th>漂移到</th><th>回切</th></tr></thead><tbody>';
+            targets.forEach(function (t) {
+              var cur;
+              if (t.PreferredOwner ? t.preferred_owner && t.agent_id !== t.preferred_owner : false) {
+                cur = '<span class="badge" style="background:#fff3cd;color:#8a6d3b">' + escHtml(t.agent_id || '未分派') + '（漂移中）</span>';
+              } else {
+                cur = '<span class="badge" style="background:' + (t.agent_id ? '#e0f2f1;color:#0b6e66' : '#f0f0f0;color:#666') + '">' + escHtml(t.agent_id || '未分派') + '</span>';
+              }
+              // 进程状态（R0-2 observed_state）：属主进程态 + standby 预置就绪度，数据来自 Agent 心跳回报
+              var proc;
+              if (t.proc_state === 'running') {
+                proc = '<span class="badge" style="background:#e0f2f1;color:#0b6e66" title="属主 Agent 心跳回报：采集进程运行中">● 采集中</span>';
+              } else if (t.proc_state === 'standby') {
+                proc = '<span class="badge" style="background:#e8f0fe;color:#1a56a0" title="standby 预置：配置与版本包就位，任务不启动">◐ 预置</span>';
+              } else if (t.proc_state === 'stopped') {
+                proc = '<span class="badge" style="background:#fde8e8;color:#b91c1c" title="属主 Agent 心跳回报：采集进程未运行">○ 未运行</span>';
+              } else {
+                proc = '<span class="badge" style="background:#f0f0f0;color:#666" title="' + escHtml(t.proc_note || '属主 Agent 未回报 observed_state（老版本或尚未心跳）') + '">? 进程态未知</span>';
+              }
+              if (t.standby_holders && t.standby_holders.length) {
+                var readyN = (t.standby_ready || []).length;
+                proc += '<span style="font-size:11px;color:var(--muted);margin-left:6px" title="standby 预置：'
+                  + escHtml(t.standby_holders.join('、')) + '；连通性已验证就绪：'
+                  + escHtml((t.standby_ready && t.standby_ready.length ? t.standby_ready.join('、') : '无')) + '">预置 ' + readyN + '/' + t.standby_holders.length + ' 就绪</span>';
+              }
+              var ops = '';
+              if (t.cooldown) {
+                ops = '<span style="font-size:11px;color:var(--muted)" title="冷却终态保护：防止重复变更">❄ 冷却中</span>';
+              } else if (t.drift_to && t.drift_to.length) {
+                ops = t.drift_to.map(function (c) {
+                  return '<button class="btn btn-s btn-sm" onclick="cpoolDrift(' + t.id + ',\'' + escHtml(c) + '\')">→ ' + escHtml(c) + '</button>';
+                }).join(' ');
+              } else {
+                ops = '<span style="font-size:11px;color:var(--muted)">无健康候选</span>';
+              }
+              var fb = t.can_failback
+                ? '<button class="btn btn-s btn-sm" onclick="cpoolFailback(' + t.id + ')">⇦ ' + escHtml(t.preferred_owner) + '</button>'
+                : '<span style="font-size:11px;color:var(--muted)">' + (t.preferred_owner ? (t.agent_id === t.preferred_owner ? '✓ 已归位' : '首选未恢复') : '未配置') + '</span>';
+              h += '<tr><td>' + escHtml(t.name) + '<span style="font-size:11px;color:var(--muted);margin-left:6px">' + escHtml(t.address || '') + '</span></td>'
+                + '<td>' + cur + '</td>'
+                + '<td>' + proc + '</td>'
+                + '<td style="font-size:11px">' + escHtml(t.preferred_owner || '-') + '</td>'
+                + '<td>' + ops + '</td><td>' + fb + '</td></tr>';
+            });
+            h += '</tbody></table>';
+          } else {
+            h += '<div style="font-size:12px;color:var(--muted)">暂无可迁移采集任务（远端采集接入后出现）</div>';
           }
-        }
+          h += '<div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--muted)">迁移时间线（最新 10 条 · manual=人工触发 / drill=演练 / failback=回切）</div>';
+          var tsMap = {
+            manual: ['人工漂移', 'background:#fff3cd;color:#8a6d3b'],
+            drill: ['演练', 'background:#fde8e8;color:#b91c1c'],
+            auto: ['自动', 'background:#e8f0fe;color:#1a56a0'],
+            failback_manual: ['人工回切', 'background:#e0f2f1;color:#0b6e66'],
+            failback_auto: ['自动回切', 'background:#e0f2f1;color:#0b6e66']
+          };
+          if (rels.length) {
+            h += '<table style="text-align:left;margin-top:4px"><tbody>';
+            rels.slice(0, 10).forEach(function (e) {
+              var km = tsMap[e.TriggerSource] || [e.TriggerSource || 'auto', 'background:#f0f0f0;color:#666'];
+              var ts = e.CreatedAt ? new Date(e.CreatedAt * 1000).toLocaleString('zh-CN', { hour12: false }) : '-';
+              h += '<tr><td style="white-space:nowrap;font-size:11px;color:var(--muted)">' + ts + '</td>'
+                + '<td><span class="badge" style="' + km[1] + '">' + km[0] + '</span></td>'
+                + '<td style="font-size:12px">' + escHtml(e.TargetName || e.TargetID) + '</td>'
+                + '<td style="font-size:12px">' + escHtml(e.FromAgent || '—') + ' → ' + escHtml(e.ToAgent || '—') + '</td>'
+                + '<td style="font-size:11px;color:var(--muted)">' + escHtml(e.Reason || e.Note || '') + '</td></tr>';
+            });
+            h += '</tbody></table>';
+          } else {
+            h += '<div style="font-size:11px;color:var(--muted)">暂无迁移记录</div>';
+          }
+          el2.style.textAlign = 'left';
+          el2.innerHTML = h;
+        });
+      }
+
+      // 演练：模拟采集机下线/恢复（PG 标记，语义=计划内停机，等价"指标异常"场景制造）
+      function cpoolDrill(member, down) {
+        var tip = down
+          ? '确认模拟 ' + member + ' 下线？该机将转为异常态（演练标记，非真实停机），其任务可人工漂移'
+          : '确认 ' + member + ' 恢复上线？';
+        if (!confirm(tip)) return;
+        fetch(API + '/collectors/sim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ member: member, down: down })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d.error) { showLog('演练操作失败: ' + d.error, 'err'); }
+          else {
+            showLog(down ? (member + ' 已标记演练下线，可在任务行点击「→ 采集机」硬触发漂移') : (member + ' 已恢复上线，可执行回切'), 'ok');
+            loadCpool();
+          }
+        }).catch(function () { showLog('演练请求发送失败', 'err'); });
+      }
+
+      // 人工硬触发漂移（manual 全审计；后端校验候选集/冷却/单归属）
+      function cpoolDrift(targetId, to) {
+        if (!confirm('确认把该任务漂移到 ' + to + '？先下新后停旧，操作将记入审计（trigger_source=manual）')) return;
+        fetch(API + '/collectors/drift', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_id: targetId, to_agent: to })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d.error) { showLog('漂移失败: ' + d.error, 'err'); }
+          else if (d && d.status === 'moved') { showLog('已漂移到 ' + d.to_agent + '（审计留痕），数据面接管依 R0 放行进度', 'ok'); }
+          else { showLog('漂移未执行: ' + ((d && d.note) || JSON.stringify(d)), 'err'); }
+          loadCpool();
+        }).catch(function () { showLog('漂移请求发送失败', 'err'); });
+      }
+
+      // 人工回切：归位首选采集机
+      function cpoolFailback(targetId) {
+        if (!confirm('确认回切归位首选采集机？')) return;
+        fetch(API + '/collectors/failback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_id: targetId })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d.error) { showLog('回切失败: ' + d.error, 'err'); }
+          else if (d && d.status === 'moved') { showLog('已回切归位 ' + d.to_agent, 'ok'); }
+          else { showLog('回切未执行: ' + ((d && d.note) || JSON.stringify(d)), 'err'); }
+          loadCpool();
+        }).catch(function () { showLog('回切请求发送失败', 'err'); });
+      }
+
+      // HA 验证页轮询总闸（goPage 每次导航前调用）：两池 5s 轮询只在各自专项页存活，
+      // 离开页面立即停——避免轮询请求打到已不存在的 DOM 上空转。
+      globalThis.__haStopTimers = function () {
+        if (window.__vmpTimer) { clearInterval(window.__vmpTimer); window.__vmpTimer = null; }
+        if (window.__cpTimer) { clearInterval(window.__cpTimer); window.__cpTimer = null; }
+      };
+
+      // HA-vm：vmagent 切换验证（专项页，2026-09-27 从采集健康页拆出——
+      // 演练操作台独立成菜单"高可用验证"，采集健康页回归纯对账语义）。
+      // 复用 loadVmpool/vmpool 卡片实现（id 不变，数据口径唯一）。
+      function renderHaVmpool() {
+        if (window.__haStopTimers) window.__haStopTimers();
+        var html = '<div class="no-hscroll">';
+        html += '<div class="card"><div class="card-bd" style="padding-bottom:10px"><span style="font-size:16px;font-weight:700">⇄ vmagent 切换验证</span>'
+          + '<span style="font-size:12px;color:var(--muted);margin-left:10px">抓取目标单归属，成员失效自动接管、preferred 恢复自动回切 —— 用演练按钮验证切换链路</span></div></div>';
+        html += '<div class="card" style="margin-top:12px" id="vmpool"><div class="card-hd">vmagent 采集池 <span style="font-weight:400;font-size:11px;color:var(--muted)">成员健康（VM 数据面实测）· 目标归属 · 切换时间线（5s 自动刷新 · ⏻ 按钮可交互演练切换）</span></div>';
+        html += '<div class="card-bd" id="vmpool-body" style="text-align:center;color:var(--muted);padding:16px">加载中...</div></div>';
         html += '</div>';
-        // ③-4 HA-3 归属迁移记录（证据链：跨 L1 归属故障上收后，此处留痕供审计/排障下钻）
-        html += '<div class="card" style="margin-top:16px" id="recon-relocate"><div class="card-hd">↹ HA-3 归属迁移记录 <span style="font-weight:400;font-size:11px;color:var(--muted)">跨 L1 归属故障上收证据：Exporter 归属从失效 SAgent 迁至同租户同地域健康端（冷却期内不重复迁移）</span></div>';
-        html += '<div class="card-bd" id="recon-relocate-body" style="text-align:center;color:var(--muted);padding:16px">查询中...</div></div>';
         document.getElementById("main-content").innerHTML = html;
-        // HA-3 归属迁移记录（证据链下钻，独立轻量请求不阻塞对账主链）。
-        // A6（2026-09-27）：迁移报成功 ≠ 数据在流——并行拉 collect-stats 对迁移目标做实测，
-        // 「已迁移但目标无样本」标 amber，不再让绿色"已迁移"静默盖住没数据的事实。
+        loadVmpool();
+        window.__vmpTimer = setInterval(loadVmpool, 5000);
+      }
+
+      // HA-cpool：exporter 迁移/切换验证（专项页，与 HA-vm 同批拆出）。
+      // 迁移留痕 + 采集机池操作台：漂移（manual 全审计）· 一键回切 · 演练模拟。
+      function renderHaCpool() {
+        if (window.__haStopTimers) window.__haStopTimers();
+        var html = '<div class="no-hscroll">';
+        html += '<div class="card"><div class="card-bd" style="padding-bottom:10px"><span style="font-size:16px;font-weight:700">⇂ exporter 迁移/切换</span>'
+          + '<span style="font-size:12px;color:var(--muted);margin-left:10px">采集任务单归属 —— 漂移、回切、演练验证切换链路，迁移全程留痕</span></div></div>';
+        html += '<div class="card" style="margin-top:12px" id="recon-relocate"><div class="card-hd">↹ HA-3 归属迁移记录 <span style="font-weight:400;font-size:11px;color:var(--muted)">跨 L1 归属故障上收证据：Exporter 归属从失效 SAgent 迁至同租户同地域健康端（冷却期内不重复迁移）</span></div>';
+        html += '<div class="card-bd" id="recon-relocate-body" style="text-align:center;color:var(--muted);padding:16px">查询中...</div></div>';
+        html += '<div class="card" style="margin-top:8px" id="cpool"><div class="card-hd">⇂ exporter 采集机池 <span style="font-weight:400;font-size:11px;color:var(--muted)">采集任务单归属 · 按钮硬触发漂移（manual 全审计）· preferred 一键回切 · ⏻ 演练模拟指标异常（5s 自动刷新）</span></div>';
+        html += '<div class="card-bd" id="cpool-body" style="text-align:center;color:var(--muted);padding:16px">加载中...</div></div>';
+        html += '</div>';
+        document.getElementById("main-content").innerHTML = html;
+        loadRelocations();
+        loadCpool();
+        window.__cpTimer = setInterval(loadCpool, 5000);
+      }
+
+      // HA-3 归属迁移记录加载（全局函数，renderHaCpool 进页即拉最新）。
+      // A6（2026-09-27）：迁移报成功 ≠ 数据在流——并行拉 collect-stats 对迁移目标做实测，
+      // 「已迁移但目标无样本」标 amber，不再让绿色"已迁移"静默盖住没数据的事实。
+      globalThis.loadRelocations = function () {
         Promise.all([
           fetch(API+'/relocations').then(function(r){return r.json()}).catch(function(){return {relocations:[]}}),
           fetch(API+'/collect-stats').then(function(r){return r.json()}).catch(function(){return []})
@@ -211,7 +432,80 @@ function renderTasks() {
               }).join('')
             + '</tbody></table>'
             + '<div style="margin-top:8px;font-size:11px;color:var(--muted)">迁移记录经 config 轨接管（先新后旧防双写）+ 冷却终态保护，供审计与排障留痕。「未观测到数据」= VM 实测目标当前无样本（collect-stats 实测，非状态推断）。</div>';
+          });
+      };
+
+      // 采集健康 = 对账工作台（2026-09-22 定稿）：一屏回答"有没有问题、问题在哪、接下来点什么"。
+      // 顶部一句人话结论；三张问题卡锚到三个清单，清单行带处理动作。
+      // 存活率/采集成功率百分比卡与 IDC 分布删掉（总览页已有 Agent 状态，本页只留对账语义）；
+      // 批量操作条移至资源页（batchOp 留在 panel.js，fleet 页共用）。
+      function renderSLO() {
+        // 四值语义（P1，对齐 IA 设计稿）：healthy/running=在线 · stopped=明确维护态（人工停用，已知状态）
+        // offline/created=状态未知（心跳过期/从未心跳，未证实失败）。
+        // unknown ≠ failed：未知不进异常计数、不进待处理结论，只单独露出——避免把"可能只是网络断了"当成故障报警。
+        var vis = agents.filter(function (a) { return window.tenantVisible(a); }); // 多租户(D3)界面隔离
+        var anomaly = vis.filter(function(a){return a.status==='stopped'}); // 明确维护态（需人工恢复）
+        // 状态未知 = offline/created，外加「status=healthy 但心跳已过期/从未心跳」——与证据环①完全同口径
+        //（HEARTBEAT_TTL=120s，见 overview.js buildEvidenceChainHTML）。此前只看 status 字段，
+        // 出现过同屏"环① 6/9 在线(≤120s)"与"✅ 全部 9 个 Agent 在线"打架（A2，2026-09-27 修复）。
+        var _nowSec = Math.floor(Date.now() / 1000);
+        var _hbTtl = 120;
+        var unknownA = vis.filter(function(a){
+          if (a.status==='offline'||a.status==='created') return true;
+          if (a.status==='stopped') return false;
+          return !a.last_seen || (_nowSec - a.last_seen) > _hbTtl;
         });
+        var html = '<div class="no-hscroll">';
+        // 页头：主问题（IA 规范——每页只回答一个问题，页头副标题即主问题）
+        html += '<div class="card"><div class="card-bd" style="padding-bottom:10px"><span style="font-size:16px;font-weight:700">◫ 采集健康</span>'
+          + '<span style="font-size:12px;color:var(--muted);margin-left:10px">采得全不全、断在哪一环？</span></div></div>';
+        // ① 结论条（对账结果回来后填一句人话）+ 覆盖率条形（分母=可核对目标）+ 证据链概要（共享 buildEvidenceChainHTML，与工作台同源）
+        html += '<div class="card"><div class="card-bd" style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">';
+        html += '<div id="recon-verdict" style="font-size:14px;font-weight:600">⏳ 对账引擎计算中...</div>';
+        html += '<div id="recon-meta" style="font-size:11px;color:var(--muted);margin-left:auto"></div>';
+        html += '<div id="recon-cover" style="flex:1 1 100%;margin-top:2px"></div>';
+        html += '<div id="recon-evid" style="flex:1 1 100%;margin-top:4px"></div>';
+        html += '</div></div>';
+        // —— 2026-09-27 用户拍板：原"② 采集运维"tab（迁移留痕+两池操作台）拆出为
+        // 独立菜单"高可用验证"（ha-vm / ha-cpool），本页回归纯对账语义，不再 tab 化。——
+        // ② 三张问题卡（点击定位到清单）
+        html += '<div class="slo-grid" style="margin-top:12px">';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-stale\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-stale">⏳</div><div class="slo-label">数据断采 &gt; 10min</div></div>';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-wild\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" id="slo-wild">⏳</div><div class="slo-label">野指标（VM 有 / 应报口径无）</div></div>';
+        html += '<div class="slo-card" style="cursor:pointer" onclick="document.getElementById(\'recon-anomaly\').scrollIntoView({behavior:\'smooth\'})"><div class="slo-val" style="color:'+(anomaly.length>0?'var(--warning,#b45309)':'var(--success)')+'">'+anomaly.length+'</div><div class="slo-label">维护态 Agent'+(unknownA.length>0?' <span style="color:var(--muted);font-weight:400">· 另 '+unknownA.length+' 状态未知</span>':'')+'</div></div>';
+        html += '</div>';
+        // ③-1 断采清单
+        html += '<div class="card" style="margin-top:16px" id="recon-stale"><div class="card-hd">📡 断采目标 <span style="font-weight:400;font-size:11px;color:var(--muted)">目录声明应采 × VM 实际在报（近 10min 无数据）· 状态按承载 Agent 心跳区分失败/未知</span></div>';
+        html += '<div class="card-bd" id="recon-stale-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
+        // 修复草案（只读预览）：模板产出，不是 evidence；复核与转变更只发生在变更中心（裁决 2）
+        html += '<div class="card" style="margin-top:16px" id="recon-draft"><div class="card-hd">🩹 修复草案 <span style="font-weight:400;font-size:11px;color:var(--muted)">只读预览 · 模板建议不是 evidence · 复核与转变更只在变更中心</span></div>';
+        html += '<div class="card-bd" id="recon-draft-body" style="text-align:center;color:var(--muted);padding:14px">等对账结果...</div></div>';
+        // 对账：野指标
+        html += '<div class="card" style="margin-top:16px" id="recon-wild"><div class="card-hd">🌿 野指标 <span style="font-weight:400;font-size:11px;color:var(--muted)">VM 在报但应报口径未覆盖（目录注册 ∪ Agent 生效配置展开，前 50 条）</span><a href="javascript:void(0)" onclick="goPage(\'data-gov\')" style="font-size:11px;color:var(--primary);margin-left:10px">→ 数据治理细看</a></div>';
+        html += '<div class="card-bd" id="recon-wild-body" style="text-align:center;color:var(--muted);padding:16px">对账引擎计算中...</div></div>';
+        // ③-3 Agent 状态：维护态与未知态分开列（unknown ≠ failed）
+        html += '<div class="card" style="margin-top:16px" id="recon-anomaly"><div class="card-hd">🖥 Agent 状态 <span style="font-weight:400;font-size:11px;color:var(--muted)">维护态 '+anomaly.length+' · 状态未知 '+unknownA.length+'（心跳过期/从未心跳 ≠ 失败，可能只是网络中断）</span></div>';
+        if(vis.length===0){
+          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">暂无 Agent —— 先到 <a href="javascript:void(0)" onclick="goPage(\'resources\')" style="color:var(--primary)">接入中心</a> 完成对象接入</div>';
+        }else if(anomaly.length===0 && unknownA.length===0){
+          html += '<div class="card-bd" style="text-align:center;color:var(--muted);padding:20px">✅ 全部 '+vis.length+' 个 Agent 在线，无维护态、无状态未知</div>';
+        }else{
+          if(anomaly.length>0){
+            html += '<div class="card-bd" style="padding:0"><div style="padding:8px 16px 4px;font-size:11px;color:var(--warning,#b45309);font-weight:600">维护态（已停用，明确状态）</div><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
+            anomaly.forEach(function(a){html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge b-s">已停用</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><button class="btn btn-s btn-sm" onclick="quickStart(\''+a.id+'\')">启动</button></td></tr>'});
+            html += '</tbody></table></div>';
+          }
+          if(unknownA.length>0){
+            html += '<div class="card-bd" style="padding:0'+(anomaly.length>0?';border-top:1px solid var(--line,#eee)':'')+'"><div style="padding:8px 16px 4px;font-size:11px;color:var(--muted);font-weight:600">状态未知（未证实失败，不计入异常）</div><table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>IDC</th><th>操作</th></tr></thead><tbody>';
+            unknownA.forEach(function(a){var lbl=a.status==='created'?'从未心跳':'心跳过期';html += '<tr><td style="color:var(--primary);cursor:pointer" onclick="openDetailById(\''+a.id+'\')">'+a.id+'</td><td>'+(a.type==='proxy'?'Proxy':'Edge')+'</td><td><span class="badge" style="background:#f0f0f0;color:#666">未知 · '+lbl+'</span></td><td>'+((a.labels||{}).idc||'-')+'</td><td><a href="javascript:void(0)" onclick="openDetailById(\''+a.id+'\')" style="color:var(--primary)">查看详情</a></td></tr>'});
+            html += '</tbody></table></div>';
+          }
+        }
+        html += '</div>';
+        // 采集健康页根容器：.no-hscroll 约束本页所有表格不出横向滚动条（见 style.css）
+        html += '</div>';
+        document.getElementById("main-content").innerHTML = html;
+        if (window.__haStopTimers) window.__haStopTimers();
         // 对账结果 + 目标↔资源反查（断采行要给"打开资源"动作）
         Promise.all([
           fetch(API+'/recon').then(function(r){return r.json()}).catch(function(){return null}),
@@ -407,9 +701,10 @@ function renderTasks() {
             else if (!d.wild || d.wild.length===0) { wb.innerHTML = '✅ 无野指标'; }
             else {
               wb.style.textAlign='left';
-              wb.innerHTML = d.wild.map(function(n){return '<code style="display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;background:var(--bg2,#f5f5f5);border-radius:4px;font-size:11px">'+escHtml(n)+'</code>'}).join('')
-                + (d.summary.wild>50?'<div style="margin-top:8px;color:var(--muted);font-size:11px">…共 '+d.summary.wild+' 条</div>':'')
-                + '<div style="margin-top:10px;font-size:12px;color:var(--muted)">处理建议：目录该有而没有的 → <a href="javascript:void(0)" onclick="goPage(\'capabilities\')" style="color:var(--primary)">去能力与指标登记</a>；确认不该采的 → 检查对应 Agent 生效配置。</div>';
+              // 前 10 条就地展示（2026-09-27 内容爆炸拆解）：50 条与数据治理页切片重复，这里只给"有哪些"的样本
+              wb.innerHTML = d.wild.slice(0,10).map(function(n){return '<code style="display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;background:var(--bg2,#f5f5f5);border-radius:4px;font-size:11px">'+escHtml(n)+'</code>'}).join('')
+                + (d.summary.wild>10?'<div style="margin-top:8px;color:var(--muted);font-size:11px">…前 10 条，共 '+d.summary.wild+' 条</div>':'')
+                + '<div style="margin-top:10px;font-size:12px;color:var(--muted)">全部清单与按指标聚合视图 → <a href="javascript:void(0)" onclick="goPage(\'data-gov\')" style="color:var(--primary)">数据治理</a>；目录该有而没有的 → <a href="javascript:void(0)" onclick="goPage(\'capabilities\')" style="color:var(--primary)">去能力与指标登记</a>；确认不该采的 → 检查对应 Agent 生效配置。</div>';
             }
           }
         });
@@ -1825,6 +2120,7 @@ function mdRender(md) {
       function openDetailById(id) {
         var a = agents.find(function(x) { return x.id === id; });
         if (a) openDetail(a);
+        else toast('Agent「' + id + '」不在当前列表（可能已注销，或列表尚未刷新）', 'err');
       }
       function openDetail(agent) {
         currentDetailAgent = agent;
@@ -1838,6 +2134,9 @@ function mdRender(md) {
         document.getElementById("detail-panel").classList.remove("open");
         currentDetailAgent = null;
       }
+      // 详情面板竞态守卫：tab 快速切换时，先发出的慢请求返回不得覆盖后发出的内容
+      // （seq 每次 switchDetailTab/openDetail 递增；异步回调写入前必须通过 alive() 校验）
+      var _detailSeq = 0;
       function switchDetailTab(tab) {
         currentDetailTab = tab;
         document.querySelectorAll(".detail-tabs span").forEach(function(s) {
@@ -1845,6 +2144,9 @@ function mdRender(md) {
         });
         var a = currentDetailAgent;
         if (!a) return;
+        var seq = ++_detailSeq;
+        function alive() { return seq === _detailSeq && currentDetailTab === tab && currentDetailAgent === a; }
+        var el = document.getElementById("detail-content");
         var html = "";
         if (tab === "plugins") {
           html = '<div style="padding:8px 0">';
@@ -1921,7 +2223,7 @@ function mdRender(md) {
             h += '<details style="margin-top:12px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">查看原始配置 JSON</summary>'
               + '<pre style="font-size:11px;background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow:auto;max-height:300px;line-height:1.5;margin-top:8px">'+escHtml(t)+'</pre></details>';
             document.getElementById("detail-content").innerHTML = h;
-          }).catch(function(){ document.getElementById("detail-content").innerHTML = '<div style="color:var(--error);padding:20px">加载失败</div>'; });
+          }).catch(function(){ if (!alive()) return; document.getElementById("detail-content").innerHTML = '<div style="color:var(--error);padding:20px">加载失败</div>'; });
         } else if (tab === "metrics") {
           html = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:30px">加载指标...</div>';
           document.getElementById("detail-content").innerHTML = html;
@@ -1937,14 +2239,16 @@ function mdRender(md) {
             var out='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">';
             cards.forEach(function(c){out+='<div style="padding:20px;background:var(--bg);border-radius:8px;text-align:center"><div style="font-size:32px;font-weight:700;'+cc(c[0])+'">'+gg(c[1])+' <span style="font-size:14px;font-weight:400">'+c[2]+'</span></div><div style="font-size:12px;color:var(--muted);margin-top:6px">'+c[0]+'</div></div>';});
             out+='</div><div style="font-size:11px;color:var(--muted)">共 '+all.length+' 条指标 · <a href="'+(_siteCfg?_siteCfg.grafana_url:location.protocol+'//'+location.hostname+':3000')+'" target="_blank" style="color:var(--primary)">📊 Grafana →</a></div>';
+            if (!alive()) return;
             document.getElementById("detail-content").innerHTML=out;
-          }).catch(function(){document.getElementById("detail-content").innerHTML='<div style="text-align:center;padding:40px;color:var(--muted)"><div style="font-size:36px;margin-bottom:8px">📊</div>无法获取指标<br><a href="'+(_siteCfg?_siteCfg.grafana_url:location.protocol+'//'+location.hostname+':3000')+'" target="_blank" style="color:var(--primary);font-size:12px">Grafana →</a></div>';});
+          }).catch(function(){if (!alive()) return; document.getElementById("detail-content").innerHTML='<div style="text-align:center;padding:40px;color:var(--muted)"><div style="font-size:36px;margin-bottom:8px">📊</div>无法获取指标<br><a href="'+(_siteCfg?_siteCfg.grafana_url:location.protocol+'//'+location.hostname+':3000')+'" target="_blank" style="color:var(--primary);font-size:12px">Grafana →</a></div>';});
         } else if (tab === "log") {
           html = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:30px">加载中...</div>';
           document.getElementById("detail-content").innerHTML = html;
           fetch(API+"/agents/"+a.id+"/logs").then(function(r){return r.text()}).then(function(t) {
+            if (!alive()) return;
             document.getElementById("detail-content").innerHTML = '<div style="background:#1a1a2e;color:#c0caf5;font-family:monospace;font-size:12px;padding:14px;border-radius:6px;max-height:500px;overflow:auto;white-space:pre-wrap;line-height:1.4">'+t.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';
-          }).catch(function(){ document.getElementById("detail-content").innerHTML = '<div style="color:var(--error);padding:20px">无法获取日志</div>'; });
+          }).catch(function(){ if (!alive()) return; document.getElementById("detail-content").innerHTML = '<div style="color:var(--error);padding:20px">无法获取日志</div>'; });
         } else if (tab === "trouble") {
           // M1-⑧ 排障视图：心跳 / 成功率 / 配置同步 / 分派目标 / 最近操作
           var age = a.last_seen ? Math.round(Date.now()/1000) - a.last_seen : -1;
@@ -1952,25 +2256,30 @@ function mdRender(md) {
           var st = a.stats || {};
           var sOk = parseInt(st.success)||0, sFail = parseInt(st.fail)||0;
           var rate = (sOk+sFail)>0 ? (Math.round(sOk/(sOk+sFail)*1000)/10)+'%（成功 '+sOk+' / 失败 '+sFail+'）' : '暂无采集统计数据';
-          var cfgLine = '';
-          if (a.source === 'heartbeat') {
-            var synced = a.cfg_effective !== '' && a.cfg_effective === ('cfg-'+(a.cfg_desired||0));
-            cfgLine = '<tr><td>配置同步</td><td>期望 cfg-'+(a.cfg_desired||0)+' / 生效 '+(a.cfg_effective||'未上报')+'</td><td>'+(synced?'<span class="badge b-h">✅ 已同步</span>':'<span class="badge" style="background:#fef3c7;color:#f59e0b">⚠️ 待下发</span>')+'</td></tr>';
-          }
           document.getElementById("detail-content").innerHTML = '<div style="font-size:13px"><div style="color:var(--muted);padding:6px 0">⏳ 加载分派目标与最近操作...</div></div>';
+          // 配置同步与 config tab 同源：同走 /agents/{id}/config，同一判定公式，杜绝双数据源口径漂移
           Promise.all([
             fetch(API+'/targets').then(function(r){return r.json()}),
             fetch(API+'/recon').then(function(r){return r.json()}).catch(function(){return null}),
-            fetch(API+'/audit').then(function(r){return r.json()}).catch(function(){return []})
+            fetch(API+'/audit').then(function(r){return r.json()}).catch(function(){return []}),
+            fetch(API+'/agents/'+a.id+'/config').then(function(r){return r.json()}).catch(function(){return null})
           ]).then(function(rs){
-            var tgts = rs[0]||[], recon = rs[1], audits = rs[2]||[];
+            if (!alive()) return;
+            var tgts = rs[0]||[], recon = rs[1], audits = rs[2]||[], cfgD = rs[3];
+            var cfgLine = '';
+            if (a.source === 'heartbeat') {
+              var cfgEff = (cfgD && (cfgD.cfg_effective || '')) || '';
+              var cfgWant = cfgD ? (cfgD.version || cfgD.cfg_desired || 0) : (a.cfg_desired||0);
+              var synced = cfgEff !== '' && cfgEff === ('cfg-'+cfgWant);
+              cfgLine = '<tr><td>配置同步</td><td>期望 cfg-'+cfgWant+' / 生效 '+(cfgEff||'未上报')+'</td><td>'+(synced?'<span class="badge b-h">✅ 已同步</span>':'<span class="badge" style="background:#fef3c7;color:#f59e0b">⚠️ 待下发</span>')+'</td></tr>';
+            }
             var mine = tgts.filter(function(t){return t.agent_id===a.id});
             var staleIds = {};
             if (recon && recon.stale) recon.stale.forEach(function(t){staleIds[t.id]=true});
             var recent = audits.filter(function(e){return (e.target||'').indexOf(a.id)>=0}).slice(-5).reverse();
             var h = '<table style="font-size:12px"><thead><tr><th style="width:90px">检查项</th><th>现状</th><th style="width:130px">判定</th></tr></thead><tbody>';
             if (a.source === 'heartbeat') {
-              h += '<tr><td>心跳</td><td>最近心跳：'+ageTxt+'（间隔约定 30s，90s 判离线）</td><td>'+(age>=0&&age<=90?'<span class="badge b-h">正常</span>':(age<0?'<span class="badge b-o">未知</span>':'<span class="badge" style="background:#fee2e2;color:var(--error)">超时</span>'))+'</td></tr>';
+              h += '<tr><td>心跳</td><td>最近心跳：'+ageTxt+'（间隔约定 30s，'+HEARTBEAT_TTL_SEC+'s 判离线，与列表状态一致）</td><td>'+(age>=0&&age<=HEARTBEAT_TTL_SEC?'<span class="badge b-h">正常</span>':(age<0?'<span class="badge b-o">未知</span>':'<span class="badge" style="background:#fee2e2;color:var(--error)">超时</span>'))+'</td></tr>';
             } else {
               h += '<tr><td>容器状态</td><td>本机演示 Agent，状态由 Docker 实时探测（不经心跳）</td><td>'+(a.status==='healthy'?'<span class="badge b-h">运行中</span>':'<span class="badge" style="background:#fee2e2;color:var(--error)">'+escHtml(a.status)+'</span>')+'</td></tr>';
             }
@@ -2000,6 +2309,7 @@ function mdRender(md) {
             h += '<div style="margin-top:10px;font-size:11px;color:var(--muted)">排障提示：断采时先看「配置同步」是否待下发 → 再用目标页「测试」验证网络连通性 → 最后查看日志 tab 定位采集进程错误。</div>';
             document.getElementById("detail-content").innerHTML = '<div style="font-size:13px">'+h+'</div>';
           }).catch(function(){
+            if (!alive()) return;
             document.getElementById("detail-content").innerHTML = '<div style="font-size:13px"><table><tbody><tr><td>心跳</td><td>'+ageTxt+'</td></tr><tr><td>采集成功率</td><td>'+rate+'</td></tr></tbody></table><div style="color:var(--error);margin-top:10px">分派目标/审计加载失败</div></div>';
           });
         }

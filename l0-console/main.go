@@ -79,6 +79,7 @@ var (
 	cfgAgentHomeRoot     string // 目标机 Agent 安装根目录   AGENT_HOME_ROOT（默认 /home；实际安装到 <root>/<ssh_user>/SAgent）
 	cfgAgentConfDir      string // 本机演示 Agent 配置文件目录 AGENT_CONF_DIR（默认 ../deploy/docker/configs/sagent）
 	cfgTunnelRemotePort  int    // 反向隧道目标机侧端口      TUNNEL_REMOTE_PORT（默认 18080）
+	cfgStandbyPresetMax  int    // R0-4 单机 standby 预置上限 SA_STANDBY_PRESET_MAX（默认 8）
 )
 
 func init() {
@@ -95,6 +96,10 @@ func init() {
 	cfgAgentHomeRoot = envOr("AGENT_HOME_ROOT", "/home")
 	cfgAgentConfDir = envOr("AGENT_CONF_DIR", "../deploy/docker/configs/sagent")
 	cfgTunnelRemotePort = envIntOr("TUNNEL_REMOTE_PORT", 18080)
+	// R0-4 预置集合上限（SPEC-Agent托管目标与预热接管）：单台采集机最多预置多少个
+	// standby 目标副本。防止大目录全量预置把每台候选机都塞满配置（预置是配置副本，
+	// 不是进程副本，但配置漂移面也要有边界）。
+	cfgStandbyPresetMax = envIntOr("SA_STANDBY_PRESET_MAX", 8)
 }
 
 // envIntOr 读整数环境变量，缺失或非法时用默认值
@@ -248,6 +253,10 @@ func main() {
 	if err := catDB.InitRelocations(); err != nil {
 		log.Fatalf("init relocations table: %v", err)
 	}
+	// vmagent 池归属表（单归属接管/回切）：归属账本 + 切换事件时间线
+	if err := catDB.InitVmagentPool(); err != nil {
+		log.Fatalf("init vmagent pool tables: %v", err)
+	}
 	// 流程模板（模式模板，L2 层）：编排数据化，引擎只认原子能力
 	if tpls, err := loadFlowTemplates(defaultFlowTemplateDir); err != nil {
 		log.Printf("flow templates load warning (%s): %v", defaultFlowTemplateDir, err)
@@ -291,7 +300,14 @@ func main() {
 	registerL1TaskRoutes(mux, catDB)         // L1 任务源（架构 D5 IN3：Controller 拉取/回执，持久化 pg 任务表）
 	registerRelocateRoutes(mux, store, catDB) // HA-3 跨 L1 归属迁移（评审/执行/历史证据）
 	registerCollectorRoutes(mux, store, catDB) // R2 采集机选机（池候选 + 承载数 + 自动挑机 + 人工改选）
-	startRelocateAuto(store, catDB)           // HA-3 自动调度（RELOCATE_AUTO=1 启用，默认关）
+	registerCollectorDriftRoutes(mux, store, catDB) // SPEC-exporter采集机池 E2/E3/E4（人工漂移/回切/演练/池总览）
+	registerPluginPackageRoutes(mux)           // 插件超市包仓 API（R0-1 配套：SAgent package-cache get）
+	registerVmagentPoolRoutes(mux, catDB)     // vmagent 池（单归属接管/回切：状态/事件/注册/改派）
+	refreshSimDownSet(catDB)                  // 演练下线标记启动加载（E4）
+	startRelocateAuto(store, catDB)           // HA-3 自动调度（RELOCATE_AUTO=1 启用；2026-09-27 起默认 0，人工按钮为主）
+	startRelocateFailback(store, catDB)       // HA-3 自动回切（RELOCATE_AUTO_FAILBACK=1 启用，默认关）
+	startStandbyPresetReconciler(store, catDB) // R0-4 standby 预置保鲜（派生指纹变化才下发，常驻不依赖 RELOCATE_AUTO）
+	startVmagentPoolAuto(catDB)               // vmagent 池自动调度（VMAGENT_POOL_AUTO=1 启用，数据面判活零 docker 依赖）
 
 	// 接入流水线超时清扫：running 步骤到点自动重试（有限次）或判死。
 	// 由平台侧定时器驱动，不依赖"有人开着页面" —— 这是「不能无底线等待」的保证

@@ -1,12 +1,10 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -333,13 +331,13 @@ func autostartKindLabel(kind string) string {
 }
 
 // ===================================================================
-//  卸载侧「平台代执行」作业：一个骨架 + 每步各自的判据
+//  卸载侧「平台代执行」判据：一份共享收口 + 每步各自的判据
 // ===================================================================
 
 // offboardStepSpec 卸载侧步骤之间的差异点。
-// 骨架（语法门禁 → 流式执行 → 逐任务回报 → 汇总证据）完全相同，
+// 收口（offboardFinish：判定成败 → 写终态 → 审计）完全相同，
 // 差别只有：跑哪份 playbook、拿什么标记判成功、失败怎么归因。
-// 判据分叉，骨架不分叉 —— 避免三份几乎一样的作业函数各自漂移
+// 判据分叉，收口不分叉 —— 避免投递端与对账端各写一套判据互相漂移
 type offboardStepSpec struct {
 	Playbook  string // data/playbooks/<name>
 	Title     string // 中文名，用于摘要与审计
@@ -389,118 +387,6 @@ func outCheckLine(r ansibleRunResult, marker string) string {
 	return ""
 }
 
-// ansibleOffboardJob 卸载侧步骤的统一作业实现。
-//
-// 与安装/卸载作业同构：语法门禁（不碰目标机）→ 流式执行（逐任务回报）→
-// 终态带逐任务结果、PLAY RECAP、阶段记录与全量原文。
-// "成功"的定义更严：必须由目标机自己核对（playbook 里的断言）通过，
-// 平台不替它圆场——核对行拿不到就报出来，不假装干净。
-func ansibleOffboardJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred, sp offboardStepSpec) {
-
-	st := newStepRunState(catDB, flowID, step, cred)
-	defer st.startHeartbeat(catDB)()
-	myAttempt := st.attempt
-	hook := st.taskHook(catDB)
-
-	fail := func(summary string, detail map[string]any, ds []diag) {
-		if !jobStillCurrent(catDB, flowID, step.ID, myAttempt) {
-			return
-		}
-		if detail == nil {
-			detail = map[string]any{}
-		}
-		detail["attempt"] = myAttempt
-		// attempts 已由收口函数（offboardFinish）写入时不再追加：同一次尝试在历史里只应有一行。
-		// 早退路径（流水线/资源/playbook/临时目录/语法门禁）没经过收口，这里兜底补一条
-		if _, ok := detail["attempts"]; !ok {
-			detail["attempts"] = st.endAttempt("fail", summary)
-		}
-		detail["tasks"] = compactTasks(st.tasksSnapshot())
-		failStep(catDB, agentStore, flowID, step, "ansible "+sp.Title+"失败", summary, detail, cred, ds)
-	}
-
-	flow, _ := catDB.GetFlow(flowID)
-	if flow == nil {
-		fail("流水线不存在", nil, []diag{fatalDiag("flow_not_found", "流水线不存在", "")})
-		return
-	}
-	res, _ := catDB.GetResource(flow.ResourceID)
-	if res == nil {
-		fail("资源对象不存在", nil, []diag{fatalDiag("resource_not_found", "资源对象不存在", "检查资源台账")})
-		return
-	}
-
-	// 家目录口径与安装/卸载完全一致（/home/<ssh_user>）：装在哪就动哪，
-	// 不允许两侧各写一套推导逻辑，否则会"看着成功其实什么都没碰到"
-	destHome := destHomeFor(cred)
-	pbBody := loadSeedPlaybook(sp.Playbook, destHome)
-	if strings.TrimSpace(pbBody) == "" {
-		fail("生成 "+sp.Title+" playbook 失败：外置文件与内置副本都取不到",
-			nil, []diag{fatalDiag("playbook_missing",
-				"取不到 "+sp.Playbook+" 的内容（外置文件缺失且内置副本为空）",
-				"检查 data/playbooks/"+sp.Playbook+" 是否存在；该文件损坏时平台会回落内置副本")})
-		return
-	}
-	work, err := os.MkdirTemp("", "l0-offboard-*")
-	if err != nil {
-		fail("创建临时目录失败："+err.Error(), nil,
-			[]diag{fatalDiag("offboard_tmp_failed", "创建临时目录失败："+err.Error(), "检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer os.RemoveAll(work)
-	pbPath := filepath.Join(work, sp.Playbook)
-	if err := os.WriteFile(pbPath, []byte(pbBody), 0o644); err != nil {
-		fail("生成 playbook 失败："+err.Error(), nil,
-			[]diag{fatalDiag("playbook_render_failed", "生成 playbook 失败："+err.Error(), "")})
-		return
-	}
-	inv, cleanupInv, err := writeInventory(cred)
-	if err != nil {
-		fail("生成 ansible inventory 失败："+err.Error(), nil,
-			[]diag{fatalDiag("inventory_write_failed", "生成 ansible inventory 失败："+err.Error(),
-				"检查平台容器内 /tmp 是否可写")})
-		return
-	}
-	defer cleanupInv()
-
-	phases := []map[string]any{}
-
-	// 语法门禁：语法错误在碰目标机前就拦下（与安装/卸载同一原则）
-	st.setPhase("syntax")
-	st.flush(catDB, "平台 ansible 启动 · "+sp.Title+" playbook 语法校验中（尚未触碰目标机）")
-	synCmd := exec.Command("ansible-playbook", "-i", inv, pbPath, "--syntax-check")
-	synCmd.Env = append(os.Environ(), "ANSIBLE_HOST_KEY_CHECKING=False")
-	synOut, synErr := synCmd.CombinedOutput()
-	phases = append(phases, map[string]any{
-		"phase": "syntax", "status": map[bool]string{true: "failed", false: "ok"}[synErr != nil],
-		"output": clip(string(synOut), 1500),
-	})
-	if synErr != nil {
-		fail(sp.Title+" playbook 语法校验未过（未触碰目标机）", map[string]any{
-			"syntax_output": clip(string(synOut), 2000), "phases": phases,
-		}, []diag{fatalDiag(sp.FailCode+"_syntax", sp.Title+" playbook 语法校验未过：检查 data/playbooks/"+sp.Playbook,
-			"外置 playbook 语法错误；修正后点「↻ 重试该步」")})
-		return
-	}
-
-	// 流式执行：每个 TASK 落一次进度事件，界面实时可见
-	st.setPhase("playbook")
-	st.flush(catDB, "平台 ansible 执行中 · "+sp.Title+" 开始（逐任务回报）")
-	pbBudget := execBudget(st.spec, budgetPlaybook)
-	ctx, cancel := context.WithTimeout(context.Background(), pbBudget)
-	defer cancel()
-	pr := runPlaybookStream(ctx, inv, pbPath, hook)
-	phases = append(phases, map[string]any{
-		"phase": "playbook", "rc": pr.RC, "timed_out": pr.TimedOut,
-		"tasks": len(pr.Tasks), "recap": recapLine(pr.Recap, pr.RecapSeq),
-	})
-
-	// L0 收口：与 L1 回执对账桥共用同一份实现（SPEC-D5-IN5 B4）
-	offboardFinish(catDB, agentStore, flowID, step, cred, sp, pr, phases, destHome,
-		myAttempt, pbBudget, st.endAttempt, st.setPhase, fail, nil)
-}
-
 // offboardSpecForKind 卸载侧 kind → 步骤定义（投递端与对账端共用一份映射，
 // 避免两处各写一套"kind 对哪个 playbook / 哪条判据"，一处漏改就出现"投递 A、裁定 B"）。
 func offboardSpecForKind(kind string) *offboardStepSpec {
@@ -517,9 +403,9 @@ func offboardSpecForKind(kind string) *offboardStepSpec {
 
 // offboardFinish 卸载侧步骤的 L0 收口：判定成败 → 写步骤终态 → 审计。
 //
-// 为什么抽出来（SPEC-D5-IN5 B4）：执行端搬到 L1 后，步骤终态改由回执对账桥驱动，
-// 但"这次算不算成功"的判据只能有一套——否则切了开关结论就变了。
-// 两条路径的差别只有"尝试历史从哪来"（进程内 st.endAttempt / 桥从 running 事件承接）
+// 为什么抽出来（SPEC-D5-IN5 B4）：执行端在 L1，步骤终态由回执对账桥驱动，
+// 但"这次算不算成功"的判据只能有一套——执行端只回事实，收口裁定在 L0 落笔。
+// 收口入参的差别只有"尝试历史从哪来"（桥从 running 事件承接 attempt 历史）
 // 与"要不要补记通道元信息"（seed），故用回调 + seed 注入；
 // pbBudget 只用于超时文案，必须与执行端拿到的是同一个数。
 func offboardFinish(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
@@ -639,7 +525,7 @@ func classifyOffboardFailure(out string, sp offboardStepSpec) diag {
 }
 
 // ===================================================================
-//  三个步骤各自的作业入口与判据
+//  三个步骤各自的判据（投递端与对账端共用）
 // ===================================================================
 
 // offboardScanSpec 扫描步骤：只读，成功判据是"拿到了可解析的汇总行"。
@@ -756,19 +642,4 @@ var offboardAutostartSpec = offboardStepSpec{
 		}
 		return extra, ds
 	},
-}
-
-func ansibleScanJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred) {
-	ansibleOffboardJob(catDB, agentStore, flowID, step, cred, offboardScanSpec)
-}
-
-func ansibleUninstallPluginsJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred) {
-	ansibleOffboardJob(catDB, agentStore, flowID, step, cred, offboardPluginsSpec)
-}
-
-func ansibleCleanupAutostartJob(catDB *storepkg.DB, agentStore *AgentStore, flowID int64,
-	step storepkg.FlowStepSnapshot, cred *sshCred) {
-	ansibleOffboardJob(catDB, agentStore, flowID, step, cred, offboardAutostartSpec)
 }

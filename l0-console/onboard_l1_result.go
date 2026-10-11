@@ -137,3 +137,75 @@ func l1PhasesFromExtra(extra map[string]any) []map[string]any {
 func l1BudgetFromExtra(extra map[string]any) int {
 	return intOf(extra["budget_sec"])
 }
+
+// ===================================================================
+//  探路回执契约（SPEC-B4b D4）：执行端回阶段事实，L0 侧 probeFinish 落结论。
+//  执行端不判成败（判据只能有一份，且要读 L0 的流水线上下文/台账）。
+// ===================================================================
+
+// l1DecodeInto JSON 往返把回执里的松类型字段还原成强类型（失败保持零值，不伪造默认）。
+func l1DecodeInto(src any, dst any) {
+	if src == nil {
+		return
+	}
+	b, err := json.Marshal(src)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(b, dst)
+}
+
+// l1ProbeResultExtra 执行端出参：把阶段事实整成回执载荷（L0 侧 l1ProbeOutcomeFromExtra 的输入）。
+// 顶层平铺，界面/证据渲染与进程内同一套字段名。
+func l1ProbeResultExtra(po *probeOutcome, tasks []ansibleTask, phases []map[string]any, budget int) map[string]any {
+	return map[string]any{
+		"facts": po.Facts, "probes": po.Probes,
+		"port_diags": po.PortDiags, "env_diags": po.EnvDiags,
+		"disk_from_df": po.DFUsed,
+		"python":       po.Python, "conn_code": po.ConnCode, "conn_tool": po.ConnTool,
+		"time_skew_sec": po.TimeSkew, "glibc": po.Glibc, "console_url": po.ConsoleURL,
+		"ping_output": po.PingOutput, "ping_recap": po.PingRecap,
+		"setup_output": po.SetupOutput, "setup_recap": po.SetupRecap,
+		"df_output": po.DFOutput, "df_rc": po.DFRC, "df_recap": po.DFRecap,
+		"port_evidence": po.PortEvidence, "env_evidence": po.EnvEvidence,
+		"ability_evidence": po.AbilityEvidence, "ability_recaps": po.AbilityRecaps,
+		"auto_resolve": po.AutoResolve,
+		"tasks":        l1VerdictTasks(tasks), "phases": phases, "budget_sec": budget,
+	}
+}
+
+// l1ProbeOutcomeFromExtra L0 侧入参：把回执载荷还原成阶段事实。
+func l1ProbeOutcomeFromExtra(extra map[string]any) (*probeOutcome, []ansibleTask) {
+	po := &probeOutcome{}
+	if _, ok := extra["facts"]; ok {
+		f := &facts{}
+		l1DecodeInto(extra["facts"], f)
+		po.Facts = f
+	}
+	l1DecodeInto(extra["probes"], &po.Probes)
+	l1DecodeInto(extra["port_diags"], &po.PortDiags)
+	l1DecodeInto(extra["env_diags"], &po.EnvDiags)
+	po.DFUsed, _ = extra["disk_from_df"].(bool)
+	po.Python, _ = extra["python"].(string)
+	po.ConnCode, _ = extra["conn_code"].(string)
+	po.ConnTool, _ = extra["conn_tool"].(string)
+	po.Glibc, _ = extra["glibc"].(string)
+	po.ConsoleURL, _ = extra["console_url"].(string)
+	po.TimeSkew = int64(intOf(extra["time_skew_sec"]))
+	po.PingOutput, _ = extra["ping_output"].(string)
+	po.SetupOutput, _ = extra["setup_output"].(string)
+	po.DFOutput, _ = extra["df_output"].(string)
+	po.DFRC = intOf(extra["df_rc"])
+	l1DecodeInto(extra["ping_recap"], &po.PingRecap)
+	l1DecodeInto(extra["setup_recap"], &po.SetupRecap)
+	l1DecodeInto(extra["df_recap"], &po.DFRecap)
+	l1DecodeInto(extra["ability_recaps"], &po.AbilityRecaps)
+	l1DecodeInto(extra["port_evidence"], &po.PortEvidence)
+	l1DecodeInto(extra["env_evidence"], &po.EnvEvidence)
+	l1DecodeInto(extra["ability_evidence"], &po.AbilityEvidence)
+	l1DecodeInto(extra["auto_resolve"], &po.AutoResolve)
+
+	var tasks []ansibleTask
+	l1DecodeInto(extra["tasks"], &tasks)
+	return po, tasks
+}

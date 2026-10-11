@@ -91,17 +91,18 @@ func TestRunnerExecuteMissingCred(t *testing.T) {
 //  IN5 B4：卸载侧四步搬 L1 Runner
 // ===================================================================
 
-// TestL1ExecSupportedKindCoversOffboard 支持集是白名单：卸载侧四步 + install 在内，
-// 未迁移的 atom（升级/启停/探路）必须在外——否则会被投递到"还没实现"的执行端分支上。
+// TestL1ExecSupportedKindCoversOffboard 支持集是白名单：卸载侧四步 + install + 探路两步
+// + 升级/启停四步（B4b-4）在内，未迁移的 atom 必须在外——否则会被投递到"还没实现"的执行端分支上。
 func TestL1ExecSupportedKindCoversOffboard(t *testing.T) {
-	for _, k := range []string{"install", "uninstall", "scan_collectors", "uninstall_plugins", "cleanup_autostart"} {
+	for _, k := range []string{"install", "uninstall", "scan_collectors", "uninstall_plugins", "cleanup_autostart",
+		"probe", "probe_remote", "preflight_upgrade", "upgrade_agent", "preflight_service", "service_execute"} {
 		if !l1ExecSupportedKind(k) {
 			t.Errorf("支持集应包含 %q", k)
 		}
 	}
-	for _, k := range []string{"probe", "preflight_upgrade", "upgrade_agent", "preflight_service", "service_execute", "bogus"} {
+	for _, k := range []string{"bogus", "restart"} {
 		if l1ExecSupportedKind(k) {
-			t.Errorf("支持集不应包含 %q（尚未迁移，必须回落进程内）", k)
+			t.Errorf("支持集不应包含 %q", k)
 		}
 	}
 }
@@ -196,5 +197,90 @@ func TestL1VerdictTasksKeepsMarkers(t *testing.T) {
 	}
 	if pr2.RC != 0 || pr2.Recap["ok"] != 3 {
 		t.Fatalf("rc/recap 未正确重建：rc=%d recap=%v", pr2.RC, pr2.Recap)
+	}
+}
+
+// ===================================================================
+//  B4b-4：升级/启停四步搬 L1 Runner
+// ===================================================================
+
+// TestParseRunnerSvcReq 升级/启停载荷解析门禁：kind 必须落在支持集、playbook/title 必填
+// （渲染与归因都靠它们，缺了宁可当场拒也不猜）。
+func TestParseRunnerSvcReq(t *testing.T) {
+	if _, err := parseRunnerSvcReq(map[string]any{"playbook": "upgrade.yml"}); err == nil {
+		t.Fatal("缺 kind（或 kind 不在支持集）应报错")
+	}
+	if _, err := parseRunnerSvcReq(map[string]any{"kind": "upgrade_agent"}); err == nil {
+		t.Fatal("缺 playbook 应报错")
+	}
+	if _, err := parseRunnerSvcReq(map[string]any{"kind": "upgrade_agent", "playbook": "upgrade.yml"}); err == nil {
+		t.Fatal("缺 title 应报错")
+	}
+	req, err := parseRunnerSvcReq(map[string]any{
+		"kind": "upgrade_agent", "playbook": "upgrade.yml", "title": "升级 SAgent",
+		"ssh_host": "10.0.0.5", "ssh_port": 22, "ssh_user": "deploy", "ssh_pass": "p",
+		"dest_home": "/home/deploy", "budget_sec": 900,
+		"tag": "0.4.2-dev", "sha256": "deadbeef", "version": "0.4.2", "bak_name": "SAgent.bak-0.4.1",
+		"flow_id": 7, "step_id": "upgrade_agent", "attempt": 2,
+	})
+	if err != nil {
+		t.Fatalf("parse full svc req: %v", err)
+	}
+	if req.Kind != "upgrade_agent" || req.Tag != "0.4.2-dev" || req.BakName != "SAgent.bak-0.4.1" || req.Attempt != 2 {
+		t.Fatalf("parsed req mismatch: %+v", req)
+	}
+	if req.SHA256 != "deadbeef" || req.Version != "0.4.2" || req.DestHome != "/home/deploy" {
+		t.Fatalf("升级专用字段解析不对: %+v", req)
+	}
+}
+
+// TestRunnerSvcGateRejectsIncompletePayload 升级/启停载荷门禁：缺预算 / 缺 tag / 非法启停参数
+// 一律当场拒绝。这些校验先于环境检查（不依赖本机 ansible），纯逻辑确定可测。
+func TestRunnerSvcGateRejectsIncompletePayload(t *testing.T) {
+	// 缺预算（D5：预算由 L0 单点下发，执行端不自编时限）
+	full := map[string]any{
+		"kind": "service_execute", "playbook": "agent_service.yml", "title": "启停 SAgent",
+		"ssh_host": "10.0.0.5", "ssh_port": 22, "ssh_user": "deploy", "ssh_pass": "p",
+	}
+	status, note, res := runnerExecuteSvc(L1Task{Kind: "service_execute", Payload: full})
+	if status != "failed" || !strings.Contains(note, "budget_sec") || res != nil {
+		t.Fatalf("缺预算应拒绝：status=%v note=%q res=%v", status, note, res)
+	}
+	// 升级缺 tag（人工选定版本没随载荷——执行端读不到 L0 的 pick_version 事件）
+	up := map[string]any{
+		"kind": "upgrade_agent", "playbook": "upgrade.yml", "title": "升级 SAgent",
+		"ssh_host": "10.0.0.5", "ssh_port": 22, "ssh_user": "deploy", "ssh_pass": "p",
+		"budget_sec": 900,
+	}
+	status, note, _ = runnerExecuteSvc(L1Task{Kind: "upgrade_agent", Payload: up})
+	if status != "failed" || !strings.Contains(note, "tag") {
+		t.Fatalf("升级缺 tag 应拒绝：status=%v note=%q", status, note)
+	}
+	// 启停参数不在白名单（名字要进 shell 与 when，双端各拦一道，与 L0 svcParams.valid 同口径）
+	bad := map[string]any{
+		"kind": "service_execute", "playbook": "agent_service.yml", "title": "启停 SAgent",
+		"ssh_host": "10.0.0.5", "ssh_port": 22, "ssh_user": "deploy", "ssh_pass": "p",
+		"budget_sec": 900, "svc_action": "pause", "svc_target": "process",
+	}
+	status, note, _ = runnerExecuteSvc(L1Task{Kind: "service_execute", Payload: bad})
+	if status != "failed" || !strings.Contains(note, "启停参数非法") {
+		t.Fatalf("非法启停参数应拒绝：status=%v note=%q", status, note)
+	}
+}
+
+// TestRunnerExecuteTaskSvcDispatch 分派：升级/启停四步走 svc 路径
+// （空载荷被解析门禁拒绝，证明真进了 svc 分支而不是掉进默认拒绝）。
+func TestRunnerExecuteTaskSvcDispatch(t *testing.T) {
+	for _, k := range []string{"preflight_upgrade", "upgrade_agent", "preflight_service", "service_execute"} {
+		status, note, res := runnerExecuteTask(L1Task{Kind: k})
+		if status != "failed" || note == "" {
+			t.Fatalf("kind=%q 空载荷应拒绝：status=%v note=%q", k, status, note)
+		}
+		if res != nil {
+			t.Fatalf("kind=%q 载荷门禁拒绝路径不应有结构化回执", k)
+		}
+		if !strings.Contains(note, "非升级/启停执行类型") {
+			t.Fatalf("kind=%q 应走 svc 解析门禁（证明分派正确），实际 note=%q", k, note)
+		}
 	}
 }

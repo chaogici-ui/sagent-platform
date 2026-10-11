@@ -26,9 +26,9 @@ import (
 
 // FlowTemplate 模式模板（data/flow_templates/<mode>.yaml）
 type FlowTemplate struct {
-	ID          string           `yaml:"id" json:"id"`
-	Name        string           `yaml:"name" json:"name"`
-	Description string           `yaml:"description" json:"description"`
+	ID          string `yaml:"id" json:"id"`
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description" json:"description"`
 	// Internal 内部编排模板：不由「新建接入」向导展示为可选模式。
 	// 用于「既有接入的逆操作」这类模板（如 offboard 卸载）——它们由对应资源上的
 	// 操作按钮拉起，混进向导的模式单选里会让"新建接入"出现语义矛盾的选项
@@ -198,22 +198,6 @@ func getFlowTemplate(id string) *FlowTemplate {
 	tplMu.RLock()
 	defer tplMu.RUnlock()
 	return tplCache[id]
-}
-
-// templateInstructionFor 取某模式下某步骤的当前执行包模板。
-// 下发物实时取自模板（而非创建时固化的步骤快照）：模板改命令即时生效，
-// 存量流水线同样受益——快照字段仅作为模板缺失时的回退
-func templateInstructionFor(mode, stepID string) string {
-	t := getFlowTemplate(mode)
-	if t == nil {
-		return ""
-	}
-	for _, s := range t.Steps {
-		if s.ID == stepID {
-			return s.Instruction
-		}
-	}
-	return ""
 }
 
 // snapshots 把模板步骤转成可持久化的步骤快照

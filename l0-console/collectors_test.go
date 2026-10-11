@@ -224,3 +224,59 @@ func TestCollectorSelectionEndpoint(t *testing.T) {
 		t.Fatalf("response should report 1 rebound target, got %+v", out["rebound_targets"])
 	}
 }
+
+// TestAdvanceFlowBindsTargetToCollectorInSingleRun B2 回归（2026-10-07）：
+// 单次 advanceFlow 内，pick_proxy（pick_agent）选完采集机后，紧随其后的 collect_params 建出的
+// 采集目标必须绑到「采集机」，而不是本轮开头水合到的 flow.ResourceID。
+//
+// 历史 bug：pick_agent 只写库不回填内存 r.agentID，collect_params 读到旧值 → 目标被静默绑到
+// 资源 ID → 承载机的期望配置里没有这条目标（平台报成功，但采不到数据）。
+func TestAdvanceFlowBindsTargetToCollectorInSingleRun(t *testing.T) {
+	testOnboardCfg(t)
+	db := newCollectorTestDB(t)
+	now := time.Now().Unix()
+	seedCollector(t, db, "sagent-collector", "tenant-a", "cn-east", "cn-east", now)
+
+	// 资源是「被采对象」（业务实例），不是采集机
+	if err := db.UpsertResource(&storepkg.Resource{
+		ID: "10.20.0.15", Name: "redis-1", ResourceType: "host", Role: "business", Source: "manual",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateResourceTenant("10.20.0.15", "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	// remote 模板的关键两步：pick_proxy（选承载采集机）→ collect_params（落参数并建目标）
+	steps := []storepkg.FlowStepSnapshot{
+		{ID: "pick_proxy", Atom: "pick_agent", Title: "选承载采集机", Scope: "platform"},
+		{ID: "collect_params", Atom: "collect_params", Title: "落参数并建采集目标", Scope: "platform",
+			Requires: []string{"pick_proxy"}},
+	}
+	// 关键触发条件：flow.AgentID 初始为空 → 本轮水合会回落 flow.ResourceID（旧 bug 的温床）
+	flowID, err := db.CreateFlow(&storepkg.Flow{
+		ResourceID: "10.20.0.15", ResourceIP: "10.20.0.15", Mode: "remote", TemplateID: "remote",
+		Abilities: []string{"redis_probe"}, Status: "running",
+		ParamsJSON: `{"redis_probe":{"address":"10.20.0.15","port":"6379"}}`,
+		Steps:      steps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 一次推进跑完两步（同轮内 pick_proxy 在 collect_params 之前）
+	if err := advanceFlow(db, nil, flowID); err != nil {
+		t.Fatalf("advanceFlow: %v", err)
+	}
+
+	tgt, err := db.FindTargetByName("10.20.0.15-redis")
+	if err != nil || tgt == nil {
+		t.Fatalf("collect_params 应建出 redis 采集目标，err=%v tgt=%+v", err, tgt)
+	}
+	if tgt.AgentID != "sagent-collector" {
+		t.Fatalf("目标必须绑到采集机 sagent-collector，实际 %q（说明同一轮内读到了水合旧值）", tgt.AgentID)
+	}
+	if f, _ := db.GetFlow(flowID); f == nil || f.AgentID != "sagent-collector" {
+		t.Fatalf("flow.agent_id 应同步为采集机，实际 %+v", f)
+	}
+}

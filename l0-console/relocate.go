@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	storepkg "github.com/sagent/l0-console/store"
@@ -27,9 +28,41 @@ var (
 	relocateCoolSec = envIntOr("RELOCATE_COOLDOWN_SEC", 300)     // 同目标迁移后冷却，期间不再迁
 	relocateFailSec = envIntOr("RELOCATE_FAIL_SEC", 30)          // 采集机失效判定阈值(秒)：10s 心跳×3
 	relocateEdgeSec = envIntOr("RELOCATE_EDGE_FAIL_SEC", 120)    // 非采集机（30s 心跳）失效阈值：维持旧口径，防误判
-	relocateAutoOn  = envOr("RELOCATE_AUTO", "1") != ""          // "1" 启用自动调度（R4 默认打开；置空可关）
+	// SPEC-exporter采集机池（2026-09-27 用户拍板）：漂移默认人工按钮触发，自动调度仅演示环境显式开启
+	relocateAutoOn = envOr("RELOCATE_AUTO", "0") == "1"           // "1" 启用自动调度（默认关：人工触发为主；注意与默认值比较而非判空）
 	relocateAutoInt = envIntOr("RELOCATE_AUTO_INTERVAL_SEC", 10) // 自动调度轮询间隔
+	// 回切（E3，移植 vmagent_pool 模式）：preferred 恢复健康并稳定 BACK_STABLE_SEC 秒 + 冷却过才归位
+	relocateBackAuto    = envOr("RELOCATE_AUTO_FAILBACK", "0") == "1" // 自动回切开关（默认关：人工按钮为主）
+	relocateBackStable  = envIntOr("RELOCATE_BACK_STABLE_SEC", 120)  // preferred 健康稳定窗
+	relocateBackCoolSec = envIntOr("RELOCATE_BACK_COOLDOWN_SEC", 300)// 回切冷却（迁移/回切共用作终态保护）
 )
+
+// ---------- E4 演练模式：采集机「模拟下线」标记（零 Docker 依赖，语义=计划内停机） ----------
+// 复用 vmagent 池演练标记表（vmagent_pool_member_flags，键为成员名，两域成员名不重叠）。
+// 标记生效期间 agentHealthy 对该成员恒为 false——诊断/漂移/回切/界面全部按"异常态"处理。
+
+var (
+	simDownMu  sync.Mutex
+	simDownSet = map[string]bool{}
+)
+
+// refreshSimDownSet 从标记表刷新内存集合（轮询 + 打标时即时刷新双通道）。
+func refreshSimDownSet(catDB *storepkg.DB) {
+	set, err := catDB.ListVmagentMemberSimDown()
+	if err != nil {
+		return // 读失败维持旧集合（标记接口幂等，下轮重试）
+	}
+	simDownMu.Lock()
+	simDownSet = set
+	simDownMu.Unlock()
+}
+
+// memberSimDown 成员是否处于演练下线态。
+func memberSimDown(member string) bool {
+	simDownMu.Lock()
+	defer simDownMu.Unlock()
+	return simDownSet[member]
+}
 
 // localOnlyPlugins 本地能力插件：这类目标(exporter 随 agent 任一机本地跑)无法跨机迁移，
 // 不入迁移评审/候选（决策点5：仅远端采集可跨 L1）。
@@ -64,6 +97,10 @@ func agentRegion(a *storepkg.AgentRow) string {
 // 只给采集机提速，避免普通 SAgent 因单拍抖动被误判失效。
 func agentHealthy(a *storepkg.AgentRow) bool {
 	if a == nil || a.Source != "heartbeat" {
+		return false
+	}
+	// 演练下线（E4）：标记期间按异常处理，与健康判定同权——人点了"模拟下线"就是当它挂了
+	if memberSimDown(a.ID) {
 		return false
 	}
 	if a.LastSeen <= 0 {
@@ -136,11 +173,29 @@ func targetPool(agents []*storepkg.AgentRow, t *storepkg.TargetRow) string {
 	return t.Region
 }
 
+// ruleCandidates 目标的规则级候选集（SPEC E1）：targets.candidates_json JSON 数组；未配置返回 nil。
+func ruleCandidates(t *storepkg.TargetRow) []string {
+	if t == nil || t.CandidatesJSON == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(t.CandidatesJSON), &out); err != nil {
+		return nil // 配置损坏按未配置处理（回落池口径），不阻塞漂移
+	}
+	return out
+}
+
 // candidateList 枚举可承接的采集机：同租户 + 健康 heartbeat + 是采集机 + 同池(池已登记时)
-// + region 匹配(已登记时) + 非属主。稳定排序（确定性，便于取证复现）。
+// + region 匹配(已登记时) + 非属主 + **规则候选集内**（E1：配置了 candidates_json 的目标，
+// 漂移候选限定在规则候选集内——"配置时说好谁能采，故障时就只能漂给谁"；未配置回落池成员全集口径）。
+// 稳定排序（确定性，便于取证复现）。
 func candidateList(agents []*storepkg.AgentRow, t *storepkg.TargetRow, owner string) []string {
 	tenant := tenantOr(t.TenantID)
 	pool := targetPool(agents, t)
+	rule := ruleCandidates(t)
+	if len(rule) > 0 {
+		sort.Strings(rule)
+	}
 	out := []string{}
 	for _, a := range agents {
 		if a.ID == "" || a.ID == owner {
@@ -154,6 +209,13 @@ func candidateList(agents []*storepkg.AgentRow, t *storepkg.TargetRow, owner str
 		}
 		if t.Region != "" && agentRegion(a) != t.Region {
 			continue
+		}
+		// 规则级候选集收窄（E1）：集合非空时只放行集合内成员
+		if len(rule) > 0 {
+			i := sort.SearchStrings(rule, a.ID)
+			if i >= len(rule) || rule[i] != a.ID {
+				continue
+			}
 		}
 		out = append(out, a.ID)
 	}
@@ -274,8 +336,14 @@ func planRelocation(catDB *storepkg.DB, targetID int64) *RelocateResult {
 	return res
 }
 
-// runRelocation 执行一次目标归属迁移（先新后旧：新端起 config → 旧端停），带池边界/池内不足/冷却/审计。
+// runRelocation 自动调度入口（保持原签名，trigger_source=auto）。
 func runRelocation(store *AgentStore, catDB *storepkg.DB, targetID int64, reason string) *RelocateResult {
+	return runRelocationTo(store, catDB, targetID, "", "auto", reason)
+}
+
+// runRelocationTo 执行一次目标归属迁移（先新后旧：新端起 config → 旧端停），带池边界/池内不足/冷却/审计。
+// toAgent 非空 = 人工指定承接端（须在候选清单内，E1/E2）；triggerSource 落审计（manual/drill/auto）。
+func runRelocationTo(store *AgentStore, catDB *storepkg.DB, targetID int64, toAgent, triggerSource, reason string) *RelocateResult {
 	t, err := catDB.GetTarget(targetID)
 	if err != nil || t == nil {
 		return &RelocateResult{TargetID: targetID, Status: "rejected", Note: "target not found"}
@@ -298,10 +366,27 @@ func runRelocation(store *AgentStore, catDB *storepkg.DB, targetID int64, reason
 		return &RelocateResult{TargetID: t.ID, TargetName: t.Name, FromAgent: t.AgentID, Pool: pool, PoolHealthy: healthy,
 			Status: "rejected", Note: fmt.Sprintf("池内健康采集机不足（%d<2），不迁移，转告警", healthy), Relocatable: true}
 	}
-	to := pickCandidateFrom(agents, t, t.AgentID)
+	cands := candidateList(agents, t, t.AgentID)
+	to := toAgent
+	if to != "" {
+		// 人工指定承接端（E2）：必须在候选清单内（规则候选集与池/租户/健康校验全过），杜绝绕过
+		found := false
+		for _, c := range cands {
+			if c == to {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return &RelocateResult{TargetID: t.ID, TargetName: t.Name, FromAgent: t.AgentID, Pool: pool, PoolHealthy: healthy,
+				Status: "rejected", Note: "目标采集机不在候选清单内（须为规则候选集∩池内健康成员）", Relocatable: true, Candidates: cands}
+		}
+	} else {
+		to = pickCandidateFrom(agents, t, t.AgentID)
+	}
 	if to == "" {
 		return &RelocateResult{TargetID: t.ID, TargetName: t.Name, FromAgent: t.AgentID, Pool: pool, PoolHealthy: healthy,
-			Status: "rejected", Note: "池内无健康采集机候选", Relocatable: true}
+			Status: "rejected", Note: "池内无健康采集机候选", Relocatable: true, Candidates: cands}
 	}
 	from := t.AgentID
 	// 归属迁移（仅改 agent_id）
@@ -315,17 +400,18 @@ func runRelocation(store *AgentStore, catDB *storepkg.DB, targetID int64, reason
 	}
 	_, _ = catDB.RecordRelocation(&storepkg.RelocationRow{
 		TargetID: t.ID, TargetName: t.Name, FromAgent: from, ToAgent: to,
-		Region: t.Region, TenantID: t.TenantID, Reason: reason, Status: "moved",
+		Region: t.Region, TenantID: t.TenantID, Reason: reason, Status: "moved", TriggerSource: triggerSource,
 	})
-	addAudit("HA-3 归属迁移", t.Name, from+" → "+to+"（池 "+pool+"）", "成功")
+	addAudit("HA-3 归属迁移（"+triggerSource+"）", t.Name, from+" → "+to+"（池 "+pool+"）", "成功")
 	InvalidateReconCache()
 	return &RelocateResult{TargetID: t.ID, TargetName: t.Name, FromAgent: from, ToAgent: to, Region: t.Region,
-		Pool: pool, PoolHealthy: healthy, Status: "moved", Note: "已迁到池内健康采集机，config 轨接管", Relocatable: true}
+		Pool: pool, PoolHealthy: healthy, Status: "moved", Note: "已迁到池内健康采集机，config 轨接管", Relocatable: true, Candidates: cands}
 }
 
 // autoRelocate 自动调度（RELOCATE_AUTO=1 启用，默认关）：扫描可迁目标，
 // 属主采集机失效超过阈值且池内存在健康承接端 → 迁移。每轮一次目标、带冷却、池内不足不迁。
 func autoRelocate(store *AgentStore, catDB *storepkg.DB) {
+	refreshSimDownSet(catDB) // 演练下线标记即时生效（E4）
 	agents, err := catDB.ListAgentRows()
 	if err != nil {
 		return

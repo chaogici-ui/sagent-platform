@@ -12,9 +12,8 @@ networks:
 
 services:
   # ==================== L0 中心 ====================
-  # 架构 P2 VM-HA：victoriametrics 存储多副本（默认组合 1A 单节点复制副本 replicationFactor 语义）。
-  # 写面：vmagent 经 remoteWrite 多端点把全量写入主/副本两实例（vm-ha 各持全量副本，单存储 down 不静默丢）；
-  # 读面就近任一副本可查。双方加 dedup.minScrapeInterval=10s 合并双 vmagent 对同一序列的重叠采样点（M3 去重）。
+  # victoriametrics 单存储节点。写面：vmagent（含副本 vmagent-ha）经 remoteWrite 写入本实例；
+  # 双 vmagent 对同一序列的重叠采样点由 dedup.minScrapeInterval=10s 在存储侧合并（M3 去重）。
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.93.0
     container_name: l0-victoriametrics
@@ -34,24 +33,6 @@ services:
       - vm-storage:/storage
     restart: unless-stopped
 
-  # VM-HA M1 存储副本：与主同镜像同参数，独立存储卷，仅内网可达（读面仲裁/就近副本）。
-  victoriametrics-ha:
-    image: victoriametrics/victoria-metrics:v1.93.0
-    container_name: l0-victoriametrics-ha
-    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
-    labels:
-      sagent.layer: "l0"
-    networks:
-      - l0-net  # 不映射宿主端口：写面经 vmagent remoteWrite 内部写入；读面由 l0-console 按需可达
-    command:
-      - "--storageDataPath=/storage"
-      - "--retentionPeriod=30d"
-      - "--httpListenAddr=:8428"
-      - "--dedup.minScrapeInterval=10s"
-    volumes:
-      - vm-storage-ha:/storage
-    restart: unless-stopped
-
   # ==================== L0 状态库 PostgreSQL（架构 D1：唯一载体） ====================
   # 目录库已全面 PG，不再有 SQLite 回退：l0-console 的 CATALOG_DSN 为必填，缺配置快速失败。
   # 端口只绑回环：宿主 `go test` 需要连 PG（单测载体已改 PG），但 PG 不对外网暴露。
@@ -69,6 +50,11 @@ services:
       - POSTGRES_USER=${PG_USER:-sagent}
       - POSTGRES_PASSWORD=${PG_PASSWORD:-sagent}
       - POSTGRES_DB=${PG_DB:-sagent}
+      # 时区必须与 l0-console 一致（L0_TZ）：表里 onboard_event.created_at / onboard_flow.started_at
+      # 等列的默认值是 to_char(now(),...) 由 PG 生成，而超时清扫器用 Go 的 time.Local 解析同一列。
+      # PG 跑 UTC 时两者差 8h，running 步骤一落库就被判「已等待 8h 无响应」当场判死（2026-09-30 实测）。
+      - TZ=${L0_TZ:-Asia/Shanghai}
+      - PGTZ=${L0_TZ:-Asia/Shanghai}
     volumes:
       - pg-data:/var/lib/postgresql/data
       # 首次初始化（空数据卷）时建单测库 sagent_test：宿主 go test 用它 + 每用例独立 schema
@@ -168,22 +154,25 @@ services:
       # 架构 D1：L0 状态存储唯一载体 PostgreSQL（SQLite 回退已移除，置空则启动快速失败）。
       # 演示环境由 .env 注入；生产按实际库地址覆盖。
       - CATALOG_DSN=${CATALOG_DSN:-}
-      # 架构 D5 IN5 B3/B4 灰度开关（D8）：执行端总开关，作用于「支持集」内的 atom
-      #   inprocess（默认）= 进程内起 ansible 作业（旧路径，可随时回滚）
-      #   runner          = 投递 L1 Ansible Runner（执行面搬到 L1 后唯一路径）
-      # 支持集：install（B3）+ 卸载侧四步 scan_collectors/uninstall_plugins/cleanup_autostart/uninstall（B4）
-      # 默认 inprocess 是刻意的：开关的语义是"敢不敢切"，切错必须能一句话切回。
-      - L1_EXEC_EXECUTOR=${L1_EXEC_EXECUTOR:-inprocess}
-      # B3 期的旧开关名：仅在上面的总开关未设置时兜底，避免两处同时生效互相打架。
-      - L1_INSTALL_EXECUTOR=${L1_INSTALL_EXECUTOR:-inprocess}
+      # 架构 D5 IN5 B5 收口：执行端恒为 L1 Ansible Runner（灰度开关 L1_EXEC_EXECUTOR 已删，
+      # 进程内 ansible 作业全部移除——执行面只有 L1 一条路径，不再存在"切回进程内"）
       # 接收安装任务的 L1 执行端身份：投递端（本进程）与 Runner 侧必须一致，
-      # 不一致任务会永远停在 pending（灰度期最易踩的坑，故两端共用同一环境变量与默认值）
+      # 不一致任务会永远停在 pending（两端共用同一环境变量与默认值）
       - L1_ANSIBLE_RUNNER_ID=${L1_ANSIBLE_RUNNER_ID:-l1-ansible-runner-1}
+      # vmagent 池演示提速：回切稳定窗 30s + 冷却 60s（生产默认 120s/300s 不变，走代码默认值）
+      - VMAGENT_POOL_BACK_STABLE_SEC=${VMAGENT_POOL_BACK_STABLE_SEC:-30}
+      - VMAGENT_POOL_BACK_COOLDOWN_SEC=${VMAGENT_POOL_BACK_COOLDOWN_SEC:-60}
+      # 采集机池演示提速：迁移/回切冷却 60s（生产默认 300s 不变，走代码默认值）
+      - RELOCATE_COOLDOWN_SEC=${RELOCATE_COOLDOWN_SEC:-60}
     volumes:
       - catalog-data:/home/deploy/l0-console/data
       # 采集目标登记（file_sd）：安装作业写入这里，vmagent 同挂此目录自动热加载。
       # 用宿主机 bind mount——嵌套命名卷在 Docker Desktop 上 root 无法 chown（曾踩）
       - ./configs/scrape-sd:/home/deploy/l0-console/data/scrape-sd
+      # vmagent 池 sd 账本（单归属接管/回切）：调度器按成员分目录落笔，
+      # vmagent 池各实例（vmagent-1/2）各挂自己的子目录热加载。零 docker 依赖：调度器只写文件+PG
+      - ./configs/vmagent-sd/vmagent-1:/home/deploy/l0-console/data/vmagent-sd/vmagent-1
+      - ./configs/vmagent-sd/vmagent-2:/home/deploy/l0-console/data/vmagent-sd/vmagent-2
       # 本机 docker.sock：l0-console 借此探测 l1-* 演示 Agent 的真实容器状态。
       # 路径随宿主而变（Docker Desktop/macOS 为 ~/.docker/run/docker.sock），走 .env 的 DOCKER_SOCK
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
@@ -284,67 +273,98 @@ services:
       - SSH_DEPLOY_PASSWORD=${SSH_DEPLOY_PASSWORD:?请在 deploy/docker/.env 设置 SSH_DEPLOY_PASSWORD（vm-host 演示主机的 deploy 账号口令）}
     restart: unless-stopped
 
-  # ==================== L1 vmagent 汇聚层（架构 P2 VM-HA M2：多副本 + 多端点） ====================
-  vmagent:
+  # ==================== L1 vmagent 池（单归属 + 故障接管 + 自动回切） ====================
+  # 一个采集池（vmagent pool）+ 池内多个 vmagent 实例（vmagent-1 / vmagent-2，可扩到 N）。
+  # 各实例挂各自的 sd 目录（configs/vmagent-sd/vmagent-{1,2} → 容器内同路径
+  # /etc/vmagent-sd-pool），目标归属由 l0-console 调度器写 PG 归属表 + 对齐 sd 文件：
+  #   - 正常态：mysql-1 归实例1、mysql-2 归实例2（preferred_owner 决定）；
+  #   - 实例1 数据面失效（VM 里 replica=vmagent-1 的 up 序列停更超阈值）→ 其他实例接管；
+  #   - 实例1 恢复健康稳定 + 冷却过 → 自动回切（先加后删，无断点）。
+  # 判活与接管零 docker 依赖（只读 VM HTTP API + 写 PG/sd 文件），生产裸机 systemd 同构。
+  # fileSDCheckInterval=15s：file_sd 热加载节奏，接管端到端 ≈ 判死 + 扫描10s + 加载15s。
+  vmagent-1: &vmagent-pool
     image: victoriametrics/vmagent:v1.93.0
-    container_name: l1-vmagent
+    container_name: l1-vmagent-1
     # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
     labels:
       sagent.layer: "l1"
     networks:
       l1-net:
       l0-net:
-    # VM-HA 多端点：remoteWrite.url 并列主/副本两存储端点，全量双写（非仅 fallback）→ 单存储 down 数据仍在另一实例；
-    # 两个 vmagent 副本（本机 + vmagent-ha）对同一序列的重叠采样点由存储侧 dedup.minScrapeInterval 合并。
     command:
       - "--promscrape.config=/etc/vmagent/scrape.yml"
-      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write,http://victoriametrics-ha:8428/api/v1/write"
+      - "--promscrape.fileSDCheckInterval=15s"
+      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write"
       - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
       - "--remoteWrite.maxDiskUsagePerURL=2GB"
-      # 证据链 P0（2026-09-27）：副本身份标签——VM 里每条 series 可归属到具体 vmagent。
-      # 修复"双副本数据双写但身份蒸发"：此前 label 集完全一致，dedup 后无法回答
-      # "哪个 vmagent 拉的、坏一台后另一台是否接管"（.workbuddy/evidence/chain-evidence-20260927.md 断点1）。
-      # 代价：存储 series 数翻倍（dedup 只合并同 labelset）；所有聚合查询须先按 replica 折叠（已同步修）。
+      # 副本身份标签 = 池实例身份（调度器数据面判活按 replica=vmagent-1 查 up 新鲜度）
       - "--remoteWrite.label=replica=vmagent-1"
     volumes:
       - ./configs/vmagent:/etc/vmagent:ro
-      # 接入流水线自动登记的抓取目标（l0-console 安装作业写入，热加载）
-      # 注意：不能挂 /etc/vmagent/sd —— 父目录是 ro bind mount，建不了挂点
-      - ./configs/scrape-sd:/etc/vmagent-sd:ro
-      - vmagent-buffer:/tmp/vmagent-buffer
+      # 本实例专属 sd 目录（l0-console 调度器写入，热加载）——单归属账本
+      - ./configs/vmagent-sd/vmagent-1:/etc/vmagent-sd-pool:ro
+      - vmagent-buffer-1:/tmp/vmagent-buffer
     restart: unless-stopped
     depends_on:
       - victoriametrics
-      - victoriametrics-ha
       - vmauth
 
-  # VM-HA M2 vmagent 副本：与主同 scrape 配置，独立缓冲卷（解决共享缓冲多进程写冲突，归 4B 每副本缓冲）。
-  # 双 vmagent 各拉全量 → 各双写两存储 → 存储侧 dedup 合并，实现"单 vmagent/单存储 down 均不静默丢"。
-  vmagent-ha:
-    image: victoriametrics/vmagent:v1.93.0
-    container_name: l1-vmagent-ha
-    # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
+  vmagent-2:
+    <<: *vmagent-pool
+    container_name: l1-vmagent-2
+    command:
+      - "--promscrape.config=/etc/vmagent/scrape.yml"
+      - "--promscrape.fileSDCheckInterval=15s"
+      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write"
+      - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
+      - "--remoteWrite.maxDiskUsagePerURL=2GB"
+      - "--remoteWrite.label=replica=vmagent-2"
+    volumes:
+      - ./configs/vmagent:/etc/vmagent:ro
+      - ./configs/vmagent-sd/vmagent-2:/etc/vmagent-sd-pool:ro
+      - vmagent-buffer-2:/tmp/vmagent-buffer
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+      - vmauth
+
+  # ==================== MySQL 采集靶（vmagent 池演示目标） ====================
+  # 环境无外网、无 mysqld-exporter 镜像：用 python:3.12-slim + 纯 stdlib 探针导出器
+  # （协议级探测 mysql-1/2 的 3306：握手包取真实版本、TCP 连通取活性）。
+  # 指标名 mysql_* 与池机制解耦，生产可原位替换 mysqld-exporter，调度行为不变。
+  mysql-exp-1:
+    build:
+      context: ./mysql-exporter
+      dockerfile: Dockerfile
+    container_name: l1-mysql-exp-1
     labels:
       sagent.layer: "l1"
     networks:
-      l1-net:
-      l0-net:
-    command:
-      - "--promscrape.config=/etc/vmagent/scrape.yml"
-      - "--remoteWrite.url=http://victoriametrics:8428/api/v1/write,http://victoriametrics-ha:8428/api/v1/write"
-      - "--remoteWrite.tmpDataPath=/tmp/vmagent-buffer"
-      - "--remoteWrite.maxDiskUsagePerURL=2GB"
-      # 证据链 P0：副本身份标签（与主副本不同值，见上）
-      - "--remoteWrite.label=replica=vmagent-ha-1"
-    volumes:
-      - ./configs/vmagent:/etc/vmagent:ro
-      - ./configs/scrape-sd:/etc/vmagent-sd:ro
-      - vmagent-buffer-ha:/tmp/vmagent-buffer
+      - l1-net
+    environment:
+      - EXPORTER_PORT=9104
+      - MYSQL_HOST=mysql-1
+      - MYSQL_PORT=3306
     restart: unless-stopped
     depends_on:
-      - victoriametrics
-      - victoriametrics-ha
-      - vmauth
+      - mysql-1
+
+  mysql-exp-2:
+    build:
+      context: ./mysql-exporter
+      dockerfile: Dockerfile
+    container_name: l1-mysql-exp-2
+    labels:
+      sagent.layer: "l1"
+    networks:
+      - l1-net
+    environment:
+      - EXPORTER_PORT=9104
+      - MYSQL_HOST=mysql-2
+      - MYSQL_PORT=3306
+    restart: unless-stopped
+    depends_on:
+      - mysql-2
 
   # ==================== L1 vmauth 单端口收口（架构 D4） ====================
   # 数据面安全核心：对外只暴露 8427 一个受鉴权端口，按 path 白名单收敛各 SAgent /metrics；
@@ -484,6 +504,8 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-proxy
+    # 承载机 demo：root 起容器 → run.sh 先拉 sshd 再降权 deploy 跑 SAgent（preflight_host 探测目标）
+    user: root
     # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
     labels:
       sagent.layer: "l2"
@@ -493,6 +515,7 @@ services:
     environment:
       # 网络域收敛末环：控制通道正式经 l1-gateway 汇聚
       - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+      - SSHD_ENABLED=1
       - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-01
       - SAGENT_RESOURCE_TYPE=collector_proxy
       - SAGENT_BUSINESS_SYSTEM=order
@@ -517,6 +540,8 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-proxy-2
+    # 承载机 demo：root 起容器 → run.sh 先拉 sshd 再降权 deploy 跑 SAgent
+    user: root
     # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
     labels:
       sagent.layer: "l2"
@@ -525,6 +550,7 @@ services:
       - l1-net
     environment:
       - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+      - SSHD_ENABLED=1
       - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-02
       - SAGENT_RESOURCE_TYPE=collector_proxy
       - SAGENT_BUSINESS_SYSTEM=order
@@ -551,6 +577,8 @@ services:
       context: ../../sagent
       dockerfile: Dockerfile
     container_name: l1-sagent-proxy-3
+    # 承载机 demo：root 起容器 → run.sh 先拉 sshd 再降权 deploy 跑 SAgent
+    user: root
     # 分层标签：L0=平台层 / L1=采集组件层 / L2=被采集对象层（docker ps --filter label=sagent.layer=l1）
     labels:
       sagent.layer: "l2"
@@ -559,6 +587,7 @@ services:
       - l1-net
     environment:
       - SAGENT_L0_CONSOLE_URL=http://l1-gateway:8460
+      - SSHD_ENABLED=1
       - SAGENT_RESOURCE_ID=order.prod.mysql.proxy-03
       - SAGENT_RESOURCE_TYPE=collector_proxy
       - SAGENT_BUSINESS_SYSTEM=order
@@ -579,12 +608,11 @@ services:
 
 volumes:
   vm-storage:
-  vm-storage-ha:
   grafana-storage:
   catalog-data:
   pg-data:
-  vmagent-buffer:
-  vmagent-buffer-ha:
+  vmagent-buffer-1:
+  vmagent-buffer-2:
   sagent-1-data:
   sagent-2-data:
   sagent-proxy-data:

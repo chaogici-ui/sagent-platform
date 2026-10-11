@@ -23,6 +23,8 @@ COPY --chown=deploy:deploy data/flow_templates/ data/flow_templates/
 # SAgent 版本清单 + 平台本地版本库（安装作业的分发源，sha256 与清单互相校验）
 COPY --chown=deploy:deploy data/versions.yaml data/versions.yaml
 COPY --chown=deploy:deploy data/binaries/ data/binaries/
+# 插件超市包仓（R0-1 配套：采集机 package-cache get 的分发源，同 binaries 镜像赢语义）
+COPY --chown=deploy:deploy data/plugin-packages/ data/plugin-packages/
 # 安装 playbook（L2 层）：改安装动作不改代码
 COPY --chown=deploy:deploy data/playbooks/ data/playbooks/
 # pristine 种子副本：data 卷遮蔽镜像文件，entrypoint 每次启动用种子同步到卷（镜像赢/卷赢分离）
@@ -30,6 +32,7 @@ COPY --chown=deploy:deploy data/metrics.json data/onboard_config.json data/versi
 COPY --chown=deploy:deploy data/integrations/ /opt/l0-seed/integrations/
 COPY --chown=deploy:deploy data/flow_templates/ /opt/l0-seed/flow_templates/
 COPY --chown=deploy:deploy data/binaries/ /opt/l0-seed/binaries/
+COPY --chown=deploy:deploy data/plugin-packages/ /opt/l0-seed/plugin-packages/
 COPY --chown=deploy:deploy data/playbooks/ /opt/l0-seed/playbooks/
 COPY --chown=deploy:deploy docker-entrypoint.sh l1-hub-supervise.sh ./
 RUN chmod +x ./docker-entrypoint.sh ./l1-hub-supervise.sh

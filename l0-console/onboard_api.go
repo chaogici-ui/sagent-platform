@@ -793,9 +793,10 @@ func registerOnboardRoutes(mux *http.ServeMux, agentStore *AgentStore, catDB *st
 			writeJSON(w, map[string]interface{}{"ok": false, "error": "该 agent 无待回报的 running 流水线"})
 			return
 		}
+		// preflight_ability 不在映射内：B4b 探路下沉 L1 后，主机事实由采集机 ansible 实测
+		// （preflight_host/probe_remote），Agent 侧自报的基线检查已是死代码，不再接受
 		stepByKind := map[string]string{
 			"self_metrics":      "self_metrics",
-			"preflight_ability": "preflight_ability",
 			"config_applied":    "verify_probe",
 			"metrics_confirmed": "observe_collect",
 		}
@@ -818,10 +819,15 @@ func registerOnboardRoutes(mux *http.ServeMux, agentStore *AgentStore, catDB *st
 		if req.Kind == "metrics_confirmed" {
 			// 采集目标幂等补登记：install 因 agent_exists 被跳过时（重装/重试场景），
 			// file_sd 可能尚未写过——核对 VM 前确保登记；vmagent 热加载需一个刷新周期，
-			// 本轮 VM 可能仍无序列，Agent 下个心跳会自动重试
-			if res, _ := catDB.GetResource(f.ResourceID); res != nil && res.IP != "" {
-				_, sdErr := registerScrapeTarget(f.ResourceID, res.IP)
-				_ = sdErr // 登记失败不阻断核对：VM 有序列照样通过，没有则等下轮重试
+			// 本轮 VM 可能仍无序列，Agent 下个心跳会自动重试。
+			// remote 模式跳过：被采对象（如 Redis）无 /metrics 端点，登记其 IP 等于制造
+			// 死抓取目标（P3：L0 侧不通被采对象）；其指标本就经采集机 pool 目标入链，
+			// 无需单独 file_sd。
+			if f.Mode != "remote" {
+				if res, _ := catDB.GetResource(f.ResourceID); res != nil && res.IP != "" {
+					_, sdErr := registerScrapeTarget(catDB, f.ResourceID, res.IP)
+					_ = sdErr // 登记失败不阻断核对：VM 有序列照样通过，没有则等下轮重试
+				}
 			}
 			n := vmSeriesCount(f.ResourceID)
 			if n <= 0 {
@@ -1092,8 +1098,23 @@ func handleOnboardFlowCreate(w http.ResponseWriter, r *http.Request, agentStore 
 				addAudit("接入向导凭据与资源台账不一致", res.ID, "接入中心", note)
 			}
 			// 台账未登记端口（0）时，用向导填的值补齐——这是补空缺，不是覆盖
+			// 账号/密码同语义：台账为空 = 未登记，用向导值补齐。
+			// 只补端口不补账号，会让"向导填了凭据"变成无声失效——界面既不报冲突（台账为空不算冲突），
+			// 资源台账页又没有编辑凭据的入口，用户无路可走，只能永远停在"回落人工执行模式"。
+			credPatched := false
 			if res.SSHPort <= 0 && req.SSHPort > 0 {
 				res.SSHPort = req.SSHPort
+				credPatched = true
+			}
+			if strings.TrimSpace(res.SSHUser) == "" && strings.TrimSpace(req.SSHUser) != "" {
+				res.SSHUser = strings.TrimSpace(req.SSHUser)
+				credPatched = true
+			}
+			if res.SSHPassword == "" && req.SSHPassword != "" {
+				res.SSHPassword = req.SSHPassword
+				credPatched = true
+			}
+			if credPatched {
 				if err := catDB.UpsertResource(res); err != nil {
 					writeJSON(w, map[string]interface{}{"error": err.Error()})
 					return
@@ -1476,9 +1497,12 @@ func autoReportStep(catDB *storepkg.DB, agentStore *AgentStore, flowID int64, st
 // 采集入库的独立证据——不信 Agent 自报，observe_collect 验收以这里为准。
 // 证据链 P0（2026-09-27）：vmagent 双副本带 replica 标签后同一序列返回两行——
 // 计数前按 replica 折叠（去掉 replica 维度去重），保持"活跃序列数"语义。
+// 双口径（B4b remote 采集）：边缘资源序列带 resource_id；remote 采集序列经
+// 采集机 pool relabel 后 resource_id 被覆写为采集机 display_name，原值落在
+// remote_resource_id——两种口径都查，合并计数。
 func vmSeriesCount(resourceID string) int {
 	client := &http.Client{Timeout: 3 * time.Second}
-	q := url.QueryEscape(`{resource_id="` + resourceID + `"}`)
+	q := url.QueryEscape(`{resource_id="` + resourceID + `"} or {remote_resource_id="` + resourceID + `"}`)
 	resp, err := client.Get(vmBase() + "/api/v1/query?query=" + q)
 	if err != nil {
 		return 0
