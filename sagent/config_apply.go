@@ -231,6 +231,8 @@ func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage
 	// 但不启动采集任务（预热接管的配置副本；单归属不变，standby 不是进程副本）。
 	var mysqlTargets []config.MySQLTarget
 	var redisTargets []config.RedisTarget
+	var kafkaTargets []config.KafkaTarget
+	var portTargets []builtin.PortTarget
 	for _, t := range doc.Targets {
 		state := t.DesiredState
 		if state == "" {
@@ -305,6 +307,66 @@ func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage
 				Address: addr, Port: port, Password: pj.Password, Mode: pj.Mode, Interval: pj.Interval,
 				ResourceID: t.ResourceID, DesiredState: state,
 			})
+		case constants.PluginNameKafkaExporter:
+			// 托管目标解析：平台 params 是 address/port（params.yaml 声明），拼成 KafkaTarget。
+			// address 允许填 host:port 或单独 host；port 缺省 9092（由内置 KafkaTargetHostPort 兜底）。
+			var pj struct {
+				Address  string `json:"address"`
+				Port     string `json:"port"`
+				Mode     string `json:"mode"`
+				Interval string `json:"interval"`
+			}
+			if t.ParamsJSON != "" {
+				_ = json.Unmarshal([]byte(t.ParamsJSON), &pj)
+			}
+			addr := pj.Address
+			if addr == "" {
+				addr = t.Address
+			}
+			port := pj.Port
+			if port == "" {
+				port = "9092"
+			}
+			if addr == "" || t.ResourceID == "" {
+				return nil, fmt.Errorf("managed kafka_exporter target %q: address 与 resource_id 均必填", targetName(t))
+			}
+			if state != "active" && state != "standby" {
+				return nil, fmt.Errorf("managed kafka_exporter target %q: 非法 desired_state %q（仅 active/standby）", targetName(t), state)
+			}
+			kafkaTargets = append(kafkaTargets, config.KafkaTarget{
+				Address: addr, Port: port, Mode: pj.Mode, Interval: pj.Interval,
+				ResourceID: t.ResourceID, DesiredState: state,
+			})
+		case constants.PluginNameHTTPResponse:
+			// http_response 托管目标：address 是完整 URL（SAgent 内置探测，无 exporter 二进制）。
+			// 指标走 port_check_up / port_check_latency_seconds，注入 resource_id / remote_resource_id
+			// 标签——remote 采集 observe_collect 在 VM 里按这些标签核验序列。
+			var pj struct {
+				Address  string `json:"address"`
+				Port     string `json:"port"`
+				Interval string `json:"interval"`
+			}
+			if t.ParamsJSON != "" {
+				_ = json.Unmarshal([]byte(t.ParamsJSON), &pj)
+			}
+			addr := pj.Address
+			if addr == "" {
+				addr = t.Address
+			}
+			if addr == "" || t.ResourceID == "" {
+				return nil, fmt.Errorf("managed http_response target %q: address 与 resource_id 均必填", targetName(t))
+			}
+			if state != "active" && state != "standby" {
+				return nil, fmt.Errorf("managed http_response target %q: 非法 desired_state %q（仅 active/standby）", targetName(t), state)
+			}
+			if state == "active" {
+				portTargets = append(portTargets, builtin.PortTarget{
+					Name: targetName(t), Type: "http", Address: addr, Timeout: 5 * time.Second,
+					Labels: map[string]string{
+						"resource_id": t.ResourceID, "remote_resource_id": t.ResourceID, "resource_type": "http",
+					},
+				})
+			}
 		default:
 			if t.Plugin != "" {
 				app.logWarn("托管目标 %q 的插件类型 %q 本版不支持，已跳过（不影响其他目标）", targetName(t), t.Plugin)
@@ -341,6 +403,26 @@ func (app *App) applyPlatformConfig(ctx context.Context, content json.RawMessage
 			return nil, err
 		}
 		rollbacks = append(rollbacks, rpRollback)
+	}
+	if app.kafkaRuntime != nil {
+		kfRollback, err := app.kafkaRuntime.Apply(ctx, kafkaTargets)
+		if err != nil {
+			for i := len(rollbacks) - 1; i >= 0; i-- {
+				_ = rollbacks[i]()
+			}
+			return nil, err
+		}
+		rollbacks = append(rollbacks, kfRollback)
+	}
+	if app.portRuntime != nil {
+		ptRollback, err := app.portRuntime.Apply(ctx, portTargets)
+		if err != nil {
+			for i := len(rollbacks) - 1; i >= 0; i-- {
+				_ = rollbacks[i]()
+			}
+			return nil, err
+		}
+		rollbacks = append(rollbacks, ptRollback)
 	}
 	return func() error {
 		var join []error

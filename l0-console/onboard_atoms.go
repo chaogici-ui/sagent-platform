@@ -230,13 +230,19 @@ func advanceFlow(catDB *storepkg.DB, agentStore *AgentStore, flowID int64) error
 				"atom":  step.Atom,
 				"hint":  step.Hint,
 			}
-			// 沿用已有的运行期元数据（超时重试后重新下发时，attempt 计数与
-			// 超时基准必须延续，不能被重置成"第一次尝试"）
-			if pr, ok := run.stepProgress[step.ID]; ok && pr != nil {
-				detail["progress"] = pr
-			}
-			if at, ok := run.stepAttempts[step.ID]; ok && at != nil {
-				detail["attempts"] = at
+			// 沿用已有的运行期元数据（超时自动重试后重新下发时，attempt 计数与
+			// 超时基准必须延续，不能被重置成"第一次尝试"）。
+			// 仅限「前态 running」的自动重试续跑；手动重试（前态被人工重置为 pending）
+			// 必须全新 attempt——否则重试后 running 事件沿用旧 attempt 的过期
+			// last_activity_at，下一轮推进/超时监视器会把它秒判为超时失败（实测踩坑：
+			// 手动重试后 3s 内步骤被 fail）。
+			if cur == stRunning {
+				if pr, ok := run.stepProgress[step.ID]; ok && pr != nil {
+					detail["progress"] = pr
+				}
+				if at, ok := run.stepAttempts[step.ID]; ok && at != nil {
+					detail["attempts"] = at
+				}
 			}
 			_ = appendStepEvent(catDB, flowID, step, stRunning,
 				"已下发，等待 "+scopeLabel(step.Scope)+" 回报", detailJSON(detail), 0)

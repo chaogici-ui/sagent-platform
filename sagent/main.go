@@ -37,6 +37,8 @@ type App struct {
 	hostRuntime *hostRuntime
 	mysqlRuntime *mysqlProbeRuntime // R0-1：mysql_probe 托管目标运行时（平台 targets 热更）
 	redisRuntime *redisProbeRuntime // redis_probe 托管目标运行时（第三方 redis_exporter 编排）
+	kafkaRuntime *kafkaProbeRuntime // kafka_exporter 托管目标运行时（第三方 kafka_exporter 编排）
+	portRuntime  *portCheckerRuntime // http_response/port_checker 托管目标运行时（内置探测）
 	ctl         *control.Client // OBS-1：控制通道，其通信指标经 server./metrics 暴露
 }
 
@@ -167,6 +169,16 @@ func (app *App) observedTargetsSnapshot() map[string]map[string]any {
 			out[k] = v
 		}
 	}
+	if app.kafkaRuntime != nil {
+		for k, v := range app.kafkaRuntime.ObservedTargets() {
+			out[k] = v
+		}
+	}
+	if app.portRuntime != nil {
+		for k, v := range app.portRuntime.ObservedTargets() {
+			out[k] = v
+		}
+	}
 	if len(out) == 0 {
 		return nil
 	}
@@ -261,6 +273,18 @@ func (app *App) initPlugins() {
 		}
 	}
 
+	// ---- subprocess: kafka_exporter ----
+	// 与 redis_probe 同构：第三方 kafka_exporter 负责采集（每目标一进程），SAgent 只做托管目标编排。
+	app.kafkaRuntime = newKafkaProbeRuntime(cfg, app.metricsCh, app.pipeline, app.log)
+	app.pluginMgr.Register(app.kafkaRuntime)
+	if cfg.Plugins.KafkaExporter.Enabled {
+		if err := app.kafkaRuntime.StartStatic(); err != nil {
+			app.log.Warn("Failed to start %s: %v", constants.PluginNameKafkaExporter, err)
+		} else {
+			app.log.Info("Plugin %s started (%d targets, static bootstrap)", constants.PluginNameKafkaExporter, len(cfg.Plugins.KafkaExporter.Targets))
+		}
+	}
+
 	// ---- exec: custom_scripts ----
 	if cfg.Plugins.CustomScripts.Enabled {
 		e := builtin.NewExecScripts(cfg.Plugins.CustomScripts)
@@ -273,19 +297,17 @@ func (app *App) initPlugins() {
 		}
 	}
 
-	// ---- builtin: port_checker ----
+	// ---- builtin: port_checker / http_response ----
+	// 统一走托管目标运行时——平台 targets 下发后以平台为期望源（静态 yaml 只作引导）。
+	// 探测是内置能力，无 exporter 二进制；http_response 目标经 config_apply 转 type=http。
+	app.portRuntime = newPortCheckerRuntime(cfg, app.metricsCh, app.pipeline, app.log)
+	app.pluginMgr.Register(app.portRuntime)
 	if cfg.Plugins.PortChecker.Enabled {
-		targets := make([]builtin.PortTarget, len(cfg.Plugins.PortChecker.Targets))
-		for i, t := range cfg.Plugins.PortChecker.Targets {
-			targets[i] = builtin.PortTarget{Name: t.Name, Type: t.Type, Address: t.Address, Replicas: t.Replicas, Timeout: t.Timeout, Labels: t.Labels}
+		if err := app.portRuntime.StartStatic(); err != nil {
+			app.log.Warn("Failed to start %s: %v", constants.PluginNamePortChecker, err)
+		} else {
+			app.log.Info("Plugin %s started (%d targets, static bootstrap)", constants.PluginNamePortChecker, len(cfg.Plugins.PortChecker.Targets))
 		}
-		interval := cfg.Plugins.PortChecker.Interval
-		if interval == 0 {
-			interval = constants.DefaultPortCheckInterval
-		}
-		pc := builtin.NewPortChecker(targets, interval)
-		pc.Start(app.metricsCh)
-		app.log.Info("Plugin %s started (%d targets)", constants.PluginNamePortChecker, len(targets))
 	}
 
 	// ---- scrape: prometheus_scrape ----

@@ -66,6 +66,7 @@ type PluginsConfig struct {
 	LogMetrics       LogMetricsConfig    `yaml:"log_metrics"` // 日志转指标（原 log_collector，按产出物正名）
 	MySQLProbe       MySQLProbeConfig    `yaml:"mysql_probe"`
 	RedisProbe       RedisProbeConfig    `yaml:"redis_probe"`
+	KafkaExporter    KafkaExporterConfig `yaml:"kafka_exporter"`
 	CustomScripts    CustomScriptsConfig `yaml:"custom_scripts"`
 	PortChecker      PortCheckerCfg      `yaml:"port_checker"`
 	PrometheusScrape PrometheusScrapeCfg `yaml:"prometheus_scrape"`
@@ -128,6 +129,27 @@ type RedisTarget struct {
 
 // IsStandby 目标是否为 standby 预置态（空值按 active）
 func (t RedisTarget) IsStandby() bool { return t.DesiredState == "standby" }
+
+// KafkaExporterConfig Kafka 采集配置
+type KafkaExporterConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	ExporterBin string        `yaml:"exporter_bin"` // kafka_exporter 二进制路径
+	Targets     []KafkaTarget `yaml:"targets"`
+}
+
+// KafkaTarget 单个 Kafka 目标（一个 broker 集群 = 一个 kafka_exporter 子进程）
+type KafkaTarget struct {
+	Address    string `yaml:"address"`  // 被采 Kafka broker（从采集机可达的 host:port 或单独 address）
+	Port       string `yaml:"port"`     // 端口，默认 9092
+	Mode       string `yaml:"mode"`     // single / cluster（透传给 exporter 的形态提示）
+	Interval   string `yaml:"interval"` // 采集频率（信息字段，实际抓取节奏由 SAgent 侧统一控制）
+	ResourceID string `yaml:"resource_id"`
+	// DesiredState 平台期望态（R0-2 standby 预置）：语义同 MySQLTarget。
+	DesiredState string `yaml:"desired_state"`
+}
+
+// IsStandby 目标是否为 standby 预置态（空值按 active）
+func (t KafkaTarget) IsStandby() bool { return t.DesiredState == "standby" }
 
 // CustomScriptsConfig 自定义脚本采集配置
 type CustomScriptsConfig struct {
@@ -237,6 +259,9 @@ func (c *Config) EnabledPluginNames() []string {
 	}
 	if p.RedisProbe.Enabled {
 		names = append(names, constants.PluginNameRedisProbe)
+	}
+	if p.KafkaExporter.Enabled {
+		names = append(names, constants.PluginNameKafkaExporter)
 	}
 	if p.CustomScripts.Enabled {
 		names = append(names, constants.PluginNameCustomScripts)

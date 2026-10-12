@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -732,6 +733,24 @@ func abilityProbeChecks(all []*Ability, selected []string, params map[string]map
 	return out
 }
 
+// normURLHost 兼容 URL 形态的地址（http_response 等插件把完整 URL 填进 address，
+// 实测踩坑：tcp 检查把 "http://10.1.207.156" 整体当主机名去 wait_for，DNS 解析必然超时）。
+// URL 自带端口时优先级高于单独填写的 port 字段（URL 是更具体的声明）；非 URL 原样返回。
+func normURLHost(host, port string) (string, string) {
+	if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
+		return host, port
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Hostname() == "" {
+		// 解析异常（如漏写主机名）：剥掉 scheme 兜底，不让 "http://" 残留进 hostname
+		return strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://"), port
+	}
+	if p := u.Port(); p != "" {
+		port = p
+	}
+	return u.Hostname(), port
+}
+
 // tcpTargetOf 从参数里取目标地址与端口：优先 address/host；address 里自带 :端口 时按端口用
 func tcpTargetOf(vals map[string]string) (string, string) {
 	host := firstNonEmpty(vals["address"], vals["host"], vals["endpoint"])
@@ -739,6 +758,7 @@ func tcpTargetOf(vals map[string]string) (string, string) {
 	if host == "" {
 		return "", ""
 	}
+	host, port = normURLHost(host, port) // URL 形态先归一（scheme / URL 自带端口优先）
 	if i := strings.LastIndex(host, ":"); i > 0 {
 		if tail := host[i+1:]; tail != "" && strings.Trim(tail, "0123456789") == "" {
 			if port == "" {
@@ -750,8 +770,12 @@ func tcpTargetOf(vals map[string]string) (string, string) {
 	return strings.Trim(host, "[]"), port
 }
 
-// splitProbeTarget 把检查项里的「地址:端口」拆回来（IPv6 字面量按最后一个冒号切）
+// splitProbeTarget 把检查项里的「地址:端口」拆回来（IPv6 字面量按最后一个冒号切）。
+// 与 tcpTargetOf 同口径归一 URL 形态——检查项 target 可能直接来自用户填的完整 URL。
 func splitProbeTarget(t string) (string, string) {
+	if strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") {
+		return normURLHost(t, "")
+	}
 	if i := strings.LastIndex(t, ":"); i > 0 {
 		return strings.Trim(t[:i], "[]"), t[i+1:]
 	}

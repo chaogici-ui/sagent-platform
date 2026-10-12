@@ -43,8 +43,9 @@ import (
 
 // 插件包名映射：插件 → L0 插件超市中的包名
 var pluginPackageNames = map[string]string{
-	constants.PluginNameMySQLProbe: "mysql-exporter",
-	constants.PluginNameRedisProbe: "redis-exporter",
+	constants.PluginNameMySQLProbe:    "mysql-exporter",
+	constants.PluginNameRedisProbe:    "redis-exporter",
+	constants.PluginNameKafkaExporter: "kafka-exporter",
 }
 
 type mysqlProbeRuntime struct {

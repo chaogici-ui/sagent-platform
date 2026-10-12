@@ -33,6 +33,7 @@ const (
 	DefaultVectorBin      = "plugins/vector/bin/vector"
 	DefaultMysqlExportBin = "plugins/mysql_exporter/mysqld_exporter"
 	DefaultRedisExportBin = "plugins/redis_exporter/redis_exporter"
+	DefaultKafkaExportBin = "plugins/kafka_exporter/kafka_exporter"
 	DefaultVectorConfDir  = "conf/plugins/vector"
 )
 
@@ -79,6 +80,8 @@ const (
 	PluginNameLogMetrics    = "log_metrics"    // 日志转指标（当前实现；真日志采集 log_collector 规划中，届时另立插件）
 	PluginNameMySQLProbe    = "mysql_probe"
 	PluginNameRedisProbe    = "redis_probe"
+	PluginNameKafkaExporter = "kafka_exporter"
+	PluginNameHTTPResponse  = "http_response"
 	PluginNameCustomScripts = "custom_scripts"
 	PluginNamePortChecker   = "port_checker"
 	PluginNameScrape        = "prometheus_scrape"

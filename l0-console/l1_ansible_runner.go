@@ -33,6 +33,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -976,6 +977,18 @@ func redisReadLine(br *bufio.Reader) string {
 // 故 Redis 必须走 AUTH+PING 实际握手，只有真的拿到 +PONG 才算通过。
 // 返回的 map 是**原始事实**，判定由 L0 落笔；note 是人话摘要（回执说明用）。
 func probeRemoteTarget(plugin, addr, port, pass string, budget time.Duration) (map[string]any, string) {
+	// 兼容 URL 形态的 address（http_response 等插件把完整 URL 当 address 填）：
+	// 从 URL 解析出 host:port 再探测——否则会把 "http://10.1.207.156:8080" 整体当主机名去 lookup
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		if u, err := url.Parse(addr); err == nil {
+			if h := u.Hostname(); h != "" {
+				addr = h
+				if p := u.Port(); p != "" {
+					port = p
+				}
+			}
+		}
+	}
 	host := net.JoinHostPort(addr, port)
 	res := map[string]any{
 		"plugin": plugin, "address": addr, "port": port, "target": host,

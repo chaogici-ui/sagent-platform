@@ -35,6 +35,8 @@ func sectionOf(plugin string) string {
 		return "custom_scripts"
 	case "log_metrics":
 		return "log_metrics"
+	case "kafka_exporter":
+		return "kafka_exporter"
 	case "port_checker", "http_response":
 		return "port_checker"
 	default:
@@ -58,6 +60,7 @@ func renderAgentConfigSection(catDB *storepkg.DB, agentID string) map[string]any
 	scriptTargets := []map[string]any{}
 	portTargets := []map[string]any{}
 	scrapeTargets := []map[string]any{}
+	kafkaTargets := []map[string]any{}
 	logCfg := map[string]any{}
 
 	for _, t := range targets {
@@ -93,6 +96,14 @@ func renderAgentConfigSection(catDB *storepkg.DB, agentID string) map[string]any
 				"metric_prefix": firstNonEmpty(p["metric_prefix"], "log_"),
 				"level_field":   firstNonEmpty(p["level_field"], "level"),
 			}
+		case "kafka_exporter":
+			// kafka 托管目标：SAgent 侧每目标起一个 kafka_exporter 子进程
+			// （插件包从 L0 插件超市下载），address 允许填 host:port 或单独 host
+			kafkaTargets = append(kafkaTargets, map[string]any{
+				"address":     firstNonEmpty(p["address"], t.Address),
+				"port":        firstNonEmpty(p["port"], defaultExporterPort(t.Plugin)),
+				"resource_id": firstNonEmpty(t.ResourceID, t.Name),
+			})
 		case "port_checker":
 			typ := "tcp"
 			if t.Plugin == "http_response" {
@@ -141,6 +152,9 @@ func renderAgentConfigSection(catDB *storepkg.DB, agentID string) map[string]any
 	}
 	if len(scrapeTargets) > 0 {
 		plugins["prometheus_scrape"] = map[string]any{"enabled": true, "targets": scrapeTargets}
+	}
+	if len(kafkaTargets) > 0 {
+		plugins["kafka_exporter"] = map[string]any{"enabled": true, "targets": kafkaTargets}
 	}
 	if len(logCfg) > 0 {
 		plugins["log_metrics"] = logCfg

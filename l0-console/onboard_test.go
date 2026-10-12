@@ -100,6 +100,36 @@ func seedHumanPick(t *testing.T, db *storepkg.DB, flowID int64, tag string) {
 	}
 }
 
+// ---------- 0. tcp 检查目标 URL 归一（http_response 填完整 URL 的回归） ----------
+
+func TestTcpTargetOfNormalizesURLAddress(t *testing.T) {
+	// http_response 等插件把完整 URL 填进 address（实测踩坑：tcp 检查把
+	// "http://10.1.207.156" 整体当主机名去 wait_for → DNS 必然超时）
+	h, p := tcpTargetOf(map[string]string{"address": "http://10.1.207.156:8080", "port": "8080"})
+	if h != "10.1.207.156" || p != "8080" {
+		t.Fatalf("URL 形态 address: got host=%q port=%q, want 10.1.207.156/8080", h, p)
+	}
+	// URL 自带端口优先于单独填写的 port（URL 是更具体的声明）
+	h, p = tcpTargetOf(map[string]string{"address": "https://kafka.example.com:9092", "port": "9093"})
+	if h != "kafka.example.com" || p != "9092" {
+		t.Fatalf("URL 端口优先: got host=%q port=%q, want kafka.example.com/9092", h, p)
+	}
+	// 非 URL 形态原样（含 address 自带 :port）
+	h, p = tcpTargetOf(map[string]string{"address": "10.1.207.156", "port": "3306"})
+	if h != "10.1.207.156" || p != "3306" {
+		t.Fatalf("普通 address: got host=%q port=%q", h, p)
+	}
+	h, p = tcpTargetOf(map[string]string{"address": "10.1.207.156:3306"})
+	if h != "10.1.207.156" || p != "3306" {
+		t.Fatalf("address 自带端口: got host=%q port=%q", h, p)
+	}
+	// 检查项 target 若直接是完整 URL，splitProbeTarget 同样归一（wait_for 拿干净 host:port）
+	sh, sp := splitProbeTarget("http://10.1.207.156:8080")
+	if sh != "10.1.207.156" || sp != "8080" {
+		t.Fatalf("splitProbeTarget URL: got host=%q port=%q", sh, sp)
+	}
+}
+
 // ---------- 1. when 白名单求值器 ----------
 
 func TestEvalWhenWhitelist(t *testing.T) {
