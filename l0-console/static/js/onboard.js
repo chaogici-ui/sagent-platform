@@ -500,6 +500,24 @@ function renderOnboardCenter() {
     }
     html += '</div></div>';
     el.innerHTML = html;
+    // 列表自动刷新（2026-10-12 常驻菜单页）：有在跑/卡住/被阻断的流水线时 10s 轻轮询，
+    // 全部终态后自然停手（hasLive=false 不再重渲染）。三处守卫避免盖掉详情/后台空转：
+    //   ① currentPage 不是本页 → 已切走，不刷；
+    //   ② overlay-body 存在 → 详情弹层打开中，刷新会把详情盖掉（openOnboardFlow 用 renderOverlay 覆盖 main-content）；
+    //   ③ 二次校验（fetch 回程期间用户可能切走/打开详情）。
+    window.__obFlowListTimer = window.__obFlowListTimer || setInterval(function () {
+      if (currentPage !== 'onboard-center') return;
+      if (document.getElementById('overlay-body')) return;
+      fetch(API + '/onboard/flows').then(function (r) { return r.json(); }).then(function (d) {
+        var flows = (d && d.flows) || [];
+        var hasLive = flows.some(function (f) {
+          return f.status === 'running' || f.status === 'stalled' || f.status === 'blocked';
+        });
+        if (!hasLive) return;
+        if (currentPage !== 'onboard-center' || document.getElementById('overlay-body')) return;
+        renderOnboardCenter();
+      }).catch(function () {});
+    }, 10000);
   }).catch(function (e) {
     el.innerHTML = '<div class="card"><div class="card-bd"><div class="ob-empty">接入中心加载失败：' + obEscape(e && e.message || e) + '</div></div></div>';
   });
@@ -1066,7 +1084,7 @@ function openOnboardFlow(id) {
       : Promise.resolve(null);
     return pre.then(function (ab) {
       if (ab && ab.abilities) OB_ABILITIES = ab.abilities;
-      renderOverlay(obFlowTitle(f, id), function () { return obFlowBody(d); }, true, renderOnboardCenter);
+      renderOverlay(obFlowTitle(f, id), function () { return obFlowBody(d); }, true);
       // 打上流水线印记并开始自动刷新：轮询只认这个印记，
       // 弹层被关掉或人换到别的页面（弹层还在、印记却不是它）都会自行收工
       var body = document.getElementById('overlay-body');
